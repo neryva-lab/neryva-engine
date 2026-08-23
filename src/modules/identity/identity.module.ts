@@ -24,6 +24,7 @@ import { SocialAccountService } from './social/social-account.service';
 import { SocialController } from './social/social.controller';
 import { SocialLoginService } from './social/social-login.service';
 import { socialProviders } from './social/social.config';
+import { envelopeEncrypt } from '../../common/infra/crypto/envelope';
 import { oauthClients } from './schema';
 
 /**
@@ -103,6 +104,7 @@ export class IdentityBoot implements OnModuleInit {
         redirectUris: [`${base}/platform/auth/callback`, 'http://localhost:5173/platform/auth/callback'],
         scopes: ['openid', 'email', 'profile', 'offline_access'],
         grantTypes: ['authorization_code', 'refresh_token'],
+        clientSecret: null as string | null,
       },
       {
         clientId: 'neryva-website',
@@ -111,6 +113,7 @@ export class IdentityBoot implements OnModuleInit {
         redirectUris: [`${base}/auth/callback`],
         scopes: ['openid', 'email', 'profile'],
         grantTypes: ['authorization_code'],
+        clientSecret: null as string | null,
       },
       {
         // ADR-006 D2 connection contract #1: the satellite's service identity.
@@ -120,9 +123,13 @@ export class IdentityBoot implements OnModuleInit {
         redirectUris: [] as string[],
         scopes: ['engine:ingest', 'engine:keys:validate', 'engine:config:pull', 'engine:heartbeat', 'engine:revocations'],
         grantTypes: ['client_credentials'],
+        // Deploy-injected; envelope-encrypted below. Absent ⇒ the row keeps
+        // its existing envelope (never clobbered to unusable).
+        clientSecret: env.IDENTITY_AGENT_RUNTIME_SECRET ?? null,
       },
     ];
     for (const seed of seeds) {
+      const secretEnvelope = seed.clientSecret ? envelopeEncrypt(seed.clientSecret) : null;
       await this.db.root
         .insert(oauthClients)
         .values({
@@ -132,10 +139,17 @@ export class IdentityBoot implements OnModuleInit {
           redirectUris: seed.redirectUris,
           scopes: seed.scopes,
           grantTypes: seed.grantTypes,
+          ...(secretEnvelope ? { secretEnvelope } : {}),
         })
         .onConflictDoUpdate({
           target: oauthClients.clientId,
-          set: { name: seed.name, redirectUris: seed.redirectUris, scopes: seed.scopes, grantTypes: seed.grantTypes },
+          set: {
+            name: seed.name,
+            redirectUris: seed.redirectUris,
+            scopes: seed.scopes,
+            grantTypes: seed.grantTypes,
+            ...(secretEnvelope ? { secretEnvelope } : {}),
+          },
         });
     }
   }

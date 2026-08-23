@@ -91,6 +91,11 @@ const envSchema = z.object({
   IDENTITY_EMAIL_CODE_TTL_SECONDS: positiveInt(600, 3600),
   IDENTITY_EMAIL_CODE_MAX_ATTEMPTS: positiveInt(5, 20),
   IDENTITY_JWKS_CACHE_TTL_SECONDS: positiveInt(300, 86400),
+  // The agent-runtime satellite's client-credentials secret (ADR-006
+  // connection contract #1). Set at deploy; seeded envelope-encrypted into
+  // the svc-agent-runtime OP client on boot. Unset = the row keeps whatever
+  // envelope it already has.
+  IDENTITY_AGENT_RUNTIME_SECRET: z.string().min(16).optional(),
 
   // Social login (doc-06 Δ1) — a provider is enabled exactly when its
   // credentials are present. Redirect URI per provider:

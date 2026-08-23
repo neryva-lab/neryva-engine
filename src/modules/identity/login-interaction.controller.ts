@@ -1,0 +1,238 @@
+import { All, Body, Controller, Get, HttpCode, Inject, Param, Post, Req, Res } from '@nestjs/common';
+import { FastifyReply, FastifyRequest } from 'fastify';
+import type Provider from 'oidc-provider';
+import { Public } from '../../common/auth/decorators';
+import { RateLimit } from '../../common/http/rate-limit';
+import { ApiError } from '../../common/http/api-error';
+import { AuditService } from '../../common/audit/audit.service';
+import { EventBus, EngineEvents } from '../../common/events/event-bus';
+import { env } from '../../common/config/env';
+import { EmailService } from '../corporate/email/email.service';
+import { AccountsService, normalizeEmail } from './accounts.service';
+import { CredentialsService } from './credentials.service';
+import { EmailCodeService } from './email-code.service';
+import { OIDC_PROVIDER } from './identity.module';
+
+/**
+ * The login interaction (Δ1: email one-time code, primary; password,
+ * secondary). oidc-provider redirects the browser here with the interaction
+ * uid; this controller resolves the login then finishes the interaction —
+ * the OP takes over again for code issuance + PKCE.
+ *
+ * The HTML is deliberately minimal, CSP-clean (no external assets), and
+ * form-action-locked to itself.
+ */
+@Controller('login')
+export class LoginInteractionController {
+  constructor(
+    @Inject(OIDC_PROVIDER) private readonly provider: () => Provider,
+    private readonly accounts: AccountsService,
+    private readonly credentials: CredentialsService,
+    private readonly emailCodes: EmailCodeService,
+    private readonly email: EmailService,
+    private readonly audit: AuditService,
+    private readonly events: EventBus,
+  ) {}
+
+  @Public()
+  @Get(':uid')
+  show(@Param('uid') uid: string, @Res() reply: FastifyReply): void {
+    reply.header('content-type', 'text/html; charset=utf-8');
+    reply.header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; script-src 'none'");
+    reply.send(this.page('Sign in to Neryva', 'Enter your email — we will send you a one-time code.', uid));
+  }
+
+  /** Step 1: email → upsert account → send code. */
+  @Public()
+  @RateLimit({ name: 'login-email', capacity: 5, refillPerSecond: 0.05, scope: 'ip' })
+  @Post(':uid/email')
+  @HttpCode(200)
+  async submitEmail(@Param('uid') uid: string, @Body() body: { email?: string }, @Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    await this.assertInteraction(req, reply, uid);
+    let email: string;
+    try {
+      email = normalizeEmail(String(body.email ?? ''));
+    } catch {
+      reply.header('content-type', 'text/html; charset=utf-8');
+      reply.status(400).send(this.page('Sign in to Neryva', 'That email address is not valid.', uid, body.email ?? ''));
+      return;
+    }
+
+    // Upsert-on-login: an unknown email creates the account (no signup
+    // wall, no enumeration signal); a verified code marks it verified.
+    const { account } = await this.accounts.upsertByEmail(email);
+    const issue = await this.emailCodes.issue(account.id, req.ip ?? null);
+    if (!issue.ok) {
+      reply.header('retry-after', '60');
+      reply.header('content-type', 'text/html; charset=utf-8');
+      reply.status(429).send(this.page('Sign in to Neryva', 'Too many codes requested. Try again in a few minutes.', uid, email));
+      return;
+    }
+    await this.email.sendTemplate({
+      template: 'identity.login-code',
+      to: account.email,
+      vars: { code: issue.code, ttl_minutes: String(Math.round(env.IDENTITY_EMAIL_CODE_TTL_SECONDS / 60)) },
+      metadata: { accountId: account.id, interaction: uid },
+    });
+    await this.audit.add({
+      action: 'login.code_sent',
+      resourceType: 'account',
+      resourceId: account.id,
+      actorType: 'system',
+      details: { email_domain: account.email.split('@')[1] ?? '' },
+    });
+
+    reply.header('content-type', 'text/html; charset=utf-8');
+    reply.send(this.page('Check your inbox', `We sent a code to ${email}. Enter it below.`, uid, email, 'code'));
+  }
+
+  /** Step 2: verify the code → interactionFinished (the OP resumes). */
+  @Public()
+  @RateLimit({ name: 'login-verify', capacity: 10, refillPerSecond: 0.1, scope: 'ip' })
+  @Post(':uid/verify')
+  async verifyCode(@Param('uid') uid: string, @Body() body: { email?: string; code?: string }, @Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const interaction = await this.assertInteraction(req, reply, uid);
+    let email: string;
+    try {
+      email = normalizeEmail(String(body.email ?? ''));
+    } catch {
+      throw ApiError.validation({ email: 'invalid email address' });
+    }
+    const code = String(body.code ?? '').trim();
+    if (!/^\d{8}$/.test(code)) {
+      throw ApiError.validation({ code: 'the code is 8 digits' });
+    }
+
+    const account = await this.accounts.findByEmail(email);
+    if (!account) {
+      await this.events.emit(EngineEvents.LoginFailure, { reason: 'unknown_account' });
+      throw ApiError.unauthenticated('Invalid code');
+    }
+    const verified = await this.emailCodes.verify(account.id, code);
+    if (!verified.ok) {
+      await this.emailCodes.registerFailedAttempt(account.id);
+      await this.events.emit(EngineEvents.LoginFailure, { reason: `code_${verified.reason}` });
+      await this.audit.add({
+        action: 'login.failure',
+        resourceType: 'account',
+        resourceId: account.id,
+        actorType: 'account',
+        actorId: account.id,
+        details: { reason: `code_${verified.reason}` },
+      });
+      throw ApiError.unauthenticated('Invalid code');
+    }
+    if (!(await this.emailCodes.consume(account.id, code))) {
+      // Lost the single-use race — treat as invalid, never as a second use.
+      throw ApiError.unauthenticated('Invalid code');
+    }
+
+    await this.finishLogin(req, reply, uid, interaction, account.id, 'email_code');
+  }
+
+  /** Secondary path: password (accounts that opted into one). */
+  @Public()
+  @RateLimit({ name: 'login-password', capacity: 10, refillPerSecond: 0.05, scope: 'ip' })
+  @Post(':uid/password')
+  async verifyPassword(@Param('uid') uid: string, @Body() body: { email?: string; password?: string }, @Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const interaction = await this.assertInteraction(req, reply, uid);
+    const email = normalizeEmail(String(body.email ?? ''));
+    const password = String(body.password ?? '');
+    const account = await this.accounts.findByEmail(email);
+    if (!account || !account.passwordHash) {
+      // Enumeration resistance: uniform failure with a dummy verify for timing.
+      await this.credentials.verifyPassword(DUMMY_ARGON2_HASH, password);
+      await this.events.emit(EngineEvents.LoginFailure, { reason: 'password_unknown' });
+      throw ApiError.unauthenticated('Invalid email or password');
+    }
+    const ok = await this.credentials.verifyPassword(account.passwordHash, password);
+    if (!ok) {
+      await this.events.emit(EngineEvents.LoginFailure, { reason: 'password_invalid' });
+      await this.audit.add({
+        action: 'login.failure',
+        resourceType: 'account',
+        resourceId: account.id,
+        actorType: 'account',
+        actorId: account.id,
+        details: { reason: 'password_invalid' },
+      });
+      throw ApiError.unauthenticated('Invalid email or password');
+    }
+    if (this.credentials.needsRehash(account.passwordHash)) {
+      await this.accounts.updatePasswordHash(account.id, await this.credentials.hashPassword(password));
+    }
+    await this.finishLogin(req, reply, uid, interaction, account.id, 'password');
+  }
+
+  @Public()
+  @All('*')
+  fallback(): void {
+    throw ApiError.notFound('login route');
+  }
+
+  // ── internals ─────────────────────────────────────────────────────────────
+
+  /** oidc-provider's interaction APIs take the raw node req/res — Fastify keeps them at .raw. */
+  private async assertInteraction(req: FastifyRequest, reply: FastifyReply, uid: string): Promise<{ returnTo?: string }> {
+    const provider = this.provider();
+    const details = (await provider.interactionDetails(req.raw as never, reply.raw as never)) as unknown as { returnTo?: string };
+    return details;
+  }
+
+  private async finishLogin(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    uid: string,
+    interaction: { returnTo?: string },
+    accountId: string,
+    method: string,
+  ): Promise<void> {
+    const provider = this.provider();
+    await this.accounts.markLoginSuccess(accountId);
+    await this.accounts.markEmailVerified(accountId);
+    await this.audit.add({
+      action: 'login.success',
+      resourceType: 'account',
+      resourceId: accountId,
+      actorType: 'account',
+      actorId: accountId,
+      details: { method },
+    });
+    await this.events.emit(EngineEvents.LoginSuccess, { accountId, method });
+    await provider.interactionFinished(req.raw as never, reply.raw as never, { login: { accountId, remember: true } });
+    reply.redirect(interaction.returnTo ?? '/', 302);
+  }
+
+  private page(title: string, message: string, uid: string, email = '', mode: 'email' | 'code' = 'email'): string {
+    const form =
+      mode === 'email'
+        ? `<form method="post" action="/login/${uid}/email">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" autocomplete="username" required value="${escapeHtml(email)}">
+<button type="submit">Send code</button></form>`
+        : `<form method="post" action="/login/${uid}/verify">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" autocomplete="username" required value="${escapeHtml(email)}">
+<label for="code">One-time code</label>
+<input id="code" name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="one-time-code" required>
+<button type="submit">Verify</button></form>`;
+    return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#fafafa;color:#111}
+.card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:32px;width:min(360px,90vw)}
+label{display:block;font-size:13px;margin:12px 0 4px}input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:15px}
+button{margin-top:16px;width:100%;padding:10px;background:#111;color:#fff;border:0;border-radius:6px;font-size:15px;cursor:pointer}
+p.hint{color:#555;font-size:14px}</style></head>
+<body><div class="card"><h1 style="font-size:20px;margin:0 0 8px">${escapeHtml(title)}</h1>
+<p class="hint">${escapeHtml(message)}</p>${form}</div></body></html>`;
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// A syntactically valid argon2id hash of an unguessable value: keeps the
+// unknown-account timing profile identical to a real verify.
+const DUMMY_ARGON2_HASH = '$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQAAAAAAAAAAA$RdescudvJCsgt3ub+b+dWRWJTmaaJObG';

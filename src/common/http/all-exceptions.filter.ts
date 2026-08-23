@@ -1,0 +1,63 @@
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { FastifyReply } from 'fastify';
+import { ApiError } from './api-error';
+
+/**
+ * One envelope for every error: validation, guards, domain errors, and the
+ * unknown-exception path. request_id propagates from the middleware so a
+ * client can correlate an error with the server log line.
+ */
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<FastifyReply>();
+    const request = ctx.getRequest<{ requestId?: string }>();
+
+    const requestId = request?.requestId ?? 'unknown';
+
+    if (exception instanceof ApiError) {
+      const body = exception.getResponse() as { code: string; message: string; details?: unknown };
+      void response.status(exception.getStatus()).send({
+        error: {
+          code: body.code,
+          message: body.message,
+          ...(body.details !== undefined ? { details: body.details } : {}),
+          request_id: requestId,
+        },
+      });
+      return;
+    }
+
+    if (exception instanceof HttpException) {
+      const status = exception.getStatus();
+      const payload = exception.getResponse();
+      const message = typeof payload === 'string' ? payload : ((payload as { message?: string | string[] }).message ?? HttpStatus[status] ?? 'error');
+      const details = typeof payload === 'object' && payload !== null && 'message' in payload && Array.isArray((payload as { message: unknown }).message)
+        ? { issues: (payload as { message: string[] }).message }
+        : undefined;
+      void response.status(status).send({
+        error: {
+          code: status === HttpStatus.BAD_REQUEST ? 'validation_failed' : status === HttpStatus.UNAUTHORIZED ? 'unauthenticated' : 'http_error',
+          message: typeof message === 'string' ? message : 'Request failed',
+          ...(details ? { details } : {}),
+          request_id: requestId,
+        },
+      });
+      return;
+    }
+
+    // Unknown: log with stack, return a clean 500. Never leak internals.
+    const err = exception as { message?: string; stack?: string };
+    this.logger.error(`unhandled exception req=${requestId}: ${err?.message ?? String(exception)}`, err?.stack);
+    void response.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
+      error: {
+        code: 'internal_error',
+        message: 'Internal error',
+        request_id: requestId,
+      },
+    });
+  }
+}

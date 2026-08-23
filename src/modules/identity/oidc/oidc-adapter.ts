@@ -1,0 +1,320 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
+import { Injectable, Logger } from '@nestjs/common';
+import { DbService } from '../../../common/infra/db/db.service';
+import { AuditService } from '../../../common/audit/audit.service';
+import { EventBus, EngineEvents, SessionRevokedEvent } from '../../../common/events/event-bus';
+import { envelopeDecrypt, envelopeEncrypt } from '../../../common/infra/crypto/envelope';
+import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPayloads } from '../schema';
+
+/**
+ * oidc-provider persistence adapter. Model dispatch:
+ *
+ *   Client        → oauth_clients  (registry rows; confidential secrets are
+ *                                  envelope-encrypted at rest and decrypted
+ *                                  only in-memory for the provider's compare)
+ *   Session       → oidc_payloads  + oauth_sessions sync (the L1 device
+ *                                  list mirrors the provider's browser
+ *                                  session — sid = model id)
+ *   Grant         → oidc_payloads
+ *   GrantCode     → oauth_grants   (single-use via consumed_at)
+ *   AccessToken   → oidc_payloads  (JWTs are self-contained; the provider
+ *                                  still stores an introspection record)
+ *   RefreshToken  → oauth_refresh_tokens — consume() implements the reuse
+ *                                  tripwire: presenting an ALREADY-consumed
+ *                                  refresh token revokes the entire family
+ *                                  and audits auth.refresh_reuse (doc-06 §10.4)
+ *
+ * NOTE (build-time): the Adapter interface (upsert/find/consume/destroy/
+ * revokeForGrant) is stable across oidc-provider v7–v9; exact option names
+ * in the factory may need adjusting to the installed major version.
+ */
+type Payload = Record<string, unknown> & { grantId?: string; accountId?: string; extra?: Record<string, unknown> };
+
+export interface AdapterHelpers {
+  /** Push a deny-list key for a revoked session (TTL <= access TTL). */
+  pushSidDeny(sid: string): void;
+}
+
+@Injectable()
+export class OidcDrizzleAdapter {
+  private readonly logger = new Logger(OidcDrizzleAdapter.name);
+  helpers: AdapterHelpers = { pushSidDeny: () => undefined };
+
+  constructor(
+    private readonly db: DbService,
+    private readonly audit: AuditService,
+    private readonly events: EventBus,
+  ) {}
+
+  /** The oidc-provider Adapter factory it receives as `name` per model. */
+  adapterFor(name: string): object {
+    const self = this;
+    return {
+      async upsert(id: string, payload: Payload, expiresIn: number): Promise<void> {
+        const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+        switch (name) {
+          case 'Client':
+            // Clients are seeded/managed rows, not provider-upserted; ignore.
+            return;
+          case 'Session':
+            await self.upsertOidcPayload(name, id, payload, expiresAt);
+            await self.syncSessionRow(id, payload);
+            return;
+          case 'GrantCode':
+            await self.upsertGrantCode(id, payload, expiresAt);
+            return;
+          case 'RefreshToken':
+            await self.upsertRefreshToken(id, payload, expiresAt);
+            return;
+          default:
+            await self.upsertOidcPayload(name, id, payload, expiresAt);
+            return;
+        }
+      },
+
+      async find(id: string): Promise<Payload | undefined> {
+        switch (name) {
+          case 'Client':
+            return self.findClient(id);
+          case 'Session': {
+            const row = await self.db.root.select().from(oidcPayloads).where(and(eq(oidcPayloads.model, 'Session'), eq(oidcPayloads.id, id))).limit(1);
+            return row[0] ? (row[0].payload as Payload) : undefined;
+          }
+          case 'GrantCode': {
+            const rows = await self.db.root.select().from(oauthGrants).where(eq(oauthGrants.codeHash, sha256(id))).limit(1);
+            const row = rows[0];
+            if (!row) {
+              return undefined;
+            }
+            return {
+              clientId: row.clientId,
+              accountId: row.accountId,
+              redirectUri: row.redirectUri ?? undefined,
+              scope: Array.isArray(row.scopes) ? row.scopes.join(' ') : '',
+              code_challenge: row.pkceChallenge ?? undefined,
+              code_challenge_method: row.challengeMethod ?? undefined,
+              nonce: row.nonce ?? undefined,
+              ...(row.consumedAt ? { consumed: true } : {}),
+            } as Payload;
+          }
+          case 'RefreshToken': {
+            const rows = await self.db.root.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.jti, id)).limit(1);
+            const row = rows[0];
+            if (!row) {
+              return undefined;
+            }
+            const base: Payload = { grantId: row.grantId ?? undefined };
+            if (row.consumedAt) {
+              base.consumed = true;
+            }
+            return base;
+          }
+          default: {
+            const rows = await self.db.root.select().from(oidcPayloads).where(and(eq(oidcPayloads.model, name), eq(oidcPayloads.id, id))).limit(1);
+            return rows[0] ? (rows[0].payload as Payload) : undefined;
+          }
+        }
+      },
+
+      async consume(id: string): Promise<void> {
+        const now = new Date().toISOString();
+        switch (name) {
+          case 'GrantCode':
+            await self.db.root.update(oauthGrants).set({ consumedAt: now }).where(eq(oauthGrants.codeHash, sha256(id)));
+            return;
+          case 'RefreshToken':
+            await self.consumeRefreshTokenWithReuseDetection(id);
+            return;
+          default:
+            await self.db.root.update(oidcPayloads).set({ consumedAt: now }).where(and(eq(oidcPayloads.model, name), eq(oidcPayloads.id, id)));
+            return;
+        }
+      },
+
+      async destroy(id: string): Promise<void> {
+        switch (name) {
+          case 'Session':
+            await self.revokeSession(id, 'logout');
+            return;
+          case 'RefreshToken':
+            await self.db.root
+              .update(oauthRefreshTokens)
+              .set({ revokedAt: nowIso() })
+              .where(eq(oauthRefreshTokens.jti, id));
+            return;
+          case 'GrantCode':
+            await self.db.root.delete(oauthGrants).where(eq(oauthGrants.codeHash, sha256(id)));
+            return;
+          default:
+            await self.db.root.delete(oidcPayloads).where(and(eq(oidcPayloads.model, name), eq(oidcPayloads.id, id)));
+            return;
+        }
+      },
+
+      async revokeForGrant(grantId: string): Promise<void> {
+        // RFC 7009 / grant revocation: everything issued under the grant dies.
+        await self.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso() }).where(eq(oauthRefreshTokens.grantId, grantId));
+        await self.db.root.delete(oidcPayloads).where(eq(oidcPayloads.grantId, grantId));
+        await self.audit.add({ action: 'token.grant_revoked', resourceType: 'oauth_grant', resourceId: grantId, actorType: 'system' });
+      },
+    };
+  }
+
+  // ── Client registry ─────────────────────────────────────────────────────
+
+  async findClient(clientId: string): Promise<Payload | undefined> {
+    const rows = await this.db.root.select().from(oauthClients).where(eq(oauthClients.clientId, clientId)).limit(1);
+    const row = rows[0];
+    if (!row) {
+      return undefined;
+    }
+    const payload: Payload = {
+      client_id: row.clientId,
+      client_name: row.name,
+      redirect_uris: Array.isArray(row.redirectUris) ? row.redirectUris : [],
+      scope: (Array.isArray(row.scopes) ? row.scopes : ['openid', 'email', 'profile']).join(' '),
+      grant_types: Array.isArray(row.grantTypes) && row.grantTypes.length > 0 ? row.grantTypes : ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: row.kind === 'public' ? 'none' : 'client_secret_basic',
+      ...(row.tokenTtlSeconds ? { access_token_ttl: row.tokenTtlSeconds } : {}),
+    };
+    if (row.secretEnvelope) {
+      payload.client_secret = envelopeDecrypt(row.secretEnvelope);
+    }
+    if (row.disabled) {
+      // The provider rejects disabled clients via an unusable secret.
+      payload.client_secret = `disabled-${randomUUID()}`;
+    }
+    return payload;
+  }
+
+  // ── Session sync (L1 registry) ──────────────────────────────────────────
+
+  private async syncSessionRow(sid: string, payload: Payload): Promise<void> {
+    const accountId = typeof payload.accountId === 'string' ? payload.accountId : null;
+    if (!accountId) {
+      return; // pre-login interaction session — no registry row yet
+    }
+    const clientId = typeof payload.clientId === 'string' ? payload.clientId : 'unknown';
+    await this.db.root
+      .insert(oauthSessions)
+      .values({ sid, accountId, clientId, familyId: randomUUID(), device: payload.extra ?? {} })
+      .onConflictDoUpdate({
+        target: oauthSessions.sid,
+        set: { lastSeenAt: new Date().toISOString(), device: payload.extra ?? {} },
+      });
+  }
+
+  private async revokeSession(sid: string, reason: string): Promise<void> {
+    const rows = await this.db.root.select().from(oauthSessions).where(eq(oauthSessions.sid, sid)).limit(1);
+    await this.db.root.delete(oidcPayloads).where(and(eq(oidcPayloads.model, 'Session'), eq(oidcPayloads.id, sid)));
+    await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sid, sid));
+    this.helpers.pushSidDeny(sid);
+    await this.events.emit<SessionRevokedEvent>(EngineEvents.SessionRevoked, {
+      sid,
+      accountId: rows[0]?.accountId ?? 'unknown',
+    });
+    await this.audit.add({ action: 'session.revoked', resourceType: 'oauth_session', resourceId: sid, actorType: 'system', details: { reason } });
+  }
+
+  // ── Refresh rotation + the reuse tripwire ────────────────────────────────
+
+  private async upsertRefreshToken(id: string, payload: Payload, expiresAt: string): Promise<void> {
+    const familyId = extractFamilyId(payload);
+    const rotatedFrom = extractRotatedFrom(payload);
+    await this.db.root
+      .insert(oauthRefreshTokens)
+      .values({
+        jti: id,
+        familyId,
+        sessionId: extractSessionId(payload),
+        tokenHash: sha256(String(payload.rotatingToken ?? id)),
+        grantId: typeof payload.grantId === 'string' ? payload.grantId : null,
+        expiresAt,
+        rotatedFrom,
+      })
+      .onConflictDoUpdate({
+        target: oauthRefreshTokens.jti,
+        set: { expiresAt },
+      });
+    if (rotatedFrom) {
+      await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, rotatedFrom));
+    }
+  }
+
+  private async consumeRefreshTokenWithReuseDetection(id: string): Promise<void> {
+    const rows = await this.db.root.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.jti, id)).limit(1);
+    const row = rows[0];
+    if (!row) {
+      return;
+    }
+    if (row.consumedAt) {
+      // REUSE: a retired token was presented again — revoke the family.
+      this.logger.warn(`refresh token reuse detected: jti=${id} family=${row.familyId}`);
+      await this.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso(), retiredAt: nowIso() }).where(eq(oauthRefreshTokens.familyId, row.familyId));
+      if (row.sessionId) {
+        await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sid, row.sessionId));
+        this.helpers.pushSidDeny(row.sessionId);
+      }
+      await this.audit.add({
+        action: 'auth.refresh_reuse',
+        resourceType: 'oauth_refresh_token',
+        resourceId: id,
+        actorType: 'system',
+        details: { family_id: row.familyId, consequence: 'family_revoked' },
+      });
+      return;
+    }
+    await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, id));
+  }
+
+  // ── Generic payloads & grant codes ───────────────────────────────────────
+
+  private async upsertOidcPayload(model: string, id: string, payload: Payload, expiresAt: string | null): Promise<void> {
+    await this.db.root
+      .insert(oidcPayloads)
+      .values({ model, id, payload, grantId: typeof payload.grantId === 'string' ? payload.grantId : null, expiresAt })
+      .onConflictDoUpdate({
+        target: [oidcPayloads.model, oidcPayloads.id],
+        set: { payload, expiresAt },
+      });
+  }
+
+  private async upsertGrantCode(id: string, payload: Payload, expiresAt: string): Promise<void> {
+    await this.db.root.insert(oauthGrants).values({
+      codeHash: sha256(id),
+      clientId: String(payload.clientId ?? 'unknown'),
+      accountId: String(payload.accountId ?? 'unknown'),
+      redirectUri: typeof payload.redirectUri === 'string' ? payload.redirectUri : null,
+      scopes: Array.isArray(payload.scope) ? payload.scope : String(payload.scope ?? '').split(' ').filter(Boolean),
+      pkceChallenge: typeof payload.code_challenge === 'string' ? payload.code_challenge : null,
+      challengeMethod: typeof payload.code_challenge_method === 'string' ? payload.code_challenge_method : null,
+      nonce: typeof payload.nonce === 'string' ? payload.nonce : null,
+      expiresAt,
+    });
+  }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function extractFamilyId(payload: Payload): string {
+  const raw = payload.familyId ?? payload['gty'] ?? null;
+  return typeof raw === 'string' && raw.length > 0 ? raw : randomUUID();
+}
+
+function extractRotatedFrom(payload: Payload): string | null {
+  const raw = payload.rotatedFrom;
+  return typeof raw === 'string' ? raw : null;
+}
+
+function extractSessionId(payload: Payload): string | null {
+  const raw = payload.sessionId ?? payload['sid'];
+  return typeof raw === 'string' ? raw : null;
+}

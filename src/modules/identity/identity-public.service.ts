@@ -1,0 +1,58 @@
+import { eq } from 'drizzle-orm';
+import { Injectable } from '@nestjs/common';
+import { DbService } from '../../common/infra/db/db.service';
+import { RedisService } from '../../common/infra/redis.service';
+import { env } from '../../common/config/env';
+import { accounts, oauthClients, oauthSessions } from './schema';
+
+/**
+ * Identity's implementations of the kernel ports (the dependency-inversion
+ * seam: kernel defines, identity binds). These are the ONLY places the
+ * kernel's guards touch identity tables.
+ */
+@Injectable()
+export class IdentityPublicService implements SessionRegistryLike, ServiceClientLike {
+  constructor(
+    private readonly db: DbService,
+    private readonly redis: RedisService,
+  ) {}
+
+  /** SESSION_REGISTRY_PORT — the correctness fallback behind the Redis deny-list. */
+  async isSessionActive(input: { accountId: string; sid: string | null; issuedAt: number }): Promise<boolean> {
+    if (input.sid) {
+      const rows = await this.db.root.select().from(oauthSessions).where(eq(oauthSessions.sid, input.sid)).limit(1);
+      const row = rows[0];
+      if (!row || row.revokedAt || row.accountId !== input.accountId) {
+        return false;
+      }
+    }
+    // Account-level kill-switch: sessions minted before sessionsRevokedAt die.
+    const rows = await this.db.root.select({ sessionsRevokedAt: accounts.sessionsRevokedAt }).from(accounts).where(eq(accounts.id, input.accountId)).limit(1);
+    const revokedAt = rows[0]?.sessionsRevokedAt;
+    if (!revokedAt) {
+      return true;
+    }
+    const issuedMs = (input.issuedAt || 0) * 1000;
+    return issuedMs > Date.parse(revokedAt);
+  }
+
+  /** SERVICE_CLIENT_PORT — DB-backed confirmation for L3 tokens. */
+  async isActiveServiceClient(clientId: string): Promise<boolean> {
+    const rows = await this.db.root.select({ disabled: oauthClients.disabled, kind: oauthClients.kind }).from(oauthClients).where(eq(oauthClients.clientId, clientId)).limit(1);
+    const row = rows[0];
+    return !!row && !row.disabled && row.kind === 'service';
+  }
+
+  /** Push a deny-list key (TTL <= access TTL; correctness falls back above). */
+  pushSidDeny(sid: string): void {
+    void this.redis.raw.set(`auth:deny:sid:${sid}`, '1', 'EX', env.IDENTITY_ACCESS_TTL_SECONDS).catch(() => undefined);
+  }
+}
+
+interface SessionRegistryLike {
+  isSessionActive(input: { accountId: string; sid: string | null; issuedAt: number }): Promise<boolean>;
+}
+
+interface ServiceClientLike {
+  isActiveServiceClient(clientId: string): Promise<boolean>;
+}

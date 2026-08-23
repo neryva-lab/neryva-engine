@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "comment": "ADR-005 D3 — the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
+  "tables": {
+    "accounts": { "owner": "engine-ts", "since": "eng-0001" },
+    "account_credentials": { "owner": "engine-ts", "since": "eng-0001" },
+    "account_recovery_codes": { "owner": "engine-ts", "since": "eng-0001" },
+    "account_identities": { "owner": "engine-ts", "since": "eng-0001" },
+    "oauth_clients": { "owner": "engine-ts", "since": "eng-0001" },
+    "oauth_sessions": { "owner": "engine-ts", "since": "eng-0001" },
+    "oauth_refresh_tokens": { "owner": "engine-ts", "since": "eng-0001" },
+    "oauth_grants": { "owner": "engine-ts", "since": "eng-0001" },
+    "oidc_payloads": { "owner": "engine-ts", "since": "eng-0001" },
+    "email_login_codes": { "owner": "engine-ts", "since": "eng-0001" },
+    "email_deliveries": { "owner": "engine-ts", "since": "eng-0001" },
+    "org_memberships": { "owner": "engine-ts", "since": "eng-0002" },
+    "org_invites": { "owner": "engine-ts", "since": "eng-0002" },
+    "projects": { "owner": "engine-ts", "since": "eng-0002" },
+    "product_entitlements": { "owner": "engine-ts", "since": "eng-0002" },
+
+    "tenants": { "owner": "python", "shared": "engine INSERTs new orgs (personal-org autocreation, org admin API) using the Python TenantModel column set; Python remains the DDL authority. DDL transfer at agent-runtime handover A-1." },
+    "api_keys": { "owner": "python", "shared": "engine READS for L2 verification (kernel guard); the additive columns project_id/owner_account_id/org_id land via Python Alembic 0017; write authority transfers to the engine at handover A-1." },
+    "audit_events": { "owner": "python", "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 §10.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)." },
+    "spend_events": { "owner": "python", "shared": "engine-owned ingest lands in engine tables at billing B-1; this table stays runtime-owned until handover A-3." },
+    "end_users": { "owner": "python", "shared": "engine never touches until handover A-2 (account link alteration happens there)." },
+    "operator_sessions": { "owner": "python", "shared": "read once by the I-1d data migration (TS script) into oauth_sessions, then obsolete at A-2." }
+  },
+  "rules": [
+    "A table appears exactly once; its owner is the only system that may create/alter/drop it.",
+    "shared tables list the exact seam and the handover phase that transfers ownership.",
+    "Changing this file is a PR-reviewed act; the kernel startup self-check (K-5) verifies engine migrations only touch engine-ts-owned tables."
+  ]
+}

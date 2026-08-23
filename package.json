@@ -1,0 +1,39 @@
+{
+  "name": "@neryva/engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Neryva platform engine — TypeScript/NestJS core (identity, organizations, console, corporate, metering). ADR-005/006/007.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "migrate": "drizzle-kit migrate",
+    "migrate:generate": "drizzle-kit generate",
+    "lint": "eslint src",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-fastify": "^11.0.0",
+    "@node-rs/argon2": "^2.0.0",
+    "bullmq": "^5.30.0",
+    "drizzle-orm": "^0.44.0",
+    "ioredis": "^5.4.0",
+    "oidc-provider": "^8.4.0",
+    "pg": "^8.13.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "drizzle-kit": "^0.31.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

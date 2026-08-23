@@ -10,19 +10,19 @@ The ledger is the **single progress tracker** for end-to-end implementation. Eve
 | Ledger | Module | Routes | Guard |
 |---|---|---|---|
 | [`kernel.md`](kernel.md) | `src/common` | `/health/**`, cross-cutting | — (the enforcement layer itself) |
-| [`identity.md`](identity.md) | `modules/identity` | `/auth/**`, `/.well-known/**` | public + PKCE |
-| [`organizations.md`](organizations.md) | `modules/organizations` | `/console/org/**` | L1 + roles |
-| [`console.md`](console.md) | `modules/console` | `/console/home`, manifests, product APIs | L1 + membership + entitlement |
-| [`corporate.md`](corporate.md) | `modules/corporate` | `/public/**`, `/console/content/**` | none (rate-limited) / staff |
-| [`agent-studio.md`](agent-studio.md) | `modules/agent-studio` (product furniture) | `/console/agent-studio/**`, manifest/card | L1 + scopes + entitlement |
-| [`billing-metering.md`](billing-metering.md) | kernel + console views | `/platform` usage/billing APIs | L1 (owner/admin/billing) |
-| [`deployment-product.md`](deployment-product.md) | `modules/deployment` | `/console/deployment/**`, jobs | L1 + scopes |
+| [`identity.md`](identity.md) | `modules/identity` | `/auth/**`, `/.well-known/**` | public + PKCE; mints L1/L3-lite |
+| [`organizations.md`](organizations.md) | `modules/organizations` | `/console/org/**` | L1 + membership roles + step-up MFA (Δ5) |
+| [`console.md`](console.md) | `modules/console` | `/console/home`, manifests, summaries | L1 + entitlement |
+| [`corporate.md`](corporate.md) | `modules/corporate` | `/public/**`, `/console/content/**` | none (rate-limited / honeypot) / staff |
+| [`billing-metering.md`](billing-metering.md) | `modules/billing` | `/console/billing/**`, `/console/usage/**`, `/internal/metering/spend` | L1 (owner/admin/billing) / L3 (satellite ingest) |
+| [`agent-studio.md`](agent-studio.md) | `modules/agent-studio` (furniture) | `/console/agent-studio/**`, manifest/card | L1 + scopes + entitlement |
+| [`deployment-product.md`](deployment-product.md) | `modules/deployment` | `/console/deployment/**`, `/v1/deployments/**`, `deployment:` queue | L1 / L2 (`deployment:operate`) + L5 runners |
 
 **Capability deployments** (satellites — capability only; engine owns users/billing/policy):
-| Ledger | What | Status |
-|---|---|---|
-| [`agent-runtime.md`](agent-runtime.md) | the old studio runtime serving `/v1` + `/surfaces` (first satellite, ADR-006 D3) | serving today; handover phases pending |
-| [`inference.md`](inference.md) | future inference service (second instance of the pattern) | placeholder, trigger-gated |
+| Ledger | Deployable / Satellite | Routes | Guard / Contract |
+|---|---|---|---|
+| [`agent-runtime.md`](agent-runtime.md) | `products/neryva_agent_studio/backend` (Python reference / production runtime until NestJS replacement) | `/v1/**` (OpenAI-compat), `/surfaces/**` (widget) | L2 (API keys), L4 (surface tokens); connects to engine via L3 |
+| [`inference.md`](inference.md) | `products/inference` (future GPU serving satellite) | `/v1/models/**`, `/v1/inference/**` | L2 / L3 service identity; connects to engine |
 
 ## Conformance rules (the ledger's law)
 

@@ -72,56 +72,116 @@ engine/src/
 │   ├── organizations/         # memberships, invites, projects, entitlements      [ledger: organizations]
 │   ├── console/               # manifests, /console/home, summaries, org mounts   [ledger: console]
 │   ├── corporate/             # email service, /public forms, content admin       [ledger: corporate]
+│   ├── billing/               # metering ingest + quota engine + ledgers + bills  [ledger: billing-metering]
 │   ├── agent-studio/          # product FURNITURE only (manifest, card, keys,
 │   │                          # per-project usage views) — not the runtime        [ledger: agent-studio]
 │   └── deployment/            # product #2: pipelines, environments, workflow     [ledger: deployment-product]
-└── billing/                   # metering ingest + quota engine + ledgers + invoices [ledger: billing-metering]
+└── test/                      # contract snapshots + ported acceptance tests
 ```
 
 **There is no `src/runtime/`.** Earlier layout drafts carried a runtime-port area from the strangler plan; ADR-006/007 removed it — the session engine, LLM gateway, guardrails, and context stack belong to the Agent Studio satellite, never to the engine (see §5).
 
-### 2.1 Inside every module (the internal shape)
+### 2.1 Inside every module (the internal shape & public interface)
+
+Every module under `engine/src/modules/<name>/` conforms to the bounded-context pattern:
 
 ```
 modules/<name>/
-├── <name>.module.ts           # registers only its own controllers/providers; exports ONE public
-│                              # interface class (e.g. IdentityPublicModule) — entities never leak
-├── controllers/               # confined to the module's route namespace (§4)
-├── services/                  # business logic; state machines live in repositories/services
-├── repositories/              # ORM models for OWNED tables only (migration-ownership map)
-├── dto/                       # request/response shapes (contract snapshot source)
+├── <name>.module.ts           # registers only its own controllers/providers; imports only common + public modules
+├── <name>.public.module.ts    # exports ONLY the public service interface for other platform modules
+├── <name>.public.service.ts   # strictly typed public interface methods (entities/repos never leak)
+├── controllers/               # confined to the module's route namespace (§4.1)
+├── services/                  # internal business logic & state machine implementations
+├── repositories/              # ORM models/queries for OWNED tables only (migration-ownership map)
+├── dto/                       # request/response validation shapes (contract snapshot source)
 ├── guards/                    # module-specific guard composition (role × entitlement × scope)
-└── README.md                  # purpose, routes, tables, flags, owner
+└── README.md                  # purpose, routes, queues, tables, flags, owner
 ```
 
 ---
 
 ## 3. The shared kernel — locked list
 
-Config · logger · ORM/Redis/BullMQ/storage/email factories (incl. the RLS tenant-context helper) · the auth guards · policy/entitlement interceptors · audit emitter · error envelope + request-id + idempotency · rate limiting · health/self-checks · metrics.
+Config · logger · ORM/Redis/BullMQ/storage/email factories (incl. the RLS tenant-context helper) · the auth guards (`L1Jwt`, `L2ApiKey`, `L3Service`, `StepUpMfa`) · policy/entitlement interceptors · audit emitter · error envelope + request-id + idempotency · rate limiting · health/self-checks · metrics.
 
 Rules (enforced by `eslint-plugin-boundaries` + `dependency-cruiser` in CI — kernel ledger K-2):
 
 1. **The kernel imports no module; modules import the kernel + allowed public interfaces only.**
-2. Platform modules (`identity`, `organizations`, `console`, `billing`, `corporate`) may inject other platform modules' public interfaces.
+2. **Platform modules (`identity`, `organizations`, `console`, `billing`, `corporate`) may inject other platform modules' public interfaces (`<name>.public.service.ts`).**
 3. **Product modules (`agent-studio`, `deployment`) never inject anything product-side** — cross-product reads go through the public contract with an L3 service token (partitioning rule).
 4. Additions to the kernel require an ADR.
 
 ---
 
-## 4. Route namespaces (the complete table)
+## 4. Multi-Dimensional Namespace Encapsulation
+
+The architecture formally partitions namespaces across **five distinct dimensions** (HTTP routes, message queues, cache keys, database schemas, and telemetry):
+
+### 4.1 Route Namespaces (HTTP / REST / OIDC)
 
 | Namespace | Guard | Owner module | Notes |
 |---|---|---|---|
-| `/auth/**`, `/.well-known/**` | public + PKCE | identity | the OP itself; RFC 7009 revoke; discovery |
-| `/public/**` | none (IP rate-limit + honeypot + idempotency) | corporate | forms, newsletter, careers, content reads |
-| `/console/home`, `/console/org/**` | L1 + membership roles | console / organizations | step-up on privileged acts (Δ5) |
-| `/console/{product}/**` | L1 + membership + product scope + entitlement | product modules | 403 `entitlement_required` / 402 `past_due` semantics |
-| `/v1/deployments/**` | L2 (`deployment:operate` scope) | deployment | the engine's only `/v1` surface — `/v1/**` at large is the satellite's |
-| `/internal/**` | L3/L5/staff overlay | billing, ops | ingest, runners, harness, DR |
-| `/health/{live,ready}` | public liveness; ready aggregates probes | common | readiness = all enabled modules green |
+| `/auth/**`, `/.well-known/**` | public + PKCE | `identity` | the OP itself; authorize/token/jwks/userinfo; RFC 7009 revoke; discovery |
+| `/public/**` | none (IP rate-limit + honeypot + idempotency) | `corporate` | contact, newsletter, careers, public content reads |
+| `/console/home`, `/console/org/**` | L1 + membership roles | `console` / `organizations` | org home, members, invites, projects, audit; step-up on privileged acts (Δ5) |
+| `/console/billing/**`, `/console/usage/**` | L1 + `(owner\|admin\|billing)` | `billing` | per-product/project usage slices, consolidated rollup, invoices & ledgers |
+| `/console/{product}/**` | L1 + membership + product scope + entitlement | product modules (`agent-studio`, `deployment`) | `/console/agent-studio/**`, `/console/deployment/**`; 403/402 semantics |
+| `/v1/deployments/**` | L2 (`deployment:operate` scope) | `deployment` | the engine's only `/v1` surface — `/v1/**` at large is the satellite's |
+| `/internal/metering/spend` | L3 Service Token | `billing` | high-throughput spend-event ingestion endpoint for satellites |
+| `/internal/**` | L3/L5/staff overlay | `common` / `ops` | internal runner callbacks, test harness, disaster recovery drills |
+| `/health/{live,ready}` | public liveness; ready aggregates probes | `common` (health) | readiness = all enabled modules green |
 
-Rules: a route outside a manifest 404s at registration (startup self-check fails loudly — K-5); resource-noun naming; one error envelope; every mutating public POST accepts `Idempotency-Key`; contract changes ride the composed-contract CI (technology.md §3.4).
+*Satellite Route Surfaces (routed via reverse proxy directly to `agent-runtime`):*
+- `/v1/**` (OpenAI-compatible endpoints: `/v1/chat/completions`, `/v1/models`, etc. — L2 API key)
+- `/surfaces/**` (Widget & client-side end-user chat sessions — L4 end-user token)
+
+### 4.2 Queue Namespaces (BullMQ on Redis)
+
+All background jobs run in isolated queue namespaces formatted as `{module}:{queue_name}`:
+
+| Queue Namespace | Owner Module | Workers / Job Types |
+|---|---|---|
+| `billing:spend-events` | `billing` | Micro-batching spend events into PostgreSQL ledgers |
+| `corporate:email-dispatch` | `corporate` | Transactional email delivery (login codes, invites, confirmations) |
+| `deployment:pipeline-runs` | `deployment` | Pipeline stage evaluations, policy checks, canary rollout orchestrations |
+| `identity:session-cleanup` | `identity` | Expired grant tokens, retired refresh families, stale sessions cleanup |
+| `organizations:invites` | `organizations` | Expired invite reaping and notification triggers |
+
+### 4.3 Cache Key Namespaces (Redis)
+
+All Redis keys adhere to the structured hierarchical prefix format `neryva:{module}:{scope}:{identifier}`:
+
+| Key Pattern | Owner Module | Purpose / Invalidation |
+|---|---|---|
+| `neryva:identity:sessions:{sid}` | `identity` | L1 active session metadata and immediate revocation deny-list |
+| `neryva:identity:jwks` | `identity` | Cached public JWKS key set for offline token validation |
+| `neryva:identity:code:{email}` | `identity` | Single-use email one-time login codes (60s TTL, attempt-capped) |
+| `neryva:organizations:tenants:{slug\|id}` | `organizations` | Tenant metadata & status read-through cache |
+| `neryva:organizations:entitlements:{org_id}:{product}` | `organizations` | Cached product entitlement state (`trial`, `active`, `past_due`) |
+| `neryva:billing:quotas:{org_id}:{product}:{project}` | `billing` | Atomic quota counters for sub-millisecond gateway reservations |
+| `neryva:console:summaries:{org_id}:{product}` | `console` | Aggregated product summary KPI cards (60s TTL) |
+| `neryva:corporate:rate-limit:{ip}` | `corporate` | Sliding-window IP rate limit counters for `/public/*` endpoints |
+
+### 4.4 Database Schema Namespaces (PostgreSQL Multi-Schema + RLS)
+
+Target layout isolates module domains into distinct PostgreSQL schemas, all protected under PostgreSQL Row-Level Security (RLS) via the shared tenant-context session variable `app.current_tenant`:
+
+| Schema | Owner Module | Tables |
+|---|---|---|
+| `identity` | `identity` | `accounts`, `account_credentials`, `account_recovery_codes`, `account_identities`, `oauth_clients`, `oauth_sessions`, `oauth_refresh_tokens`, `oauth_grants` |
+| `organizations` | `organizations` | `tenants`, `org_memberships`, `org_invites`, `projects`, `product_entitlements` |
+| `billing` | `billing` | `spend_events`, `billing_ledgers`, `billing_invoices` |
+| `corporate` | `corporate` | `contact_submissions`, `newsletter_subs`, `career_applications`, `content_posts` |
+| `product_deployment` | `deployment` | `pipelines`, `pipeline_stages`, `environments`, `deployments`, `deployment_events`, `secrets` |
+| `public` | `common` | `audit_events`, shared base extensions |
+
+### 4.5 Telemetry & Observability Namespaces (OpenTelemetry & Prometheus)
+
+Every metric, log, and trace span carries the standardized label taxonomy:
+- `module`: The emitting module (`identity`, `organizations`, `billing`, `console`, `corporate`, `deployment`, `agent-studio`)
+- `product`: The product context (`agent_studio`, `deployment`, `chat`, `platform`)
+- `tenant_id` & `project_id`: Scoping dimensions for multi-tenant isolation and per-project drilldowns
+- `route`: Pinned contract path identifier
 
 ---
 

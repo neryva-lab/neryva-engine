@@ -40,10 +40,10 @@ export class StudioKeysService {
         id: legacyApiKeys.id,
         name: legacyApiKeys.name,
         revoked: legacyApiKeys.revoked,
-        lastUsedAt: legacyApiKeys.lastUsedAt,
+        lastUsedAt: legacyApiKeys.last_used_at,
       })
       .from(legacyApiKeys)
-      .where(eq(legacyApiKeys.tenantId, orgId));
+      .where(eq(legacyApiKeys.tenant_id, orgId));
 
     const bindings = await this.db.withOrg(orgId, (tx) =>
       tx.select().from(studioProjectKeys).where(eq(studioProjectKeys.orgId, orgId)),
@@ -77,7 +77,7 @@ export class StudioKeysService {
     const keyRows = await this.db.root
       .select({ id: legacyApiKeys.id, revoked: legacyApiKeys.revoked })
       .from(legacyApiKeys)
-      .where(and(eq(legacyApiKeys.id, input.apiKeyId), eq(legacyApiKeys.tenantId, input.orgId)))
+      .where(and(eq(legacyApiKeys.id, input.apiKeyId), eq(legacyApiKeys.tenant_id, input.orgId)))
       .limit(1);
     const key = keyRows[0];
     if (!key) {

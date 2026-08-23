@@ -33,7 +33,7 @@ export class BillingController {
 
   @Get(':orgId/invoices')
   @Roles('owner', 'admin', 'billing')
-  async invoices(@Param('orgId') orgId: string, @Query('product') product?: string) {
+  async listInvoices(@Param('orgId') orgId: string, @Query('product') product?: string) {
     return { invoices: await this.invoices.list(orgId, product) };
   }
 

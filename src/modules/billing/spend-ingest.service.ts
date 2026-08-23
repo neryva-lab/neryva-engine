@@ -4,10 +4,13 @@ import { z } from 'zod';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
+import { env } from '../../common/config/env';
 import { legacyTenants } from '../../common/infra/db/legacy-schema';
 import { ManifestRegistryService } from '../console/manifest-registry.service';
 import { projects } from '../organizations/schema';
 import { NewSpendEvent, spendEvents } from './schema';
+import { PriceCatalogService } from './price-catalog.service';
+import { meteringIngestRows } from '../../common/observability/metrics';
 
 /**
  * The engine metering ingest plane (B-1): satellites push spend events in
@@ -62,6 +65,7 @@ export class SpendIngestService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly manifests: ManifestRegistryService,
+    private readonly prices: PriceCatalogService,
   ) {}
 
   async ingest(source: string, rawEvents: unknown[]): Promise<IngestResult> {
@@ -117,6 +121,8 @@ export class SpendIngestService {
 
     let accepted = 0;
     let duplicates = 0;
+    let unpriced = 0;
+    let overridden = 0;
     for (const [orgId, events] of perOrg) {
       // Deduplicate within the batch itself (same event_id twice in one push).
       const seen = new Set<string>();
@@ -127,6 +133,47 @@ export class SpendIngestService {
           continue;
         }
         seen.add(event.event_id);
+
+        // ── Platform-authoritative cost (the B-1 trust fix) ─────────────────
+        // derive: catalog price wins when derivable; reported cost is
+        //         advisory fallback (counted as unpriced).
+        // enforce: unpriced or deviating >10% (min $0.01) from derived → row rejected.
+        // trust:   reported cost passes through (documented compat mode).
+        let costUsd = event.cost_usd;
+        if (env.BILLING_COST_VALIDATION !== 'trust') {
+          const occurredAt = new Date(event.occurred_at).toISOString();
+          const derived = await this.prices.deriveCost({
+            product: event.product,
+            kind: event.kind,
+            model: event.model ?? null,
+            tokensIn: event.tokens_in ?? null,
+            tokensOut: event.tokens_out ?? null,
+            occurredAt,
+          });
+          if (derived === null) {
+            if (env.BILLING_COST_VALIDATION === 'enforce') {
+              rejected.push({ index, reason: `unpriced slot ${event.product}/${event.kind}${event.model ? `/${event.model}` : ''} — add a price catalog row` });
+              continue;
+            }
+            unpriced += 1; // derive mode: fall back to reported cost
+          } else {
+            if (env.BILLING_COST_VALIDATION === 'enforce') {
+              const tolerance = Math.max(0.1 * derived, 0.01);
+              if (Math.abs(event.cost_usd - derived) > tolerance) {
+                rejected.push({
+                  index,
+                  reason: `cost_usd ${event.cost_usd.toFixed(6)} deviates from derived ${derived.toFixed(6)} beyond tolerance`,
+                });
+                continue;
+              }
+            }
+            if (Math.abs(derived - event.cost_usd) > 1e-9) {
+              overridden += 1;
+            }
+            costUsd = derived;
+          }
+        }
+
         rows.push({
           eventId: event.event_id,
           source,
@@ -139,7 +186,7 @@ export class SpendIngestService {
           model: event.model ?? null,
           tokensIn: event.tokens_in ?? null,
           tokensOut: event.tokens_out ?? null,
-          costUsd: event.cost_usd.toFixed(6),
+          costUsd: costUsd.toFixed(6),
           meta: (event.meta ?? {}) as Record<string, unknown>,
           occurredAt: new Date(event.occurred_at).toISOString(),
         });
@@ -156,7 +203,10 @@ export class SpendIngestService {
       );
       accepted += inserted.length;
       duplicates += rows.length - inserted.length;
+      meteringIngestRows.inc({ outcome: 'accepted' }, inserted.length);
+      meteringIngestRows.inc({ outcome: 'duplicate' }, rows.length - inserted.length);
     }
+    meteringIngestRows.inc({ outcome: 'rejected' }, rejected.length);
 
     await this.audit.add({
       action: 'billing.spend_ingested',
@@ -164,7 +214,13 @@ export class SpendIngestService {
       actorType: 'service',
       actorId: source,
       tenantId: perOrg.size === 1 ? [...perOrg.keys()][0] : null,
-      details: { accepted, duplicates, rejected: rejected.length },
+      details: {
+        accepted,
+        duplicates,
+        rejected: rejected.length,
+        ...(unpriced > 0 ? { unpriced_fallback: unpriced } : {}),
+        ...(overridden > 0 ? { cost_overridden: overridden } : {}),
+      },
     });
     if (rejected.length > 0) {
       SpendIngestService.logger.warn(`ingest from ${source}: ${rejected.length} row(s) rejected`);

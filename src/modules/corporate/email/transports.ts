@@ -18,6 +18,7 @@ export class FileEmailTransport implements EmailTransport {
       `To: ${message.to}`,
       `Subject: ${message.subject}`,
       'Content-Type: text/plain; charset=utf-8',
+      ...(message.headers ? Object.entries(message.headers).map(([k, v]) => `${k}: ${v}`) : []),
       '',
       message.text,
       ...(message.html ? ['', '--html--', '', message.html] : []),
@@ -44,6 +45,7 @@ export class ResendEmailTransport implements EmailTransport {
         subject: message.subject,
         text: message.text,
         ...(message.html ? { html: message.html } : {}),
+        ...(message.headers ? { headers: message.headers } : {}),
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -71,6 +73,7 @@ export class PostmarkEmailTransport implements EmailTransport {
         Subject: message.subject,
         TextBody: message.text,
         ...(message.html ? { HtmlBody: message.html } : {}),
+        ...(message.headers ? { Headers: Object.entries(message.headers).map(([Name, Value]) => ({ Name, Value })) } : {}),
         MessageStream: 'outbound',
       }),
       signal: AbortSignal.timeout(10_000),

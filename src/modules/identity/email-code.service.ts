@@ -32,8 +32,9 @@ export class EmailCodeService {
   ) {}
 
   async issue(accountId: string, requestIp: string | null): Promise<IssueResult> {
-    if (!(await this.budgetAllows(accountId, requestIp))) {
-      return { ok: false, reason: 'rate_limited' };
+    const budget = await this.budgetAllows(accountId, requestIp);
+    if (budget !== true) {
+      return { ok: false, reason: budget };
     }
     const code = String(randomInt(0, 100_000_000)).padStart(CODE_DIGITS, '0');
     const expiresAt = new Date(Date.now() + env.IDENTITY_EMAIL_CODE_TTL_SECONDS * 1000).toISOString();
@@ -96,14 +97,14 @@ export class EmailCodeService {
   }
 
   // ── Rate budgets: 3 codes/account/hour, 10/IP/hour (fixed window) ───────
-  private async budgetAllows(accountId: string, ip: string | null): Promise<boolean> {
+  private async budgetAllows(accountId: string, ip: string | null): Promise<true | 'account_rate_limited' | 'ip_rate_limited'> {
     try {
       const a = await this.redis.raw.incr(`emailcode:acct:${accountId}:${hourWindow()}`);
       if (a === 1) {
         await this.redis.raw.expire(`emailcode:acct:${accountId}:${hourWindow()}`, 3700);
       }
       if (a > 3) {
-        return false;
+        return 'account_rate_limited';
       }
       if (ip) {
         const i = await this.redis.raw.incr(`emailcode:ip:${ip}:${hourWindow()}`);
@@ -111,7 +112,7 @@ export class EmailCodeService {
           await this.redis.raw.expire(`emailcode:ip:${ip}:${hourWindow()}`, 3700);
         }
         if (i > 10) {
-          return false;
+          return 'ip_rate_limited';
         }
       }
       return true;

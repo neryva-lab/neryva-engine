@@ -46,6 +46,12 @@ export class OrgRolesGuard implements CanActivate {
     if (principal.kind !== 'l1') {
       throw ApiError.forbidden('Org surfaces are L1-only (console sessions)');
     }
+    if (principal.imp) {
+      const method = request.method.toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD') {
+        throw ApiError.forbidden('Impersonated sessions are read-only (support access)');
+      }
+    }
 
     const role = await this.orgAccess.getMembershipRole(principal.id, orgId);
     if (role === null) {

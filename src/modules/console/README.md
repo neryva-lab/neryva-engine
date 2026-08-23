@@ -33,3 +33,15 @@ render from stage `building` onward (deployment.yaml is live at stage
 **Public interface:** `ManifestRegistryService` (product registration) and
 `SummaryProviderRegistry` (card providers) — product modules register
 through these at boot.
+
+## Platform surface (gap C-2/C-3 + O-5/O-6 — the benchmark consoles' furniture)
+
+- **`GET /console/notifications[?unread=true&limit=]`** · **`POST …/:id/read`** · **`POST …/read-all`** — the notification center's read surface, proxied to `modules/notifications` (eng-0011, the single write authority: events → notifications, optional email fan-out). Badge counts, per-account read state.
+- **`GET /console/onboarding`** — the first-run checklist (project? key? trial? first usage?) computed live from engine-owned state — OpenAI/Anthropic-style guided setup; no stored flags to drift.
+- **`GET /console/org/:orgId/limits`** — per-product quota snapshots joined with entitlement states (benchmark pattern #9: limits attach to the grouping unit, visible where they bind).
+- **`GET /console/org/:orgId/audit?actor=&action=&from=&to=&before=&limit=`** — the upgraded audit view: cursor pagination, actor/action-prefix/date filters, capped at 200/page (enterprise day-one).
+- **`GET /console/org/:orgId/audit/export`** (owner/admin/billing) — NDJSON compliance export with the same filters; **`…/audit/verify`** — the tamper-evidence view (chain recompute).
+- **`GET /console/status`** — the status center: overall posture (operational/degraded/outage), per-component health, satellite liveness from heartbeats, and the active announcement window — statuspage parity inside the console.
+- **`POST /console/announcements` / `…/:id/resolve`** — staff-managed announcements (maintenance/incident/notice/product_release), L2 super_admin/operator-gated; resolving closes the window, history preserved (the incident history IS the status page).
+
+New tables: `console_announcements` (eng-0009). The route↔manifest bijection's platform prefixes cover every new namespace — undeclared surface remains impossible.

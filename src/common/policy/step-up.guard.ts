@@ -16,6 +16,20 @@ export const STEP_UP_KEY = 'stepUpMfa';
  */
 export const RequireStepUp = (): MethodDecorator & ClassDecorator => SetMetadata(STEP_UP_KEY, true);
 
+/**
+ * Imperative step-up check for routes where the privileged act is
+ * conditional on the request body (inviting AS admin, changing a role TO
+ * owner/admin) — the declarative guard cannot see the payload. Same proof
+ * semantics as the guard, same 401 step_up_required failure.
+ */
+export function assertFreshMfaProof(accountId: string, request: FastifyRequest): void {
+  const header = request.headers[MFA_PROOF_HEADER];
+  const proof = Array.isArray(header) ? header[0] : header;
+  if (!verifyMfaProof(proof, accountId).valid) {
+    throw ApiError.stepUpRequired();
+  }
+}
+
 @Injectable()
 export class StepUpGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
@@ -33,6 +47,9 @@ export class StepUpGuard implements CanActivate {
     }
     if (principal.kind !== 'l1') {
       throw ApiError.forbidden('Step-up MFA proofs exist only for console sessions (L1)');
+    }
+    if (principal.imp) {
+      throw ApiError.forbidden('Impersonated sessions are read-only — privileged acts are impossible by design');
     }
     const header = request.headers[MFA_PROOF_HEADER];
     const proof = Array.isArray(header) ? header[0] : header;

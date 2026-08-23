@@ -3,6 +3,8 @@
 **Date:** 2026-08-23 · **Supersedes:** the earlier draft of this file (which led with process items — wrong emphasis; this version is a functional audit)
 **Method:** every "implemented" and "missing" claim below was verified against the engine source this session (all 10 modules under `src/modules/`, kernel under `src/common/`, migrations `eng-0001…0007`), cross-checked against the promised capabilities in the architecture layer: [product-integration inheritance list](../console/product-integration.md), [access-model](../console/access-model.md), identity architecture (final_analysis 06), [END-TO-END auth map](../../dev/END-TO-END.md) §2, and the platform benchmarks (final_analysis 07).
 
+> **2026-08-23 (late) — IMPLEMENTED THIS SESSION:** all 9 BLOCKERS and all 5 "surprises" now have end-to-end code: password reset + email verification + session management (`account.controller`, eng-0010) · TOTP enrollment/recovery codes/proof minting (`mfa.service`, `totp.ts`) · org deletion with staged grace + purge worker + ownership transfer (`org-lifecycle.service`, eng-0012) · route↔manifest bijection boot enforcement (`route-bijection.service` + main.ts onRoute) · price catalog + derive/enforce ingest cost validation (`price-catalog.service`, eng-0011) · proxy `/v1/deployments` exception (Caddyfile) · satellite revocation feed (`revocation-log.service`, `/internal/revocations`) · metrics plane (`common/observability`, `/metrics`, HTTP/auth/ingest/deployment/webhook instrumentation) · webhook subsystem (`modules/webhooks`: HMAC signing, retries, DLQ, SSRF guard) · notification service (`modules/notifications`: feed + email fan-out) · auto-promote stage chaining + env pinning + failure events (deployment workflow) · staff overlay (`modules/staff`: org search/detail, audit query+verify, feature flags, READ-ONLY impersonation via OP-signed `imp` tokens). Payment provider decided: **Stripe** (Wave D, seam documented in the billing README). All of it is WRITTEN-UNVERIFIED (no build/test run yet) and uncommitted.
+
 **Severity scale**
 - **BLOCKER** — cannot serve real users without it (security hole, dead-end flow, or unmanageable system)
 - **HIGH** — enterprise customers hit it in the first weeks; missing it is a support/incident liability
@@ -165,6 +167,8 @@
 
 **Implemented:** satellite registry (agent-runtime live, inference placeholder) with heartbeats (self-identity-enforced) + staff status view · config publish (step-up-gated) with versioned pull + latest + ACK + durable notification ledger.
 
+**Depth pass 2026-08-24 (config-publish v2, eng-0016):** X-4 closed — per-scope strict payload schemas (policy/guardrail/quota/model-catalog, `.strict()`, wire-capped; invalid configs cannot publish), the draft→validate→publish→rollback editor (invalid drafts persist with their report; rollback = new version restoring old payload), history/diff/version reads, bootstrap pull (one-shot cold sync), ETag/304 on latest, paginated catch-up (`nextSince`/`hasMore`), per-satellite delivery view with registry liveness, re-notify, `config.published` webhook push, and retention sweeps (versions + acked notifications; the satellites sweeper owns config-drift incidents). Pull zone honors the satellite quarantine gate + activity counters. X-1/X-2/X-3 are the satellites track (satellites dense wave).
+
 **Missing features:**
 
 | # | Feature | Severity | Detail |
@@ -172,7 +176,7 @@
 | X-1 | **Satellite revocation feed** | BLOCKER (A-2) | No endpoint for satellites to learn engine session revocations/logouts — the runtime cannot honor engine-side session kills until it exists. |
 | X-2 | **Stale-satellite detection** | HIGH | Heartbeats recorded; no job flips a satellite to stale when they stop. |
 | X-3 | **Connection-contract compliance view** | MEDIUM | No per-satellite evidence panel (ingest flowing? config ACK lag? validation traffic?). |
-| X-4 | **Config versioning UX** | MEDIUM | No diff-viewer, no rollback-to-version publish, no per-scope payload schema validation (payloads are `IsObject` — any JSON publishes). |
+| ~~X-4~~ | **Config versioning UX** | closed 2026-08-24 | Drafts + diff + rollback + strict payload validation shipped in the v2 depth pass above. |
 
 ---
 

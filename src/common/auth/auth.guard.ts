@@ -12,11 +12,13 @@ import { AuditService } from '../audit/audit.service';
 import { AUTH_LAYERS_KEY, IS_PUBLIC_KEY, REQUIRED_SCOPES_KEY } from './decorators';
 import { hasScope, AuthLayerKind, L1Principal, L2Principal, L3Principal, Principal } from './principal';
 import { JwksService } from './jwks.service';
-import { SERVICE_CLIENT_PORT, SESSION_REGISTRY_PORT, ServiceClientPort, SessionRegistryPort } from './ports';
+import { SERVICE_ACCOUNT_DIRECTORY_PORT, SERVICE_CLIENT_PORT, SESSION_REGISTRY_PORT, ServiceAccountDirectoryPort, ServiceClientPort, SessionRegistryPort } from './ports';
 import { env } from '../config/env';
+import { authFailuresTotal } from '../observability/metrics';
 
 const API_KEY_HEADER = 'x-api-key';
 const L2_KEY_PREFIX = 'nrv_live_';
+const SA_TOKEN_PREFIX = 'nrv_sa_';
 
 /**
  * The composite authentication guard — the enforcement point for the token
@@ -45,6 +47,7 @@ export class AuthGuard implements CanActivate {
     private readonly audit: AuditService,
     @Optional() @Inject(SESSION_REGISTRY_PORT) private readonly sessionRegistry?: SessionRegistryPort,
     @Optional() @Inject(SERVICE_CLIENT_PORT) private readonly serviceClients?: ServiceClientPort,
+    @Optional() @Inject(SERVICE_ACCOUNT_DIRECTORY_PORT) private readonly serviceAccountDirectory?: ServiceAccountDirectoryPort,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -87,6 +90,7 @@ export class AuthGuard implements CanActivate {
           if (err instanceof ApiError && err.getStatus() === 429) {
             throw err;
           }
+          authFailuresTotal.inc({ layer: 'l2', reason: shortReason(err) });
           errors.push(`l2: ${(err as Error).message}`);
         }
       }
@@ -105,6 +109,7 @@ export class AuthGuard implements CanActivate {
           if (err instanceof ApiError && err.getStatus() === 429) {
             throw err;
           }
+          authFailuresTotal.inc({ layer: 'l3', reason: shortReason(err) });
           errors.push(`l3: ${(err as Error).message}`);
         }
       }
@@ -116,6 +121,7 @@ export class AuthGuard implements CanActivate {
           if (err instanceof ApiError && err.getStatus() === 429) {
             throw err;
           }
+          authFailuresTotal.inc({ layer: 'l1', reason: shortReason(err) });
           errors.push(`l1: ${(err as Error).message}`);
         }
       }
@@ -170,10 +176,11 @@ export class AuthGuard implements CanActivate {
       email: typeof claims.email === 'string' ? claims.email : null,
       platformRole,
       scopes: scope.split(' ').filter((s) => s.length > 0),
+      imp: claims.imp === true,
     };
   }
 
-  // ── L2: nrv_live_ API keys (shared table, Python-owned during handover) ──
+  // ── L2: nrv_live_ API keys + nrv_sa_ service-account tokens ──────────────
 
   private async resolveL2(rawKey: string): Promise<L2Principal> {
     // Break-glass bootstrap key: constant-time compare, super_admin, audited.
@@ -186,6 +193,10 @@ export class AuthGuard implements CanActivate {
         details: { note: 'break-glass bootstrap key authentication' },
       });
       return { kind: 'l2', id: 'bootstrap', name: 'break-glass', role: 'super_admin', tenantId: null, scopes: ['*'], bootstrap: true };
+    }
+
+    if (rawKey.startsWith(SA_TOKEN_PREFIX)) {
+      return this.resolveServiceAccountToken(rawKey);
     }
 
     if (!rawKey.startsWith(L2_KEY_PREFIX)) {
@@ -212,13 +223,13 @@ export class AuthGuard implements CanActivate {
         id: legacyApiKeys.id,
         name: legacyApiKeys.name,
         role: legacyApiKeys.role,
-        tenantId: legacyApiKeys.tenantId,
+        tenantId: legacyApiKeys.tenant_id,
         scopes: legacyApiKeys.scopes,
-        expiresAt: legacyApiKeys.expiresAt,
+        expiresAt: legacyApiKeys.expires_at,
         revoked: legacyApiKeys.revoked,
       })
       .from(legacyApiKeys)
-      .where(and(eq(legacyApiKeys.keyHash, keyHash), eq(legacyApiKeys.revoked, false)))
+      .where(and(eq(legacyApiKeys.key_hash, keyHash), eq(legacyApiKeys.revoked, false)))
       .limit(1);
 
     const row = rows[0];
@@ -245,7 +256,7 @@ export class AuthGuard implements CanActivate {
     // last-active discipline; keep it cheap: increment + timestamp).
     void this.db.root
       .update(legacyApiKeys)
-      .set({ usageCount: sql`${legacyApiKeys.usageCount} + 1`, lastUsedAt: sql`now()` })
+      .set({ usage_count: sql`${legacyApiKeys.usage_count} + 1`, last_used_at: sql`now()` })
       .where(eq(legacyApiKeys.id, row.id))
       .catch(() => undefined);
 
@@ -258,6 +269,52 @@ export class AuthGuard implements CanActivate {
       tenantId: row.tenantId ?? null,
       scopes,
       bootstrap: false,
+    };
+  }
+
+  /**
+   * Org service-account tokens (`nrv_sa_`): resolved by SHA-256 through the
+   * organizations module's directory port — the guard never queries the
+   * org tables directly (kernel imports no module). Same per-token rate
+   * limit, same fail-closed posture when the module is disabled, same
+   * audit-failure trail as `nrv_live_` keys. The resulting principal is
+   * org-scoped (tenantId set) with role `service_account`.
+   */
+  private async resolveServiceAccountToken(rawToken: string): Promise<L2Principal> {
+    const keyHash = createHash('sha256').update(rawToken, 'utf8').digest('hex');
+
+    const windowSeconds = 60;
+    const window = Math.floor(Date.now() / 1000 / windowSeconds);
+    const rlKey = `auth:l2:rl:${keyHash}:${window}`;
+    const count = (await this.redis.raw.incr(rlKey).catch(() => 0)) as number;
+    if (count === 1) {
+      await this.redis.raw.expire(rlKey, windowSeconds).catch(() => undefined);
+    }
+    if (count > 600) {
+      throw ApiError.rateLimited(windowSeconds);
+    }
+
+    const resolution = this.serviceAccountDirectory
+      ? await this.serviceAccountDirectory.validateByHash(keyHash)
+      : { valid: false as const, reason: 'unknown' as const };
+    if (!resolution.valid) {
+      await this.audit.add({
+        action: 'auth.failure',
+        resourceType: 'org_service_account',
+        actorType: 'api_key',
+        details: { reason: resolution.reason ?? 'unknown' },
+      });
+      throw new Error(`service account token rejected (${resolution.reason ?? 'unknown'})`);
+    }
+    return {
+      kind: 'l2',
+      id: resolution.serviceAccountId!,
+      name: resolution.name ?? 'service account',
+      role: 'service_account',
+      tenantId: resolution.orgId ?? null,
+      scopes: resolution.scopes ?? [],
+      bootstrap: false,
+      serviceAccount: true,
     };
   }
 
@@ -278,6 +335,12 @@ export class AuthGuard implements CanActivate {
     const scope = typeof claims.scope === 'string' ? claims.scope : '';
     return { kind: 'l3', id: clientId, scopes: scope.split(' ').filter((s) => s.length > 0) };
   }
+}
+
+/** Coarsen an error message to a bounded label value (cardinality guard). */
+function shortReason(err: unknown): string {
+  const message = (err as Error).message ?? 'error';
+  return message.split(/[(\s]/)[0].slice(0, 32) || 'error';
 }
 
 /** PG timestamptz strings → ISO (kept string-mode; Date.parse accepts both). */

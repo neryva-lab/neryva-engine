@@ -131,7 +131,8 @@ export class InvoicesService {
     if (invoice.status === input.target) {
       return invoice; // idempotent no-op
     }
-    if (!INVOICE_TRANSITIONS[invoice.status].includes(input.target)) {
+    const allowed = INVOICE_TRANSITIONS[invoice.status as keyof typeof INVOICE_TRANSITIONS];
+    if (!allowed || !allowed.includes(input.target)) {
       throw ApiError.conflict(`invalid invoice transition ${invoice.status} -> ${input.target}`);
     }
     const now = new Date().toISOString();

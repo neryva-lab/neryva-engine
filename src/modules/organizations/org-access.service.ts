@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { inArray } from 'drizzle-orm';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { EntitlementState, OrgAccessPort } from '../../common/auth/ports';
@@ -51,6 +52,7 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
     const slugBase = email.split('@')[0]?.replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'org';
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const slug = `pers-${slugBase}-${randomUUID().slice(0, 8)}`;
+      const now = new Date().toISOString();
       try {
         await this.db.root.insert(legacyTenants).values({
           id: orgId,
@@ -66,6 +68,10 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
           guardrail_config: {},
           guardrail_thresholds: {},
           version: 1,
+          // The Python TenantModel supplies these; the mirror carries no
+          // defaults, so the engine passes them explicitly.
+          created_at: now,
+          updated_at: now,
         });
         break;
       } catch (err) {
@@ -93,7 +99,12 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
     return orgId;
   }
 
-  /** The org picker payload for login/context resolution (ADR-001 contexts). */
+  /**
+   * The org picker payload for login/context resolution (ADR-001 contexts).
+   * The tenants read is bounded to exactly the caller's membership orgs —
+   * never an unbounded table scan (at 10k orgs the old read-everything
+   * shape would have been the most expensive query in the console).
+   */
   async listContexts(accountId: string): Promise<Array<{ orgId: string; role: string; name: string | null }>> {
     const memberships = await this.memberships.listForAccount(accountId);
     if (memberships.length === 0) {
@@ -104,7 +115,13 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
       // memberships; ids come from the filtered membership query above.
       tx
         .select({ id: legacyTenants.id, name: legacyTenants.name })
-        .from(legacyTenants),
+        .from(legacyTenants)
+        .where(
+          inArray(
+            legacyTenants.id,
+            memberships.map((m) => m.orgId),
+          ),
+        ),
     );
     const nameById = new Map(orgRows.map((row) => [row.id, row.name]));
     return memberships.map((m) => ({ orgId: m.orgId, role: m.role, name: nameById.get(m.orgId) ?? null }));

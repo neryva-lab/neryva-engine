@@ -1,10 +1,13 @@
 # The Neryva edge proxy — the strangler's control point (correction C8).
 #
 # Route table (ledger agent-runtime A-0 / ADR-005 D2):
+#   /v1/deployments/**  → engine (the deployment product's runtime plane —
+#                         manifest-declared engine-served; must precede the
+#                         /v1/* catch or the bijection is a lie at the edge)
 #   /v1/**, /surfaces/**  → agent-runtime satellite (Python, production
 #                           until per-namespace parity flips per ADR-007 D4)
 #   everything else       → engine (this TS core: /auth, /console, /public,
-#                           /internal, /health, /login)
+#                           /internal, /health, /login, /metrics)
 #
 # The runtime's own ops/job plane does NOT pass through this edge — it is a
 # staff surface on its own upstream. Flip procedure (per namespace): change
@@ -24,6 +27,11 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
+	}
+
+	# ── Engine-owned runtime routes (manifest runtime_routes) ─────────────
+	handle /v1/deployments* {
+		reverse_proxy {$ENGINE_UPSTREAM}
 	}
 
 	# ── Satellite plane: the agent-runtime serves the runtime API ──────────

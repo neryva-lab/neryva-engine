@@ -25,8 +25,9 @@
 - **Gate:** reconciliation clean (engine totals = runtime totals during dual-write); cutover
 
 ### A-4 — Policy/config publishing → engine
-- [ ] Policy sets, guardrail profiles (incl. shadow-mode config), model catalog publish from the engine; runtime subscribes (versioned pull + push notification); runtime's local editing routes freeze (read-only)
+- [~] Policy sets, guardrail profiles (incl. shadow-mode config), model catalog publish from the engine; runtime subscribes (versioned pull + push notification); runtime's local editing routes freeze (read-only)
 - **Gate:** engine-published policy change visible in runtime enforcement within one refresh cycle; audit chain unbroken across the wire
+- **Engine side implemented** (2026-08-24, `modules/config-publish` v2 + eng-0016): the full editor — draft→validate→publish→rollback with strict per-scope payload schemas mirroring the runtime's own consumption shapes (policy rules incl. kind/action enums, the 7 guardrail rails + thresholds + `shadow_mode`, the budgets.py quota ladder, model catalog with unique pairs and self-referencing defaults); invalid configs cannot publish. Satellites consume `bootstrap` (one-shot cold sync + cursors), `latest` (ETag/payload-digest → 304), versioned `since` catch-up (paginated, never silently truncated), and the ACK ledger. Delivery observability (per-satellite ACK state + registry liveness), re-notify, webhook push (`config.published`), and retention (versions + acked notifications) are engine-side; unacked-drift incidents live in the satellites sweeper (`config_drift`). **Remaining for the checkbox:** the RUNTIME side — subscribe to the pull zone, apply versions, freeze its local editing routes read-only.
 
 ### A-5 — Superseded-subsystem retirement (ADR-006 D3: only the superseded parts)
 - [ ] Runtime's own quota plane, key management UI/API, operator auth, config editing → thin clients → deleted; runtime keeps: session engine, threads, gateway, guardrail enforcement, RAG

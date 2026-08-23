@@ -2,10 +2,17 @@ import { Injectable, Module, OnModuleInit } from '@nestjs/common';
 import { HealthRegistry } from '../../common/health/health.controller';
 import { DbService } from '../../common/infra/db/db.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
+import { BillingModule } from '../billing/billing.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
+import { SatellitesModule } from '../satellites/satellites.module';
 import { ConsoleHomeController } from './console-home.controller';
 import { ConsoleHomeService } from './console-home.service';
+import { ConsolePlatformController } from './console-platform.controller';
+import { ConsoleAuditQueryService } from './audit-query.service';
+import { ConsoleOnboardingService } from './onboarding.service';
+import { ConsoleStatusService } from './status.service';
 import { ManifestRegistryService } from './manifest-registry.service';
+import { RouteBijectionService } from './route-bijection.service';
 import { SummaryProviderRegistry } from './summary-provider.registry';
 import { AgentStudioSummaryProvider } from './summaries/agent-studio.summary';
 import { DeploymentSummaryProvider } from './summaries/deployment.summary';
@@ -30,26 +37,30 @@ export class ConsoleBoot implements OnModuleInit {
 }
 
 /**
- * The console/control-plane module (ledger console.md C-1…C-4), registered
- * when MODULES__CONSOLE_ENABLED (requires organizations).
- *
- * The manifest registry and summary-provider registry are the platform's
- * integration seam: product modules (agent-studio furniture at P5,
- * deployment at P7) and satellites register through them — the shell never
- * gains product-specific code.
+ * The console/control-plane module (ledger console.md C-1…C-4 + the gap-C
+ * completion: notification center, onboarding checklist, status center,
+ * announcements, limits view, and the paginated/filterable audit surface).
+ * Registered when MODULES__CONSOLE_ENABLED (requires organizations; the
+ * status center reads satellite liveness, the limits view reads quotas).
  */
 @Module({
-  imports: [OrganizationsModule],
-  controllers: [ConsoleHomeController],
+  imports: [OrganizationsModule, SatellitesModule, BillingModule],
+// (in-app notifications live in modules/notifications — eng-0011; the console
+// platform controller proxies its read surface under /console for the shell)
+  controllers: [ConsoleHomeController, ConsolePlatformController],
   providers: [
     ManifestRegistryService,
+    RouteBijectionService,
     SummaryProviderRegistry,
     AgentStudioSummaryProvider,
     DeploymentSummaryProvider,
     ConsoleHomeService,
+    ConsoleOnboardingService,
+    ConsoleStatusService,
+    ConsoleAuditQueryService,
     ConsoleBoot,
   ],
-  exports: [ManifestRegistryService, SummaryProviderRegistry],
+  exports: [ManifestRegistryService, RouteBijectionService, SummaryProviderRegistry],
 })
 export class ConsoleModule {
   constructor(db: DbService, healthRegistry: HealthRegistry) {

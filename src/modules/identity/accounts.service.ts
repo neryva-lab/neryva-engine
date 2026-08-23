@@ -86,6 +86,18 @@ export class AccountsService {
     await this.db.root.update(accounts).set({ passwordHash, updatedAt: new Date().toISOString() }).where(eq(accounts.id, accountId));
   }
 
+  async updateDisplayName(accountId: string, displayName: string): Promise<void> {
+    await this.db.root.update(accounts).set({ displayName, updatedAt: new Date().toISOString() }).where(eq(accounts.id, accountId));
+    await this.audit.add({
+      action: 'account.profile_updated',
+      resourceType: 'account',
+      resourceId: accountId,
+      actorType: 'account',
+      actorId: accountId,
+      details: {},
+    });
+  }
+
   /** Global session kill-switch: the L1 guard compares iat against this. */
   async revokeAllSessions(accountId: string): Promise<void> {
     await this.db.root

@@ -12,6 +12,9 @@ import { RequestIdMiddleware } from './http/request-id.middleware';
 import { RateLimitGuard } from './http/rate-limit';
 import { HealthController, HealthRegistry } from './health/health.controller';
 import { EventBus } from './events/event-bus';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { MetricsInterceptor } from './observability/metrics.interceptor';
+import { MetricsController } from './observability/metrics.controller';
 
 /**
  * The shared kernel (locked list — additions require an ADR): config,
@@ -36,8 +39,9 @@ import { EventBus } from './events/event-bus';
     EventBus,
     HealthRegistry,
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
   ],
-  controllers: [HealthController],
+  controllers: [HealthController, MetricsController],
   exports: [DbService, RedisService, QueueService, JwksService, AuditService, EventBus, HealthRegistry],
 })
 export class KernelModule implements NestModule {

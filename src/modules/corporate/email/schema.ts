@@ -15,4 +15,4 @@ export const emailDeliveries = pgTable('email_deliveries', {
   error: text('error'),
   metadata: jsonb('metadata').notNull().default({}),
   created_at: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-}, (t) => [index('ix_email_deliveries_recipient_created').on(t.recipient, t.createdAt)]);
+}, (t) => [index('ix_email_deliveries_recipient_created').on(t.recipient, t.created_at)]);

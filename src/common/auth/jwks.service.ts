@@ -67,7 +67,7 @@ export class JwksService {
     }
     const [headerB64, payloadB64, signatureB64] = parts;
 
-    let header: { alg?: string; kid?: string; typ?: string };
+    let header: { alg: string; kid?: string; typ?: string };
     let claims: JwtClaims;
     let signature: Buffer;
     try {

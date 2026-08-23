@@ -36,6 +36,12 @@ export const accounts = pgTable('accounts', {
   displayName: varchar('display_name', { length: 256 }),
   status: varchar('status', { length: 32 }).notNull().default('active'), // active | locked | disabled
   mfaLevel: varchar('mfa_level', { length: 16 }).notNull().default('none'), // none | totp | webauthn
+  /**
+   * How the account came to exist: email_code (the passwordless default) or
+   * social:{provider}. Backs the one-way binding rule (doc-06 Δ1): a
+   * federated-origin account never grows a password.
+   */
+  createdVia: varchar('created_via', { length: 32 }).notNull().default('email_code'),
   /** Global session kill-switch: sessions issued before this instant are dead. */
   sessionsRevokedAt: timestamp('sessions_revoked_at', { withTimezone: true, mode: 'string' }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true, mode: 'string' }),
@@ -170,3 +176,25 @@ export const emailLoginCodes = pgTable('email_login_codes', {
   consumedAt: timestamp('consumed_at', { withTimezone: true, mode: 'string' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
 }, (t) => [index('ix_email_codes_account').on(t.accountId)]);
+
+/**
+ * Account action tokens (eng-0010): single-use hashed tokens for emailed
+ * account-lifecycle actions — email verification and password reset. Same
+ * discipline as login codes: sha256 at rest, TTL-capped, attempt-capped,
+ * and a fresh issue voids previous tokens of the same kind for the account.
+ */
+export const accountActionTokens = pgTable('account_action_tokens', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  accountId: uuid('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  /** email_verify | password_reset */
+  kind: varchar('kind', { length: 32 }).notNull(),
+  tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  usedAt: timestamp('used_at', { withTimezone: true, mode: 'string' }),
+  requestIp: varchar('request_ip', { length: 64 }),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('uq_account_action_tokens_hash').on(t.tokenHash),
+  index('ix_account_action_tokens_account_kind').on(t.accountId, t.kind),
+]);

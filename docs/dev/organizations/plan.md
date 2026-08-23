@@ -1,32 +1,31 @@
 # Organizations — Implementation Plan
 
-**Workstream:** org furniture — memberships, invites, projects, entitlements (the state machine).
+**Workstream:** org furniture — memberships, invites, projects, entitlements (the state machine), and the eng-0009 dense pass (groups, service accounts, settings, audit surfaces).
 **Binding docs:** 06 §4/§7/§11 (+Δ2/Δ3/Δ4/Δ5), [partitioning.md](../../architecture/partitioning.md) §2 Tier-3, [`console/access-model.md`](../../architecture/console/access-model.md).
 **Depends on:** identity I-0/I-1 (accounts must exist for memberships).
 
-## Current state (verified)
+**Status: COMPLETE (O-1…O-4 shipped as eng-0002/eng-0010 in TS; dense pass below shipped as eng-0009).** The original plan targeted the Python backend; the engine (ADR-005) owns the implementation now.
 
-- `tenants` = the org (`TenantModel`; `TenantRepository.get_by_slug` with the runtime-cache read-through). API keys bind to `tenant_id`; RLS isolates rows (migration 0014).
-- **No memberships, no invites, no projects, no entitlements.** Roles that exist (`super_admin/tenant_admin/operator/auditor` in `auth.py`) are the Neryva-staff overlay — a different axis that stays untouched.
+## Current state (verified 2026-08-23)
 
-## Target
+- `tenants` = the org (`TenantModel`; Python-owned DDL, engine writes through documented seams). RLS isolates engine org tables by org_id.
+- Shipped: memberships (statuses, heartbeat, suspension), invites (full lifecycle), projects (CRUD+archive), entitlements (state machine + seats + trials), groups, service accounts (`nrv_sa_` L2 via SERVICE_ACCOUNT_DIRECTORY_PORT), org settings/profile, audit query/facets/export, staged deletion + purge worker, ownership transfer.
 
-`owner|admin|billing|developer|reader` memberships on tenants; invites as the only join path; projects as key/limit/usage containers; the platform-owned entitlement state machine `none→trial→active→past_due→suspended→expired`.
+## Dense pass (eng-0009) — the competitive-parity set
 
-## Steps (one commit each; additive migrations)
+Benchmarked against OpenAI Platform (service accounts in the member inventory, org/project split, audit log API), Vercel teams (member roles, audit export/SIEM, scoped machine identities), WorkOS (invite lifecycle create/resend/extend, groups), GitHub (suspend-before-remove, org audit trail):
 
-**O-1 — Schema (migration 0019).** `org_memberships` (UNIQUE(account_id, org_id), role, status, invited_by), `org_invites` (email, org_id, role, single-use `token_hash`, expiry, accepted_at), `projects` (org_id, name, archived_at), `product_entitlements` (org_id, product, plan, status, limits JSONB, period bounds; UNIQUE(org_id, product)); alterations: `api_keys + project_id NULL, owner_account_id NULL, org_id NULL` (backfill as orgs adopt accounts — 06 §11), `end_users + account_id NULL` (consumer upgrade path). RLS: memberships/invites/projects/entitlements are tenant-scoped. *Gate:* migration clean; import health.
+- **Members:** enriched inventory (email, display name, 2FA level, email-verified, last login, org-context last active, groups), pagination + search, suspend/reactivate (first-class reversible state; owners immune), remove (admin limited to non-owner/admin targets), leave (last-owner guard), role changes (owner/admin targets = owner + step-up), summary cards (members by status, pending invites, SAs, groups).
+- **Invites:** create guards (duplicate pending, already-member, pending cap, invitable-roles only — ownership arrives via transfer), resend = token ROTATION (attempts reset, TTL restart, concurrency-guarded), extend expiry without token churn, computed status on every row.
+- **Projects:** rename/update, unarchive, provenance columns, `include_archived` view.
+- **Entitlements:** seats + source columns, console trial starts (owner/billing, once per product), effective-limits resolution (trial/read-only/entitled overlays).
+- **Groups:** CRUD + membership junction (denormalized org_id for RLS); view all roles, manage owner/admin; never bypasses the role matrix.
+- **Service accounts:** one live `nrv_sa_` token (sha256 at rest, shown once), rotate/revoke/disable/enable, last-used telemetry, AuthGuard resolution as org-scoped L2 (`role: service_account`), per-token rate limit + auth-failure audit parity with `nrv_live_` keys.
+- **Settings/profile:** tenants-seam writes (name/region/retention — audited from→to), branding (validated logo data-URL ≤2MB, hex color), preferences whitelist (runtime defaults, retention knobs, auto-rollback, canary), default-project validation.
+- **Audit:** filtered/paginated query, distinct facets, bounded CSV/JSON export (10k cap).
+- **Lifecycle:** deletion request voids SA tokens too; grace-window export; purge covers all eng-0009 tables; emails for member removed/suspended/role-changed, deletion requested/cancelled, ownership transfer.
 
-**O-2 — Repositories + state machine.** `MembershipRepository` (role checks used by the access matrix), `InviteRepository` (hash-at-rest, expiry, single-use, attempt-capped redemption), `ProjectRepository`, `EntitlementRepository` — **all state transitions live here** (products read state; only billing events move it) with every transition audited (`entitlement.transitioned`). *Gate:* unit tests per transition + invite lifecycle (reuse/expiry/attempt exhaustion).
+## Remaining (tracked in the ledger)
 
-**O-3 — Access-model enforcement.** New dependencies alongside `require_permission`: `require_membership_role(*roles)` and `require_entitlement(product)` (returns 403 `entitlement_required` / 402 `past_due` per access-model matrix). Δ5: assigning owner/admin, ownership transfer, org deletion ride `require_mfa_proof` (already exists — pure dependency composition). *Gate:* route-level tests for each matrix row (owner/billing/developer/reader × owned/not-owned/past_due).
+SCIM + SSO-required orgs (enterprise tier), contract re-pin when `/platform/**` wiring lands, frontend role-label reconciliation.
 
-**O-4 — Org admin API (control-plane furniture).** `/console/org/{members,invites,projects}` CRUD + `/console/org/audit` view — versioned in the pinned contract with `x-neryva-owner: platform`. Personal org auto-created on account signup (ADR-001 context model); joining an existing org happens only via invite redemption. *Gate:* contract re-pin; end-to-end invite→accept→role→revoke scenario test.
-
-## Files touched
-
-`backend/app/infrastructure/db/{models.py,repositories.py}` (+RLS), `backend/alembic/versions/0019_org_furniture.py`, `backend/app/api/dependencies/access.py` (new), `backend/app/api/routes/org.py` (new), `backend/tests/test_org_{memberships,invites,projects,entitlements}.py`, contract re-pin.
-
-## Rollback
-
-All additive; dropping the routes + flag leaves existing tenants untouched (they keep operating exactly as today — a tenant with no memberships behaves as now).

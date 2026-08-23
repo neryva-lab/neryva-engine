@@ -4,10 +4,15 @@ import { DbService } from '../../common/infra/db/db.service';
 import { ConsoleModule } from '../console/console.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { AnomalyService } from './anomaly.service';
+import { BillingCreditsService } from './billing-credits.service';
+import { BillingCycleService } from './billing-cycle.service';
+import { BillingExtensionController } from './billing-extension.controller';
 import { BillingController } from './billing.controller';
 import { BillingWorker } from './billing.worker';
 import { InvoicesService } from './invoices.service';
 import { MeteringController } from './metering.controller';
+import { PriceCatalogController } from './price-catalog.controller';
+import { PriceCatalogService } from './price-catalog.service';
 import { QuotaService } from './quota.service';
 import { SpendIngestService } from './spend-ingest.service';
 import { UsageController } from './usage.controller';
@@ -26,9 +31,9 @@ import { UsageQueryService } from './usage-query.service';
  */
 @Module({
   imports: [ConsoleModule, OrganizationsModule],
-  controllers: [MeteringController, UsageController, BillingController],
-  providers: [SpendIngestService, UsageQueryService, InvoicesService, QuotaService, AnomalyService, BillingWorker],
-  exports: [UsageQueryService, QuotaService, SpendIngestService],
+  controllers: [MeteringController, UsageController, BillingController, PriceCatalogController],
+  providers: [SpendIngestService, UsageQueryService, InvoicesService, QuotaService, PriceCatalogService, AnomalyService, BillingWorker],
+  exports: [UsageQueryService, QuotaService, SpendIngestService, PriceCatalogService],
 })
 export class BillingModule {
   constructor(db: DbService, healthRegistry: HealthRegistry) {

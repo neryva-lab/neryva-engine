@@ -1,46 +1,259 @@
 {
   "version": 1,
-  "comment": "ADR-005 D3 — the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
+  "comment": "ADR-005 D3 \u2014 the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
   "tables": {
-    "accounts": { "owner": "engine-ts", "since": "eng-0001" },
-    "account_credentials": { "owner": "engine-ts", "since": "eng-0001" },
-    "account_recovery_codes": { "owner": "engine-ts", "since": "eng-0001" },
-    "account_identities": { "owner": "engine-ts", "since": "eng-0001" },
-    "oauth_clients": { "owner": "engine-ts", "since": "eng-0001" },
-    "oauth_sessions": { "owner": "engine-ts", "since": "eng-0001" },
-    "oauth_refresh_tokens": { "owner": "engine-ts", "since": "eng-0001" },
-    "oauth_grants": { "owner": "engine-ts", "since": "eng-0001" },
-    "oidc_payloads": { "owner": "engine-ts", "since": "eng-0001" },
-    "email_login_codes": { "owner": "engine-ts", "since": "eng-0001" },
-    "email_deliveries": { "owner": "engine-ts", "since": "eng-0001" },
-    "org_memberships": { "owner": "engine-ts", "since": "eng-0002" },
-    "org_invites": { "owner": "engine-ts", "since": "eng-0002" },
-    "projects": { "owner": "engine-ts", "since": "eng-0002" },
-    "product_entitlements": { "owner": "engine-ts", "since": "eng-0002" },
-    "contact_submissions": { "owner": "engine-ts", "since": "eng-0003" },
-    "newsletter_subs": { "owner": "engine-ts", "since": "eng-0003" },
-    "career_applications": { "owner": "engine-ts", "since": "eng-0003" },
-    "content_posts": { "owner": "engine-ts", "since": "eng-0003" },
-    "corporate_content_staff": { "owner": "engine-ts", "since": "eng-0003" },
-    "billing.spend_events": { "owner": "engine-ts", "since": "eng-0004", "note": "the engine metering plane's OWN table (schema billing) — distinct from the Python-owned public.spend_events until handover A-3; satellites ingest here idempotently by (source, event_id)." },
-    "billing.billing_invoices": { "owner": "engine-ts", "since": "eng-0004" },
-    "product_deployment.pipelines": { "owner": "engine-ts", "since": "eng-0005" },
-    "product_deployment.environments": { "owner": "engine-ts", "since": "eng-0005" },
-    "product_deployment.pipeline_stages": { "owner": "engine-ts", "since": "eng-0005" },
-    "product_deployment.deployments": { "owner": "engine-ts", "since": "eng-0005" },
-    "product_deployment.deployment_events": { "owner": "engine-ts", "since": "eng-0005" },
-    "product_deployment.secrets": { "owner": "engine-ts", "since": "eng-0005" },
-    "studio_project_keys": { "owner": "engine-ts", "since": "eng-0006", "note": "key rows stay Python-owned (api_keys); the project BINDING is engine-owned — one authority per fact; key-row write authority transfers at handover A-1." },
-    "satellites": { "owner": "engine-ts", "since": "eng-0007", "note": "the satellite registry: agent-runtime live; inference PRE-REGISTERED as a placeholder (trigger-gated, ADR-006 D4)." },
-    "published_configs": { "owner": "engine-ts", "since": "eng-0007", "note": "engine-published policy/guardrail/quota/model-catalog documents per (org x scope x product) — handover A-4's store; RLS org-scoped; append-only versions." },
-    "config_notifications": { "owner": "engine-ts", "since": "eng-0007", "note": "durable push-notification ledger for satellite config fanout; satellites ACK after applying." },
-
-    "tenants": { "owner": "python", "shared": "engine INSERTs new orgs (personal-org autocreation, org admin API) using the Python TenantModel column set; Python remains the DDL authority. DDL transfer at agent-runtime handover A-1." },
-    "api_keys": { "owner": "python", "shared": "engine READS for L2 verification (kernel guard); the additive columns project_id/owner_account_id/org_id land via Python Alembic 0017; write authority transfers to the engine at handover A-1." },
-    "audit_events": { "owner": "python", "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 §10.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)." },
-    "spend_events": { "owner": "python", "shared": "engine-owned ingest lands in engine tables at billing B-1; this table stays runtime-owned until handover A-3." },
-    "end_users": { "owner": "python", "shared": "engine never touches until handover A-2 (account link alteration happens there)." },
-    "operator_sessions": { "owner": "python", "shared": "read once by the I-1d data migration (TS script) into oauth_sessions, then obsolete at A-2." }
+    "accounts": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "account_credentials": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "account_recovery_codes": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "account_identities": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "oauth_clients": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "oauth_sessions": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "oauth_refresh_tokens": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "oauth_grants": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "oidc_payloads": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "email_login_codes": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "email_deliveries": {
+      "owner": "engine-ts",
+      "since": "eng-0001"
+    },
+    "org_memberships": {
+      "owner": "engine-ts",
+      "since": "eng-0002"
+    },
+    "org_invites": {
+      "owner": "engine-ts",
+      "since": "eng-0002"
+    },
+    "projects": {
+      "owner": "engine-ts",
+      "since": "eng-0002"
+    },
+    "product_entitlements": {
+      "owner": "engine-ts",
+      "since": "eng-0002"
+    },
+    "contact_submissions": {
+      "owner": "engine-ts",
+      "since": "eng-0003"
+    },
+    "newsletter_subs": {
+      "owner": "engine-ts",
+      "since": "eng-0003"
+    },
+    "career_applications": {
+      "owner": "engine-ts",
+      "since": "eng-0003"
+    },
+    "content_posts": {
+      "owner": "engine-ts",
+      "since": "eng-0003"
+    },
+    "corporate_content_staff": {
+      "owner": "engine-ts",
+      "since": "eng-0003"
+    },
+    "billing.spend_events": {
+      "owner": "engine-ts",
+      "since": "eng-0004",
+      "note": "the engine metering plane's OWN table (schema billing) \u2014 distinct from the Python-owned public.spend_events until handover A-3; satellites ingest here idempotently by (source, event_id)."
+    },
+    "billing.billing_invoices": {
+      "owner": "engine-ts",
+      "since": "eng-0004"
+    },
+    "product_deployment.pipelines": {
+      "owner": "engine-ts",
+      "since": "eng-0005"
+    },
+    "product_deployment.environments": {
+      "owner": "engine-ts",
+      "since": "eng-0005"
+    },
+    "product_deployment.pipeline_stages": {
+      "owner": "engine-ts",
+      "since": "eng-0005"
+    },
+    "product_deployment.deployments": {
+      "owner": "engine-ts",
+      "since": "eng-0005"
+    },
+    "product_deployment.deployment_events": {
+      "owner": "engine-ts",
+      "since": "eng-0005"
+    },
+    "product_deployment.secrets": {
+      "owner": "engine-ts",
+      "since": "eng-0005"
+    },
+    "studio_project_keys": {
+      "owner": "engine-ts",
+      "since": "eng-0006",
+      "note": "key rows stay Python-owned (api_keys); the project BINDING is engine-owned \u2014 one authority per fact; key-row write authority transfers at handover A-1."
+    },
+    "satellites": {
+      "owner": "engine-ts",
+      "since": "eng-0007",
+      "note": "the satellite registry: agent-runtime live; inference PRE-REGISTERED as a placeholder (trigger-gated, ADR-006 D4)."
+    },
+    "published_configs": {
+      "owner": "engine-ts",
+      "since": "eng-0007",
+      "note": "engine-published policy/guardrail/quota/model-catalog documents per (org x scope x product) \u2014 handover A-4's store; RLS org-scoped; append-only versions (notes + rollback lineage since eng-0016; retention-pruned to the newest CONFIG_VERSION_RETENTION per key)."
+    },
+    "config_drafts": {
+      "owner": "engine-ts",
+      "since": "eng-0016",
+      "note": "the mutable draft layer over published_configs (one per org x scope x product) \u2014 validates on save, stores its verdict, publishes snapshot into an immutable version; RLS org-scoped."
+    },
+    "config_notifications": {
+      "owner": "engine-ts",
+      "since": "eng-0007",
+      "note": "durable push-notification ledger for satellite config fanout; satellites ACK after applying; the satellites sweeper reads it for config_drift incidents (documented read-only seam); ACKed rows age out per CONFIG_NOTIFICATION_RETENTION_DAYS."
+    },
+    "tenants": {
+      "owner": "python",
+      "shared": "engine INSERTs new orgs (personal-org autocreation); UPDATEs features jsonb (staff flags, deletion markers \u2014 documented seam); Python remains the DDL authority. DDL transfer at agent-runtime handover A-1."
+    },
+    "api_keys": {
+      "owner": "python",
+      "shared": "engine READS for L2 verification; the keys module WRITES issue/revoke rows and org deletion revokes org keys (dual-write seam, opened engine-side pre-A-1 per the EEP P5 note); additive columns project_id/owner_account_id/org_id land via Python Alembic 0017; full write authority transfers at handover A-1."
+    },
+    "audit_events": {
+      "owner": "python",
+      "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 \u00a710.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)."
+    },
+    "spend_events": {
+      "owner": "python",
+      "shared": "engine-owned ingest lands in engine tables at billing B-1; this table stays runtime-owned until handover A-3."
+    },
+    "end_users": {
+      "owner": "python",
+      "shared": "engine never touches until handover A-2 (account link alteration happens there)."
+    },
+    "operator_sessions": {
+      "owner": "python",
+      "shared": "read once by the I-1d data migration (TS script) into oauth_sessions, then obsolete at A-2."
+    },
+    "account_action_tokens": {
+      "owner": "engine-ts",
+      "since": "eng-0010",
+      "note": "single-use hashed tokens for emailed account actions (password reset, email verification)."
+    },
+    "webhooks": {
+      "owner": "engine-ts",
+      "since": "eng-0011"
+    },
+    "webhook_deliveries": {
+      "owner": "engine-ts",
+      "since": "eng-0011"
+    },
+    "notifications": {
+      "owner": "engine-ts",
+      "since": "eng-0011"
+    },
+    "revocation_events": {
+      "owner": "engine-ts",
+      "since": "eng-0011",
+      "note": "the durable revocation log satellites poll (A-2 feed); append-only."
+    },
+    "staff_impersonations": {
+      "owner": "engine-ts",
+      "since": "eng-0011",
+      "note": "operational records of staff support sessions; tokens are OP-signed with imp/act claims."
+    },
+    "billing.price_catalog": {
+      "owner": "engine-ts",
+      "since": "eng-0011",
+      "note": "platform-authoritative pricing; ingest derives cost from it (BILLING_COST_VALIDATION)."
+    },
+    "org_deletions": {
+      "owner": "engine-ts",
+      "since": "eng-0012",
+      "note": "staged deletion lifecycle: request \u2192 grace \u2192 purge; purge also marks the Python-owned tenants row deleted via its features jsonb (documented seam)."
+    },
+    "console_announcements": {
+      "owner": "engine-ts",
+      "since": "eng-0009",
+      "note": "staff-managed platform announcements (status feed); operator-gated writes; visibility windowed."
+    },
+    "billing.billing_credits": {
+      "owner": "engine-ts",
+      "since": "eng-0014",
+      "note": "grants/trial/purchase balances applied at draft time, oldest-expiring-first; voids return credit."
+    },
+    "billing.billing_credit_applications": {
+      "owner": "engine-ts",
+      "since": "eng-0014",
+      "note": "per-invoice credit application records (children of credits + invoices, no org_id -> no RLS)."
+    },
+    "billing.billing_budgets": {
+      "owner": "engine-ts",
+      "since": "eng-0014",
+      "note": "user-configured monthly budgets with threshold alerts (B-3); cycle-scoped notify state."
+    },
+    "billing.billing_invoice_lines": {
+      "owner": "engine-ts",
+      "since": "eng-0014",
+      "note": "invoice line-item breakdown (kind x model), generated at draft (B-5)."
+    },
+    "billing.billing_adjustments": {
+      "owner": "engine-ts",
+      "since": "eng-0014",
+      "note": "signed credit/debit notes consumed by the next draft (B-7); single-consumption guard."
+    },
+    "career_jobs": {
+      "owner": "engine-ts",
+      "since": "eng-0013"
+    },
+    "content_revisions": {
+      "owner": "engine-ts",
+      "since": "eng-0013",
+      "note": "immutable post snapshots per save; restore writes a NEW revision."
+    },
+    "newsletter_campaigns": {
+      "owner": "engine-ts",
+      "since": "eng-0013"
+    },
+    "newsletter_campaign_sends": {
+      "owner": "engine-ts",
+      "since": "eng-0013",
+      "note": "per-recipient campaign records: dedupe + resume + suppression trail; carries the per-send unsubscribe token."
+    },
+    "email_suppressions": {
+      "owner": "engine-ts",
+      "since": "eng-0013",
+      "note": "hard bounces/complaints/unsubscribes \u2014 the email service refuses suppressed addresses."
+    }
   },
   "rules": [
     "A table appears exactly once; its owner is the only system that may create/alter/drop it.",

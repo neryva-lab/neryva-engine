@@ -27,3 +27,28 @@ columns).
 compatible with the Python engine so both verifiers resolve the same rows.
 
 **Public interface:** `KeysService`.
+
+## Full key lifecycle (gap K-1…K-4, K-6 — the OpenAI/Stripe-grade surface)
+
+- **Rotation (Stripe semantics):** `POST …/keys/:keyId/rotate` — the SAME key
+  identity (id, name, scopes, project binding) gets a fresh secret; the old
+  secret dies this instant (revocation feed spreads it; the 15s validation
+  cache is the bound). Step-up gated; new key shown exactly once.
+- **Update (K-1):** `PATCH …/keys/:keyId` — rename and/or rescope without
+  revoke+reissue. Scope rules enforced (wildcard cannot mix); step-up gated.
+- **Project binding at issue (K-2):** `POST …/keys` accepts `project_id` —
+  one step instead of create-then-bind (rides the engine-owned binding
+  table; the api_keys columns wait on Alembic 0017 per the ownership map).
+- **Per-key detail (K-3):** `GET …/keys/:keyId` — the "what is this key
+  doing" view: metadata, days-to-expiry, usage counters, project binding,
+  and the key's full event trail from the audit chain (issued/updated/
+  rotated/revoked, filtered by resource_id).
+- **Expiring-key alerts (K-4):** a daily keys-namespace worker scans keys
+  inside the 14-day horizon and notifies each org's owner/admin (severity
+  escalates ≤3 days).
+- **Key events to owners (K-6):** issue/revoke/rotate land in the org's
+  notification center (owner/admin) via the notifications module —
+  instant, not audit-archaeology.
+- **Bulk validation:** `POST /internal/keys/validate-batch` (L3
+  `engine:keys:validate`, ≤200 hashes) — satellite cache warm-up and
+  startup reconciliation in one round-trip.

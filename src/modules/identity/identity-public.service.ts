@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { RedisService } from '../../common/infra/redis.service';
+import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
 import { accounts, oauthClients, oauthSessions } from './schema';
 
@@ -15,6 +16,7 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
   constructor(
     private readonly db: DbService,
     private readonly redis: RedisService,
+    private readonly events: EventBus,
   ) {}
 
   /** SESSION_REGISTRY_PORT — the correctness fallback behind the Redis deny-list. */
@@ -43,9 +45,15 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
     return !!row && !row.disabled && row.kind === 'service';
   }
 
-  /** Push a deny-list key (TTL <= access TTL; correctness falls back above). */
+  /**
+   * Push a deny-list key (TTL <= access TTL; correctness falls back above)
+   * AND emit the revocation event — the satellites' durable feed records
+   * OP-driven kills (logout / token revocation) through the same choke
+   * point as user-driven ones.
+   */
   pushSidDeny(sid: string): void {
     void this.redis.raw.set(`auth:deny:sid:${sid}`, '1', 'EX', env.IDENTITY_ACCESS_TTL_SECONDS).catch(() => undefined);
+    void this.events.emit(EngineEvents.SessionRevoked, { sid, accountId: '' }).catch(() => undefined);
   }
 }
 

@@ -32,6 +32,13 @@ Config: `BILLING_ANOMALY_CRON` (default daily 03:15 UTC).
 - Anomaly scan: latest day vs trailing 28d (mean+3σ, ≥$10 absolute), alerts
   carry the product label (the B-5 gate)
 
+**Payment provider decision (2026-08-23):** **Stripe** is the chosen
+payment provider for B-4/Wave D (cards, subscriptions, SCA webhooks). The
+integration lands against the existing invoice records: Stripe PaymentIntents
+map to `billing_invoices` (issued → paid via webhook confirmation, never the
+manual truth-assertion path), customer objects key on org × product ledger.
+Until then invoice `pay` remains an audited internal transition.
+
 **Public interface:** `SpendIngestService`, `UsageQueryService`,
 `QuotaService`, `InvoicesService` (consumed by the product modules for
 their usage KPIs, cost views, and metered emissions).

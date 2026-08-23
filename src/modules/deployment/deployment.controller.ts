@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
@@ -15,16 +15,21 @@ import { DeploymentsService } from './deployments.service';
 import { DeploymentWorkflow } from './deployment.workflow';
 import { EnvironmentsService } from './environments.service';
 import { PipelinesService } from './pipelines.service';
+import { ReleasesService } from './releases.service';
 import { SecretsService } from './secrets.service';
+import { SettingsService } from './settings.service';
+import { ladderProgress } from './rollout';
 import { deploymentPlanFor } from './plans';
 import { DeploymentStatus, ROLLOUT_STRATEGIES, RolloutStrategy } from './schema';
 
 /**
  * The deployment console APIs (D-3): pipelines, environments, deployments,
- * the ops surfaces (cost, secrets). All routes L1 + membership; product
- * routes carry the entitlement semantics (403 entitlement_required on
- * none/expired; writes 402 past_due on past_due/suspended). Manage-shaped
- * routes are owner/admin/developer; views are all-roles.
+ * run controls (pause/promote/cancel/rollback), the releases timeline, the
+ * ops surfaces (cost, secrets, activity, settings). All routes L1 +
+ * membership; product routes carry the entitlement semantics (403
+ * entitlement_required on none/expired; writes 402 past_due on
+ * past_due/suspended). Manage-shaped routes are owner/admin/developer;
+ * views are all-roles.
  */
 @Controller('console/deployment')
 @AuthLayer('l1')
@@ -36,6 +41,8 @@ export class DeploymentController {
     private readonly environmentsService: EnvironmentsService,
     private readonly deploymentsService: DeploymentsService,
     private readonly secretsService: SecretsService,
+    private readonly settingsService: SettingsService,
+    private readonly releasesService: ReleasesService,
     private readonly workflow: DeploymentWorkflow,
     private readonly entitlements: EntitlementsService,
     private readonly usage: UsageQueryService,
@@ -55,7 +62,7 @@ export class DeploymentController {
   @Get('summary')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('deployment')
-  async summary(@Headers('x-neryva-org') orgHeader?: string | string[]): Promise<unknown> {
+  async summaryCard(@Headers('x-neryva-org') orgHeader?: string | string[]): Promise<unknown> {
     const orgId = this.orgId(orgHeader);
     const state = await this.entitlements.getState(orgId, 'deployment');
     return {
@@ -99,6 +106,38 @@ export class DeploymentController {
     return { entitlement };
   }
 
+  // ── settings ───────────────────────────────────────────────────────────────
+
+  @Get('settings')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @RequireEntitlement('deployment')
+  async settings(@Headers('x-neryva-org') orgHeader?: string | string[]) {
+    return { settings: await this.settingsService.get(this.orgId(orgHeader)) };
+  }
+
+  @Put('settings')
+  @Roles('owner', 'admin')
+  @RequireEntitlement('deployment')
+  @Idempotent()
+  async updateSettings(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Body() body: { default_strategy?: string; default_ladder?: unknown; auto_rollback?: boolean; default_canary_weight?: number },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    if (body.default_strategy === undefined && body.default_ladder === undefined && body.auto_rollback === undefined && body.default_canary_weight === undefined) {
+      throw ApiError.validation({ input: 'nothing to update' });
+    }
+    const settings = await this.settingsService.update({
+      orgId: this.orgId(orgHeader),
+      defaultStrategy: body.default_strategy,
+      defaultLadder: body.default_ladder,
+      autoRollback: body.auto_rollback,
+      defaultCanaryWeight: body.default_canary_weight,
+      actorId: principal.id,
+    });
+    return { settings };
+  }
+
   // ── pipelines + stages ─────────────────────────────────────────────────────
 
   @Get('pipelines')
@@ -111,7 +150,7 @@ export class DeploymentController {
   @Get('pipelines/:pipelineId')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('deployment')
-  async pipeline(@Headers('x-neryva-org') orgHeader: string | string[], @Param('pipelineId') pipelineId: string) {
+  async pipeline(@Headers('x-neryva-org') orgHeader: string | string[] | undefined, @Param('pipelineId') pipelineId: string) {
     return this.pipelinesService.get(this.orgId(orgHeader), pipelineId);
   }
 
@@ -138,28 +177,130 @@ export class DeploymentController {
     return { pipeline };
   }
 
+  @Patch('pipelines/:pipelineId')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async updatePipeline(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('pipelineId') pipelineId: string,
+    @Body() body: { name?: string; description?: string; source_agent?: string },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const pipeline = await this.pipelinesService.update({
+      orgId: this.orgId(orgHeader),
+      pipelineId,
+      name: body.name,
+      description: body.description,
+      sourceAgent: body.source_agent,
+      actorId: principal.id,
+    });
+    return { pipeline };
+  }
+
+  @Post('pipelines/:pipelineId/pause')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async pausePipeline(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('pipelineId') pipelineId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    return { pipeline: await this.pipelinesService.setStatus({ orgId: this.orgId(orgHeader), pipelineId, status: 'paused', actorId: principal.id }) };
+  }
+
+  @Post('pipelines/:pipelineId/resume')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async resumePipeline(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('pipelineId') pipelineId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    return { pipeline: await this.pipelinesService.setStatus({ orgId: this.orgId(orgHeader), pipelineId, status: 'active', actorId: principal.id }) };
+  }
+
   @Post('pipelines/:pipelineId/stages')
   @Roles('owner', 'admin', 'developer')
   @RequireEntitlement('deployment')
   async addStage(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
     @Param('pipelineId') pipelineId: string,
-    @Body() body: { environment_id?: string; gate_policy?: unknown; auto_promote?: boolean; rollback_on_failure?: boolean },
+    @Body() body: { environment_id?: string; name?: string; gate_policy?: unknown; rollout_policy?: unknown; auto_promote?: boolean; rollback_on_failure?: boolean },
     @CurrentPrincipal() principal: L1Principal,
   ) {
     if (!body.environment_id) {
       throw ApiError.validation({ environment_id: 'environment_id is required' });
     }
+    const settings = await this.settingsService.get(this.orgId(orgHeader));
     const stage = await this.pipelinesService.addStage({
       orgId: this.orgId(orgHeader),
       pipelineId,
       environmentId: body.environment_id,
+      name: body.name,
       gatePolicy: body.gate_policy,
+      rolloutPolicy: body.rollout_policy,
+      autoPromote: body.auto_promote,
+      rollbackOnFailure: body.rollback_on_failure,
+      defaultRollbackOnFailure: settings.autoRollback,
+      actorId: principal.id,
+    });
+    return { stage };
+  }
+
+  @Patch('pipelines/:pipelineId/stages/:stageId')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async updateStage(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('pipelineId') pipelineId: string,
+    @Param('stageId') stageId: string,
+    @Body() body: { name?: string | null; gate_policy?: unknown; rollout_policy?: unknown | null; auto_promote?: boolean; rollback_on_failure?: boolean },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const stage = await this.pipelinesService.updateStage({
+      orgId: this.orgId(orgHeader),
+      pipelineId,
+      stageId,
+      name: body.name,
+      gatePolicy: body.gate_policy,
+      rolloutPolicy: body.rollout_policy,
       autoPromote: body.auto_promote,
       rollbackOnFailure: body.rollback_on_failure,
       actorId: principal.id,
     });
     return { stage };
+  }
+
+  @Delete('pipelines/:pipelineId/stages/:stageId')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async removeStage(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('pipelineId') pipelineId: string,
+    @Param('stageId') stageId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ ok: true }> {
+    await this.pipelinesService.removeStage({ orgId: this.orgId(orgHeader), pipelineId, stageId, actorId: principal.id });
+    return { ok: true };
+  }
+
+  @Post('pipelines/:pipelineId/promote')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  @RateLimit({ name: 'deployment-pipeline-promote', capacity: 20, refillPerSecond: 0.2, scope: 'principal' })
+  async promotePipeline(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('pipelineId') pipelineId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const deployment = await this.deploymentsService.promotePipeline({
+      orgId: this.orgId(orgHeader),
+      pipelineId,
+      actorId: principal.id,
+      actorLabel: principal.id,
+    });
+    await this.workflow.schedule({ orgId: deployment.orgId, deploymentId: deployment.id, step: 'gates' });
+    return { deployment };
   }
 
   @Post('pipelines/:pipelineId/archive')
@@ -189,7 +330,18 @@ export class DeploymentController {
   @Idempotent()
   async createEnvironment(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
-    @Body() body: { name?: string; tier?: string; project_id?: string; guardrail_profile?: string; quota_ref?: string },
+    @Body() body: {
+      name?: string;
+      tier?: string;
+      region?: string;
+      description?: string;
+      project_id?: string;
+      guardrail_profile?: string;
+      quota_ref?: string;
+      approval_mode?: string;
+      auto_promote?: boolean;
+      concurrency?: number;
+    },
     @CurrentPrincipal() principal: L1Principal,
   ) {
     if (!body.name) {
@@ -199,9 +351,14 @@ export class DeploymentController {
       orgId: this.orgId(orgHeader),
       name: body.name,
       tier: body.tier,
+      region: body.region ?? null,
+      description: body.description ?? null,
       projectId: body.project_id ?? null,
       guardrailProfile: body.guardrail_profile ?? null,
       quotaRef: body.quota_ref ?? null,
+      approvalMode: body.approval_mode,
+      autoPromote: body.auto_promote,
+      concurrency: body.concurrency,
       actorId: principal.id,
     });
     return { environment };
@@ -213,7 +370,16 @@ export class DeploymentController {
   async updateEnvironment(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
     @Param('environmentId') environmentId: string,
-    @Body() body: { pinned_agent_version?: string | null; guardrail_profile?: string | null },
+    @Body() body: {
+      pinned_agent_version?: string | null;
+      guardrail_profile?: string | null;
+      region?: string | null;
+      description?: string | null;
+      approval_mode?: string;
+      auto_promote?: boolean;
+      concurrency?: number;
+      status?: string;
+    },
     @CurrentPrincipal() principal: L1Principal,
   ) {
     const environment = await this.environmentsService.update({
@@ -221,9 +387,29 @@ export class DeploymentController {
       environmentId,
       pinnedAgentVersion: body.pinned_agent_version,
       guardrailProfile: body.guardrail_profile,
+      region: body.region,
+      description: body.description,
+      approvalMode: body.approval_mode,
+      autoPromote: body.auto_promote,
+      concurrency: body.concurrency,
+      status: body.status,
       actorId: principal.id,
     });
     return { environment };
+  }
+
+  @Delete('environments/:environmentId')
+  @Roles('owner', 'admin')
+  @RequireEntitlement('deployment')
+  @UseGuards(StepUpGuard)
+  @RequireStepUp()
+  async removeEnvironment(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('environmentId') environmentId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ ok: true }> {
+    await this.environmentsService.remove({ orgId: this.orgId(orgHeader), environmentId, actorId: principal.id });
+    return { ok: true };
   }
 
   // ── deployments ────────────────────────────────────────────────────────────
@@ -234,19 +420,35 @@ export class DeploymentController {
   async listDeployments(
     @Headers('x-neryva-org') orgHeader?: string | string[],
     @Query('pipeline_id') pipelineId?: string,
+    @Query('environment_id') environmentId?: string,
+    @Query('environment') environmentName?: string,
     @Query('status') status?: DeploymentStatus,
+    @Query('limit') limitRaw?: string,
   ) {
-    return { deployments: await this.deploymentsService.list(this.orgId(orgHeader), { pipelineId, status }) };
+    const limit = limitRaw !== undefined && Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : undefined;
+    return {
+      deployments: await this.deploymentsService.list(this.orgId(orgHeader), { pipelineId, environmentId, environment: environmentName, status, limit }),
+    };
   }
 
   @Get('deployments/:deploymentId')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('deployment')
-  async deployment(@Headers('x-neryva-org') orgHeader: string | string[], @Param('deploymentId') deploymentId: string) {
+  async deployment(@Headers('x-neryva-org') orgHeader: string | string[] | undefined, @Param('deploymentId') deploymentId: string) {
     const orgId = this.orgId(orgHeader);
     const context = await this.deploymentsService.get(orgId, deploymentId);
-    const events = await this.deploymentsService.events(orgId, deploymentId);
-    return { ...context, events };
+    const [events, environment, gate] = await Promise.all([
+      this.deploymentsService.events(orgId, deploymentId),
+      this.environmentsService.get(orgId, context.deployment.environmentId),
+      this.deploymentsService.evaluateStageGate(orgId, deploymentId),
+    ]);
+    return {
+      ...context,
+      environment,
+      progress: ladderProgress(context.deployment.ladder, context.deployment.rolloutState, context.deployment.canaryPercent),
+      gate,
+      events,
+    };
   }
 
   /** Trigger a run from the console. */
@@ -257,19 +459,29 @@ export class DeploymentController {
   @RateLimit({ name: 'deployment-trigger', capacity: 20, refillPerSecond: 0.2, scope: 'principal' })
   async trigger(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
-    @Body() body: { pipeline_id?: string; stage_id?: string; agent_version?: string; strategy?: string; snapshot?: Record<string, unknown> },
+    @Body() body: {
+      pipeline_id?: string;
+      stage_id?: string;
+      agent_version?: string;
+      strategy?: string;
+      git?: { commit?: string; branch?: string; message?: string };
+      snapshot?: Record<string, unknown>;
+    },
     @CurrentPrincipal() principal: L1Principal,
   ) {
     if (!body.pipeline_id || !body.agent_version) {
       throw ApiError.validation({ input: 'pipeline_id and agent_version are required' });
     }
-    const strategy = ROLLOUT_STRATEGIES.includes(body.strategy as RolloutStrategy) ? (body.strategy as RolloutStrategy) : undefined;
+    if (body.strategy !== undefined && !ROLLOUT_STRATEGIES.includes(body.strategy as RolloutStrategy)) {
+      throw ApiError.validation({ strategy: `must be one of ${ROLLOUT_STRATEGIES.join(', ')}` });
+    }
     const deployment = await this.deploymentsService.trigger({
       orgId: this.orgId(orgHeader),
       pipelineId: body.pipeline_id,
       stageId: body.stage_id,
       agentVersion: body.agent_version,
-      strategy,
+      strategy: body.strategy as RolloutStrategy | undefined,
+      git: body.git,
       snapshot: body.snapshot,
       actorId: principal.id,
       actorLabel: principal.id,
@@ -286,9 +498,29 @@ export class DeploymentController {
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
     @Param('deploymentId') deploymentId: string,
     @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ ok: true }> {
-    await this.deploymentsService.approve({ orgId: this.orgId(orgHeader), deploymentId, actorId: principal.id, actorLabel: principal.id });
-    return { ok: true };
+  ) {
+    const result = await this.deploymentsService.approve({ orgId: this.orgId(orgHeader), deploymentId, actorId: principal.id, actorLabel: principal.id });
+    return { ok: true, ...result };
+  }
+
+  /** Gate rejection — a reviewed deny fails the run before traffic moves. */
+  @Post('deployments/:deploymentId/reject')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async reject(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('deploymentId') deploymentId: string,
+    @Body() body: { reason?: string },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const deployment = await this.deploymentsService.reject({
+      orgId: this.orgId(orgHeader),
+      deploymentId,
+      actorId: principal.id,
+      actorLabel: principal.id,
+      reason: body.reason,
+    });
+    return { deployment };
   }
 
   /** Canary/rollout metrics feed (the observability hand connects here). */
@@ -307,23 +539,143 @@ export class DeploymentController {
     return { ok: true };
   }
 
-  /** Instant rollback of a rolling/live run. */
+  @Get('deployments/:deploymentId/metrics')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @RequireEntitlement('deployment')
+  async getMetrics(@Headers('x-neryva-org') orgHeader: string | string[] | undefined, @Param('deploymentId') deploymentId: string) {
+    return { metrics: await this.deploymentsService.metrics(this.orgId(orgHeader), deploymentId) };
+  }
+
+  /** Pause the rollout — traffic holds at the current weight. */
+  @Post('deployments/:deploymentId/pause')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async pauseDeployment(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('deploymentId') deploymentId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ ok: true }> {
+    await this.deploymentsService.pause({ orgId: this.orgId(orgHeader), deploymentId, actorId: principal.id, actorLabel: principal.id });
+    return { ok: true };
+  }
+
+  /** Resume a paused rollout (re-arms the workflow tick). */
+  @Post('deployments/:deploymentId/resume')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async resumeDeployment(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('deploymentId') deploymentId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ ok: true }> {
+    await this.deploymentsService.resume({ orgId: this.orgId(orgHeader), deploymentId, actorId: principal.id, actorLabel: principal.id });
+    await this.workflow.schedule({ orgId: this.orgId(orgHeader), deploymentId, step: 'rollout' });
+    return { ok: true };
+  }
+
+  /** Manual promote: approve the gate, or skip the current ladder step. */
+  @Post('deployments/:deploymentId/promote')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async promote(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('deploymentId') deploymentId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const result = await this.deploymentsService.promote({ orgId: this.orgId(orgHeader), deploymentId, actorId: principal.id, actorLabel: principal.id });
+    if (result.action === 'advanced') {
+      await this.workflow.schedule({ orgId: this.orgId(orgHeader), deploymentId, step: 'rollout' });
+    }
+    return result;
+  }
+
+  /** Redeploy a failed/rolled-back run with its exact inputs (new run row). */
+  @Post('deployments/:deploymentId/retry')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  @Idempotent()
+  @RateLimit({ name: 'deployment-retry', capacity: 20, refillPerSecond: 0.2, scope: 'principal' })
+  async retry(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('deploymentId') deploymentId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const deployment = await this.deploymentsService.retry({
+      orgId: this.orgId(orgHeader),
+      deploymentId,
+      actorId: principal.id,
+      actorLabel: principal.id,
+    });
+    await this.workflow.schedule({ orgId: deployment.orgId, deploymentId: deployment.id, step: 'gates' });
+    return { deployment };
+  }
+
+  /** Cancel a run: pending/gated fail in place; rolling runs roll back. */
+  @Post('deployments/:deploymentId/cancel')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async cancel(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('deploymentId') deploymentId: string,
+    @Body() body: { reason?: string },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    return this.deploymentsService.cancel({
+      orgId: this.orgId(orgHeader),
+      deploymentId,
+      actorId: principal.id,
+      actorLabel: principal.id,
+      reason: body.reason,
+    });
+  }
+
+  /** Instant rollback of a rolling/live run (restores the env's previous live). */
   @Post('deployments/:deploymentId/rollback')
   @Roles('owner', 'admin', 'developer')
   @RequireEntitlement('deployment')
   async rollback(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
     @Param('deploymentId') deploymentId: string,
+    @Body() body: { reason?: string },
     @CurrentPrincipal() principal: L1Principal,
   ) {
-    const deployment = await this.deploymentsService.transition({
+    const deployment = await this.deploymentsService.rollback({
       orgId: this.orgId(orgHeader),
       deploymentId,
-      target: 'rolled_back' as DeploymentStatus,
-      eventKind: 'deployment.rolled_back',
-      payload: { manual: true },
+      actorId: principal.id,
+      actorLabel: principal.id,
+      reason: body.reason,
     });
     return { deployment };
+  }
+
+  // ── releases + activity ────────────────────────────────────────────────────
+
+  /** The releases timeline (frontend Releases view). */
+  @Get('releases')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @RequireEntitlement('deployment')
+  async releases(
+    @Headers('x-neryva-org') orgHeader?: string | string[],
+    @Query('status') status?: string,
+    @Query('limit') limitRaw?: string,
+  ) {
+    const limit = limitRaw !== undefined && Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : undefined;
+    return this.releasesService.list(this.orgId(orgHeader), { status, limit });
+  }
+
+  /** Org-wide activity feed (dashboard). */
+  @Get('activity')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @RequireEntitlement('deployment')
+  async activity(
+    @Headers('x-neryva-org') orgHeader?: string | string[],
+    @Query('limit') limitRaw?: string,
+    @Query('kinds') kindsRaw?: string,
+  ) {
+    const limit = limitRaw !== undefined && Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : undefined;
+    const kinds = kindsRaw?.split(',').map((k) => k.trim()).filter(Boolean);
+    return { activity: await this.deploymentsService.activity(this.orgId(orgHeader), { limit, kinds }) };
   }
 
   // ── operations: cost + secrets ─────────────────────────────────────────────
@@ -341,6 +693,13 @@ export class DeploymentController {
     return { product: 'deployment', overview, quota };
   }
 
+  @Get('secrets/stats')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async secretsStats(@Headers('x-neryva-org') orgHeader?: string | string[]) {
+    return this.secretsService.stats(this.orgId(orgHeader));
+  }
+
   @Get('secrets')
   @Roles('owner', 'admin', 'developer')
   @RequireEntitlement('deployment')
@@ -354,7 +713,7 @@ export class DeploymentController {
   @RateLimit({ name: 'deployment-secret-set', capacity: 30, refillPerSecond: 0.5, scope: 'principal' })
   async setSecret(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
-    @Body() body: { environment_id?: string; key?: string; value?: string; kms_ref?: string },
+    @Body() body: { environment_id?: string; key?: string; value?: string; kms_ref?: string; expires_at?: string | null; rotation_interval_days?: number | null },
     @CurrentPrincipal() principal: L1Principal,
   ): Promise<{ ok: true }> {
     if (!body.environment_id || !body.key || !body.value) {
@@ -366,6 +725,8 @@ export class DeploymentController {
       key: body.key,
       value: body.value,
       kmsRef: body.kms_ref ?? null,
+      expiresAt: body.expires_at ?? null,
+      rotationIntervalDays: body.rotation_interval_days ?? null,
       actorId: principal.id,
     });
     return { ok: true };
@@ -387,10 +748,22 @@ export class DeploymentController {
     return { ok: true };
   }
 
-  @Post('secrets/:secretId/remove')
+  @Delete('secrets/:secretId')
   @Roles('owner', 'admin', 'developer')
   @RequireEntitlement('deployment')
   async removeSecret(
+    @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
+    @Param('secretId') secretId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ ok: true }> {
+    await this.secretsService.remove({ orgId: this.orgId(orgHeader), secretId, actorId: principal.id });
+    return { ok: true };
+  }
+
+  @Post('secrets/:secretId/remove')
+  @Roles('owner', 'admin', 'developer')
+  @RequireEntitlement('deployment')
+  async removeSecretAlias(
     @Headers('x-neryva-org') orgHeader: string | string[] | undefined,
     @Param('secretId') secretId: string,
     @CurrentPrincipal() principal: L1Principal,

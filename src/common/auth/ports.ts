@@ -69,3 +69,30 @@ export class NullServiceClient implements ServiceClientPort {
     return false;
   }
 }
+
+/**
+ * Service-account token directory (organizations module implements): the L2
+ * guard resolves `nrv_sa_` tokens by SHA-256 through this port before any
+ * org context exists. Absent binding (organizations disabled) ⇒ fail closed.
+ */
+export const SERVICE_ACCOUNT_DIRECTORY_PORT = 'SERVICE_ACCOUNT_DIRECTORY_PORT';
+
+export interface ServiceAccountTokenResolution {
+  valid: boolean;
+  serviceAccountId?: string;
+  orgId?: string;
+  name?: string;
+  scopes?: string[];
+  expiresAt?: string | null;
+  reason?: 'unknown' | 'disabled' | 'expired' | 'no_token';
+}
+
+export interface ServiceAccountDirectoryPort {
+  validateByHash(tokenHash: string): Promise<ServiceAccountTokenResolution>;
+}
+
+export class NullServiceAccountDirectory implements ServiceAccountDirectoryPort {
+  async validateByHash(): Promise<{ valid: false; reason: 'unknown' }> {
+    return { valid: false, reason: 'unknown' };
+  }
+}

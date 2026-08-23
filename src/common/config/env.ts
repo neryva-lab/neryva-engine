@@ -29,6 +29,8 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
 
   ENGINE_BASE_URL: z.string().url(),
+  /** The web app's public base (auth email links point here, not at the API). */
+  ENGINE_UI_BASE_URL: z.string().optional().default(''),
 
   MODULES__CORPORATE_ENABLED: boolean(true),
   MODULES__IDENTITY_ENABLED: boolean(false),
@@ -40,9 +42,42 @@ const envSchema = z.object({
   MODULES__KEYS_ENABLED: boolean(false),
   MODULES__CONFIG_PUBLISH_ENABLED: boolean(false),
   MODULES__SATELLITES_ENABLED: boolean(false),
+  MODULES__WEBHOOKS_ENABLED: boolean(false),
+  MODULES__NOTIFICATIONS_ENABLED: boolean(false),
+  MODULES__STAFF_ENABLED: boolean(false),
 
   /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
   BILLING_ANOMALY_CRON: z.string().default('15 3 * * *'),
+  /**
+   * Ingest cost posture (the B-1 trust fix): 'derive' = the engine computes
+   * cost from the platform price catalog when derivable (satellite-reported
+   * cost is advisory); 'enforce' = additionally REJECT rows that deviate
+   * >10% from derived (or are unpriced); 'trust' = legacy passthrough
+   * (documented compat mode, never for production).
+   */
+  BILLING_COST_VALIDATION: z.enum(['derive', 'enforce', 'trust']).default('derive'),
+  /** Org deletion grace window before the purge job erases engine-owned rows. */
+  ORG_DELETION_GRACE_DAYS: positiveInt(30, 365),
+  /** Invite lifetime (days) — the accept window offered to a invited email. */
+  ORG_INVITE_TTL_DAYS: positiveInt(7, 30),
+  /** Safety caps: pending (unaccepted) invites and total members per org. */
+  ORG_MAX_PENDING_INVITES: positiveInt(100, 10_000),
+  ORG_MAX_MEMBERS: positiveInt(500, 100_000),
+  /** Default trial length (days) for console-initiated product trials. */
+  ORG_TRIAL_DEFAULT_DAYS: positiveInt(14, 90),
+
+  /** Satellites: heartbeat lease TTL (the live window) — every beat renews it. */
+  SATELLITE_HEARTBEAT_TIMEOUT_SECONDS: positiveInt(120, 3600),
+  /** Heartbeat sample retention for the ops history view (hours). */
+  SATELLITE_SAMPLE_RETENTION_HOURS: positiveInt(24, 720),
+  /** Revocation-log retention (days) — satellite caches are shorter than this. */
+  SATELLITE_REVOCATION_RETENTION_DAYS: positiveInt(7, 90),
+  /** Unacked config notifications older than this flag config drift (seconds). */
+  SATELLITE_CONFIG_ACK_DRIFT_SECONDS: positiveInt(900, 86_400),
+  /** Config-publish retention: versions kept per (org × scope × product) key. */
+  CONFIG_VERSION_RETENTION: positiveInt(50, 10_000),
+  /** Config-publish retention: ACKed notification ledger rows age out (days). */
+  CONFIG_NOTIFICATION_RETENTION_DAYS: positiveInt(14, 365),
 
   IDENTITY_ISSUER: z.string().url(),
   IDENTITY_API_AUDIENCE: z.string().min(1).default('neryva-engine'),
@@ -57,6 +92,21 @@ const envSchema = z.object({
   IDENTITY_EMAIL_CODE_MAX_ATTEMPTS: positiveInt(5, 20),
   IDENTITY_JWKS_CACHE_TTL_SECONDS: positiveInt(300, 86400),
 
+  // Social login (doc-06 Δ1) — a provider is enabled exactly when its
+  // credentials are present. Redirect URI per provider:
+  //   {ENGINE_BASE_URL}/login/social/callback/{provider}
+  IDENTITY_SOCIAL_GOOGLE_CLIENT_ID: z.string().optional().default(''),
+  IDENTITY_SOCIAL_GOOGLE_CLIENT_SECRET: z.string().optional().default(''),
+  IDENTITY_SOCIAL_GITHUB_CLIENT_ID: z.string().optional().default(''),
+  IDENTITY_SOCIAL_GITHUB_CLIENT_SECRET: z.string().optional().default(''),
+  IDENTITY_SOCIAL_APPLE_CLIENT_ID: z.string().optional().default(''),
+  IDENTITY_SOCIAL_APPLE_TEAM_ID: z.string().optional().default(''),
+  IDENTITY_SOCIAL_APPLE_KEY_ID: z.string().optional().default(''),
+  IDENTITY_SOCIAL_APPLE_PRIVATE_KEY_FILE: z.string().optional().default(''),
+  IDENTITY_SOCIAL_MICROSOFT_CLIENT_ID: z.string().optional().default(''),
+  IDENTITY_SOCIAL_MICROSOFT_CLIENT_SECRET: z.string().optional().default(''),
+  IDENTITY_SOCIAL_MICROSOFT_TENANT: z.string().optional().default('common'),
+
   MFA_PROOF_SIGNING_KEY: z.string().optional().default(''),
   MFA_PROOF_SIGNING_KEY_FILE: z.string().optional().default(''),
   MFA_PROOF_TTL_SECONDS: positiveInt(300, 3600),
@@ -69,6 +119,10 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().optional().default(''),
   POSTMARK_SERVER_TOKEN: z.string().optional().default(''),
   EMAIL_RATE_LIMIT_PER_MINUTE: positiveInt(30, 10000),
+  /** Shared secret providers send on bounce/complaint webhooks (X-Webhook-Secret). */
+  EMAIL_WEBHOOK_SECRET: z.string().optional().default(''),
+  /** Where contact-form team notifications land (unset = no team email). */
+  CORPORATE_CONTACT_INBOX_EMAIL: z.string().optional().default(''),
 
   ENGINE_ENCRYPTION_KEY: z.string().optional().default(''),
 });

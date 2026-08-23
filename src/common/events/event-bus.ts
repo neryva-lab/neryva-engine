@@ -58,11 +58,58 @@ export const EngineEvents = {
   LoginFailure: 'login.failure',
   EntitlementTransitioned: 'entitlement.transitioned',
   ConfigPublished: 'config.published',
+  /** Durable revocation-log inputs (the satellite feed subscribes to these). */
+  IdentityRevocation: 'identity.revocation',
+  KeyRevoked: 'keys.revoked',
+  /** Org lifecycle signals (notifications subscribe). */
+  OrgOwnershipTransferred: 'org.ownership_transferred',
+  OrgRoleChanged: 'org.role_changed',
+  OrgDeletionRequested: 'org.deletion_requested',
+  OrgDeletionCancelled: 'org.deletion_cancelled',
+  OrgPurged: 'org.purged',
+  /** Org membership + invite lifecycle (seat tooling, notifications). */
+  OrgMemberAdded: 'org.member_added',
+  OrgMemberSuspended: 'org.member_suspended',
+  OrgMemberReactivated: 'org.member_reactivated',
+  OrgMemberRemoved: 'org.member_removed',
+  OrgInviteCreated: 'org.invite_created',
+  OrgInviteAccepted: 'org.invite_accepted',
+  OrgInviteRevoked: 'org.invite_revoked',
+  /** Org settings/groups/service-account signals. */
+  OrgSettingsUpdated: 'org.settings_updated',
+  ServiceAccountTokenRotated: 'org.service_account_token_rotated',
+  /** Satellite lifecycle + liveness signals (status center, notifications). */
+  SatelliteLivenessLost: 'satellite.liveness_lost',
+  SatelliteLivenessRestored: 'satellite.liveness_restored',
+  SatelliteRegistered: 'satellite.registered',
+  SatelliteQuarantined: 'satellite.quarantined',
+  SatelliteReleased: 'satellite.released',
+  SatelliteDraining: 'satellite.draining',
+  SatelliteResumed: 'satellite.resumed',
+  SatelliteRetired: 'satellite.retired',
+  SatelliteVersionFloorViolated: 'satellite.version_floor_violated',
+  SatelliteConfigDrift: 'satellite.config_drift',
+  /**
+   * Connection-contract activity tick (compliance evidence): internal
+   * surfaces emit one per satellite request so the satellites module (when
+   * enabled) can bump its per-scope counters without module coupling.
+   */
+  SatelliteActivity: 'satellite.activity',
+  /** Deployment run signals (webhooks + notifications subscribe). */
+  DeploymentCompleted: 'deployment.completed',
+  DeploymentFailed: 'deployment.failed',
+  DeploymentRolledBack: 'deployment.rolled_back',
+  /** Webhook subsystem lifecycle. */
+  WebhookDead: 'webhook.dead',
 } as const;
 
 export interface ConfigPublishedEvent {
   orgId: string;
+  /** The published version's row id (webhook consumers ACK against it). */
+  configId?: string;
   scope: string;
   product: string | null;
   version: number;
+  /** Canonical-form payload digest (satellites verify their cache by it). */
+  payloadHash?: string;
 }

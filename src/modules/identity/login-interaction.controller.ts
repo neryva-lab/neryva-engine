@@ -12,6 +12,7 @@ import { AccountsService, normalizeEmail } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { EmailCodeService } from './email-code.service';
 import { OIDC_PROVIDER } from './identity.module';
+import { socialProviders } from './social/social.config';
 
 /**
  * The login interaction (Δ1: email one-time code, primary; password,
@@ -189,7 +190,11 @@ export class LoginInteractionController {
   ): Promise<void> {
     const provider = this.provider();
     await this.accounts.markLoginSuccess(accountId);
-    await this.accounts.markEmailVerified(accountId);
+    // Only the email-code path proves mailbox control — a password login
+    // must NOT mark the address verified (verification is its own flow).
+    if (method === 'email_code') {
+      await this.accounts.markEmailVerified(accountId);
+    }
     await this.audit.add({
       action: 'login.success',
       resourceType: 'account',
@@ -216,6 +221,17 @@ export class LoginInteractionController {
 <label for="code">One-time code</label>
 <input id="code" name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="one-time-code" required>
 <button type="submit">Verify</button></form>`;
+    // Social buttons render only for providers enabled on this deployment
+    // (doc-06 Δ1: federated login joins the same interaction flow).
+    const socialButtons = socialProviders()
+      .map(
+        (p) =>
+          `<a class="social" href="/login/${escapeHtml(uid)}/social/${escapeHtml(p.key)}">Continue with ${escapeHtml(p.label)}</a>`,
+      )
+      .join('');
+    const socialBlock = socialButtons
+      ? `<div class="divider"><span>or</span></div><div class="socials">${socialButtons}</div>`
+      : '';
     return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)}</title>
@@ -223,9 +239,14 @@ export class LoginInteractionController {
 .card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:32px;width:min(360px,90vw)}
 label{display:block;font-size:13px;margin:12px 0 4px}input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:15px}
 button{margin-top:16px;width:100%;padding:10px;background:#111;color:#fff;border:0;border-radius:6px;font-size:15px;cursor:pointer}
-p.hint{color:#555;font-size:14px}</style></head>
+p.hint{color:#555;font-size:14px}
+.divider{display:flex;align-items:center;gap:12px;color:#999;font-size:12px;margin:20px 0 8px}
+.divider::before,.divider::after{content:"";flex:1;border-top:1px solid #e5e5e5}
+.socials{display:grid;gap:8px}
+a.social{display:block;text-align:center;padding:10px;border:1px solid #ccc;border-radius:6px;color:#111;text-decoration:none;font-size:14px}
+a.social:hover{background:#f5f5f5}</style></head>
 <body><div class="card"><h1 style="font-size:20px;margin:0 0 8px">${escapeHtml(title)}</h1>
-<p class="hint">${escapeHtml(message)}</p>${form}</div></body></html>`;
+<p class="hint">${escapeHtml(message)}</p>${form}${socialBlock}</div></body></html>`;
   }
 }
 

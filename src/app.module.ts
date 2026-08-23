@@ -6,6 +6,9 @@ import { CorporateModule } from './modules/corporate/corporate.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { ConsoleModule } from './modules/console/console.module';
+import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { StaffModule } from './modules/staff/staff.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { AgentStudioModule } from './modules/agent-studio/agent-studio.module';
 import { DeploymentModule } from './modules/deployment/deployment.module';
@@ -36,6 +39,9 @@ const imports = [
   ...(ModuleFlags.billing ? [BillingModule] : []),
   ...(ModuleFlags.agentStudio ? [AgentStudioModule] : []),
   ...(ModuleFlags.deployment ? [DeploymentModule] : []),
+  ...(ModuleFlags.webhooks ? [WebhooksModule] : []),
+  ...(ModuleFlags.notifications ? [NotificationsModule] : []),
+  ...(ModuleFlags.staff ? [StaffModule] : []),
   ...(ModuleFlags.keys ? [KeysModule] : []),
   ...(ModuleFlags.satellites ? [SatellitesModule] : []),
   ...(ModuleFlags.configPublish ? [ConfigPublishModule] : []),

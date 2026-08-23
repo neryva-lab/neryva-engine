@@ -10,6 +10,8 @@ export interface EmailMessage {
   subject: string;
   text: string;
   html?: string;
+  /** Transport-level headers (List-Unsubscribe et al.) — providers accept them natively. */
+  headers?: Record<string, string>;
 }
 
 export interface EmailTransport {

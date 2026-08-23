@@ -100,3 +100,42 @@ export const INVOICE_TRANSITIONS: Record<InvoiceStatus, readonly InvoiceStatus[]
 export type SpendEventRow = typeof spendEvents.$inferSelect;
 export type NewSpendEvent = typeof spendEvents.$inferInsert;
 export type InvoiceRow = typeof billingInvoices.$inferSelect;
+
+/**
+ * The platform price catalog (the B-1 trust fix): what a unit of
+ * consumption COSTS the org, owned by the platform — satellite-reported
+ * cost_usd is advisory input, never billing truth. Rows are effective-
+ * windowed versions (a price change adds a new row; lookups resolve the
+ * row effective at the event's occurred_at). Model-specific rows (per-
+ * million token prices) coexist with event-priced rows (price_per_event
+ * for tokenless kinds like deployment runs). No RLS: platform-plane
+ * pricing, staff-managed, read by the ingest path.
+ */
+export const priceCatalog = billingSchema.table(
+  'price_catalog',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    product: varchar('product', { length: 64 }).notNull(),
+    kind: varchar('kind', { length: 32 }).notNull(),
+    /** NULL model = the default row for the (product, kind). */
+    model: varchar('model', { length: 128 }),
+    /** USD per 1M input tokens (model rows). */
+    pricePerMillionInputUsd: numeric('price_per_million_input_usd', { precision: 12, scale: 6 }),
+    /** USD per 1M output tokens (model rows). */
+    pricePerMillionOutputUsd: numeric('price_per_million_output_usd', { precision: 12, scale: 6 }),
+    /** USD per event (tokenless kinds — e.g. a deployment run). */
+    pricePerEventUsd: numeric('price_per_event_usd', { precision: 12, scale: 6 }),
+    currency: varchar('currency', { length: 3 }).notNull().default('USD'),
+    effectiveFrom: timestamp('effective_from', { withTimezone: true, mode: 'string' }).notNull(),
+    effectiveTo: timestamp('effective_to', { withTimezone: true, mode: 'string' }),
+    note: varchar('note', { length: 256 }),
+    createdBy: varchar('created_by', { length: 128 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_price_catalog_slot').on(t.product, t.kind, t.model, t.effectiveFrom),
+    index('ix_price_catalog_lookup').on(t.product, t.kind, t.model, t.effectiveFrom),
+  ],
+);
+
+export type PriceRow = typeof priceCatalog.$inferSelect;

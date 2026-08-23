@@ -5,16 +5,19 @@
 
 ## Phases
 
+> **2026-08-23 (late, v2):** E-1/E-2/E-3 implemented to production grade in `src/modules/corporate` (eng-0013): suppression list + provider bounce/complaint webhooks + RFC 8058 one-click unsubscribe; contact inbox pipeline (new→read→replied→archived, acks, team notify); newsletter lifecycle + campaigns (throttled, resumable, suppression-aware sends); careers job postings + the application pipeline; content CMS (revisions+restore, scheduled publish, SEO fields) + RSS/Atom/JSON/sitemap feeds. Items marked `[~]` until gates run. E-4/E-5/E-6 unchanged (website re-point, data migration, retirement).
+
+
 ### E-1 — Email service (FIRST — unblocks [`identity`](identity.md) I-1a and resolves doc-06 Q1)
-- [ ] SMTP transport abstraction (dev transport = log/file); template registry (codes, invites, newsletter opt-in); delivery audit rows; rate-limited send
+- [~] SMTP transport abstraction (dev transport = log/file); template registry (codes, invites, newsletter opt-in); delivery audit rows; rate-limited send
 - **Gate:** unit tests with fake transport; identity can send login codes
 
 ### E-2 — Public endpoints + tables
-- [ ] `contact_submissions`, `newsletter_subs` (double opt-in), `career_applications` (file refs only); `POST /public/{contact,newsletter,careers}` with rate-limit + honeypot + `Idempotency-Key`
+- [~] `contact_submissions`, `newsletter_subs` (double opt-in), `career_applications` (file refs only); `POST /public/{contact,newsletter,careers}` with rate-limit + honeypot + `Idempotency-Key`
 - **Gate:** abuse-path tests (rate-limit, honeypot, replayed idempotency key); audit `corporate.submission`
 
 ### E-3 — Content admin
-- [ ] `content_posts` + `/console/content/**` CRUD (staff/`content-admin` role); build-time export for the website's static rendering
+- [~] `content_posts` + `/console/content/**` CRUD (staff/`content-admin` role); build-time export for the website's static rendering
 - **Gate:** role tests; contract re-pin (owner `platform`)
 
 ### E-4 — Website re-point

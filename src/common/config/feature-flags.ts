@@ -37,6 +37,15 @@ export const ModuleFlags = {
   get satellites(): boolean {
     return env.MODULES__SATELLITES_ENABLED;
   },
+  get webhooks(): boolean {
+    return env.MODULES__WEBHOOKS_ENABLED;
+  },
+  get notifications(): boolean {
+    return env.MODULES__NOTIFICATIONS_ENABLED;
+  },
+  get staff(): boolean {
+    return env.MODULES__STAFF_ENABLED;
+  },
 } as const;
 
 /** Dependency rules enforced at boot (fail loudly, never at request time). */
@@ -72,12 +81,25 @@ export function validateFlagMatrix(): void {
     throw new Error('MODULES__KEYS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED (console key CRUD is role-guarded)');
   }
   // Config publishing fans out through the satellite registry; its console
-  // zone rides the org guards.
-  if (ModuleFlags.configPublish && !(ModuleFlags.organizations && ModuleFlags.satellites)) {
-    throw new Error('MODULES__CONFIG_PUBLISH_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__SATELLITES_ENABLED (console guards + notification fanout)');
+  // zone rides the org guards, and product tags validate against the
+  // manifest registry (console module).
+  if (ModuleFlags.configPublish && !(ModuleFlags.organizations && ModuleFlags.satellites && ModuleFlags.console)) {
+    throw new Error('MODULES__CONFIG_PUBLISH_ENABLED requires MODULES__ORGANIZATIONS_ENABLED, MODULES__SATELLITES_ENABLED and MODULES__CONSOLE_ENABLED (org guards + fanout + manifest registry)');
   }
   // Satellites heartbeat on L3 service tokens (identity's OP issues them).
   if (ModuleFlags.satellites && !ModuleFlags.identity) {
     throw new Error('MODULES__SATELLITES_ENABLED requires MODULES__IDENTITY_ENABLED (heartbeats authenticate on L3)');
+  }
+  // Webhook delivery targets org-owned endpoints behind the roles guard.
+  if (ModuleFlags.webhooks && !ModuleFlags.organizations) {
+    throw new Error('MODULES__WEBHOOKS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED (webhook management is org furniture)');
+  }
+  // Notifications fan out to org members + send email through corporate.
+  if (ModuleFlags.notifications && !(ModuleFlags.organizations && ModuleFlags.corporate)) {
+    throw new Error('MODULES__NOTIFICATIONS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__CORPORATE_ENABLED (role fan-out + email transport)');
+  }
+  // The staff overlay reads identity/org/billing/satellite state.
+  if (ModuleFlags.staff && !(ModuleFlags.organizations && ModuleFlags.billing)) {
+    throw new Error('MODULES__STAFF_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__BILLING_ENABLED (org lookup, audit, usage)');
   }
 }

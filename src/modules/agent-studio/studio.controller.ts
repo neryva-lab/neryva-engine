@@ -51,7 +51,7 @@ export class StudioController {
   @Get('summary')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('agent_studio')
-  async summary(@Headers('x-neryva-org') orgHeader?: string | string[]): Promise<unknown> {
+  async summaryCard(@Headers('x-neryva-org') orgHeader?: string | string[]): Promise<unknown> {
     const orgId = this.orgId(orgHeader);
     const state = await this.entitlements.getState(orgId, 'agent_studio');
     return {
@@ -100,7 +100,7 @@ export class StudioController {
   @Get('projects')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('agent_studio')
-  async projects(@Headers('x-neryva-org') orgHeader?: string | string[]) {
+  async listProjects(@Headers('x-neryva-org') orgHeader?: string | string[]) {
     const orgId = this.orgId(orgHeader);
     const [projectRows, slices, quota] = await Promise.all([
       this.projects.list(orgId, true),
@@ -128,7 +128,7 @@ export class StudioController {
   @Get('keys')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('agent_studio')
-  async keys(@Headers('x-neryva-org') orgHeader?: string | string[]) {
+  async listKeys(@Headers('x-neryva-org') orgHeader?: string | string[]) {
     return this.keys.list(this.orgId(orgHeader));
   }
 

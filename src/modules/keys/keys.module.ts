@@ -2,7 +2,9 @@ import { Module } from '@nestjs/common';
 import { HealthRegistry } from '../../common/health/health.controller';
 import { DbService } from '../../common/infra/db/db.service';
 import { OrganizationsModule } from '../organizations/organizations.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { KeysController } from './keys.controller';
+import { KeysWorker } from './keys.worker';
 import { KeysService } from './keys.service';
 
 /**
@@ -14,9 +16,9 @@ import { KeysService } from './keys.service';
  * Flag: MODULES__KEYS_ENABLED (requires organizations for the org guards).
  */
 @Module({
-  imports: [OrganizationsModule],
+  imports: [OrganizationsModule, NotificationsModule],
   controllers: [KeysController],
-  providers: [KeysService],
+  providers: [KeysService, KeysWorker],
   exports: [KeysService],
 })
 export class KeysModule {

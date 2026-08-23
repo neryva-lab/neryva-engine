@@ -6,15 +6,24 @@ import { JwksService } from '../../common/auth/jwks.service';
 import { HealthRegistry } from '../../common/health/health.controller';
 import { SERVICE_CLIENT_PORT, SESSION_REGISTRY_PORT } from '../../common/auth/ports';
 import { CorporateModule } from '../corporate/corporate.module';
+import { AccountActionsService } from './account-actions.service';
+import { AccountController } from './account.controller';
 import { AccountsService } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { EmailCodeService } from './email-code.service';
 import { IdentityPublicService } from './identity-public.service';
 import { LoginInteractionController } from './login-interaction.controller';
+import { MfaService } from './mfa.service';
 import { OidcProviderController } from './oidc-provider.controller';
+import { PasswordService } from './password.service';
 import { JwksCustody } from './oidc/jwks-custody';
 import { OidcDrizzleAdapter } from './oidc/oidc-adapter';
 import { OidcProviderFactory } from './oidc/oidc-provider.factory';
+import { assertAppleKeyReadable } from './social/idp-verify';
+import { SocialAccountService } from './social/social-account.service';
+import { SocialController } from './social/social.controller';
+import { SocialLoginService } from './social/social-login.service';
+import { socialProviders } from './social/social.config';
 import { oauthClients } from './schema';
 
 /**
@@ -71,6 +80,13 @@ export class IdentityBoot implements OnModuleInit {
     this.jwksGuard.registerLocalKeys(keys.publicKeys);
     this.adapter.helpers = { pushSidDeny: (sid) => this.publicService.pushSidDeny(sid) };
     await this.seedFirstPartyClients();
+    // A configured-but-unreadable Apple p8 key is a boot failure, never a
+    // login-time 500 (social.config enables Apple only when fully set).
+    assertAppleKeyReadable();
+    const enabled = socialProviders().map((p) => p.key);
+    if (enabled.length > 0) {
+      this.logger.log(`social login enabled: ${enabled.join(', ')}`);
+    }
 
     this.holder.set(await this.factory.create());
     this.logger.log(`identity module online: issuer=${env.IDENTITY_ISSUER}`);
@@ -102,7 +118,7 @@ export class IdentityBoot implements OnModuleInit {
         kind: 'service',
         name: 'agent-runtime satellite',
         redirectUris: [] as string[],
-        scopes: ['engine:ingest', 'engine:keys:validate', 'engine:config:pull', 'engine:heartbeat'],
+        scopes: ['engine:ingest', 'engine:keys:validate', 'engine:config:pull', 'engine:heartbeat', 'engine:revocations'],
         grantTypes: ['client_credentials'],
       },
     ];
@@ -127,21 +143,26 @@ export class IdentityBoot implements OnModuleInit {
 
 @Module({
   imports: [CorporateModule],
-  controllers: [OidcProviderController, LoginInteractionController],
+  controllers: [OidcProviderController, LoginInteractionController, AccountController, SocialController],
   providers: [
+    AccountActionsService,
     AccountsService,
     CredentialsService,
     EmailCodeService,
     IdentityPublicService,
     JwksCustody,
+    MfaService,
     OidcDrizzleAdapter,
     OidcProviderFactory,
     OidcProviderHolder,
+    PasswordService,
+    SocialAccountService,
+    SocialLoginService,
     IdentityBoot,
     OidcProviderAccessor,
     { provide: SESSION_REGISTRY_PORT, useExisting: IdentityPublicService },
     { provide: SERVICE_CLIENT_PORT, useExisting: IdentityPublicService },
   ],
-  exports: [AccountsService, OIDC_PROVIDER, SESSION_REGISTRY_PORT, SERVICE_CLIENT_PORT],
+  exports: [AccountsService, OIDC_PROVIDER, SESSION_REGISTRY_PORT, SERVICE_CLIENT_PORT, JwksCustody, PasswordService, MfaService, SocialAccountService],
 })
 export class IdentityModule {}

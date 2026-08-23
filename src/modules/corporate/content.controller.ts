@@ -50,12 +50,74 @@ export class ContentController {
     return { ok: true };
   }
 
+  /** Schedule: the corporate worker publishes at the instant. */
+  @Post('posts/:slug/schedule')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  async schedule(@Param('slug') slug: string, @Body() body: { publish_at?: string }, @CurrentPrincipal() principal: L1Principal): Promise<{ ok: true }> {
+    if (!body.publish_at) {
+      throw ApiError.validation({ publish_at: 'ISO-8601 required' });
+    }
+    await this.content.schedule(slug, body.publish_at, principal.id);
+    return { ok: true };
+  }
+
+  /** Unpublish back to draft — feeds drop it immediately. */
+  @Post('posts/:slug/unpublish')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  async unpublish(@Param('slug') slug: string, @CurrentPrincipal() principal: L1Principal): Promise<{ ok: true }> {
+    await this.content.unpublish(slug, principal.id);
+    return { ok: true };
+  }
+
   @Post('posts/:slug/archive')
   @AuthLayer('l1')
   @UseGuards(ContentStaffGuard)
   async archive(@Param('slug') slug: string, @CurrentPrincipal() principal: L1Principal): Promise<{ ok: true }> {
     await this.content.archive(slug, principal.id);
     return { ok: true };
+  }
+
+  // ── Revisions + preview + export (v2 CMS depth) ──────────────────────────
+
+  @Get('posts/:slug/revisions')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  async revisions(@Param('slug') slug: string): Promise<{ revisions: unknown[] }> {
+    return { revisions: await this.content.revisions(slug) };
+  }
+
+  @Post('posts/:slug/revisions/:version/restore')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  async restore(@Param('slug') slug: string, @Param('version') versionRaw: string, @CurrentPrincipal() principal: L1Principal): Promise<{ ok: true }> {
+    const version = Number.parseInt(versionRaw, 10);
+    if (!Number.isFinite(version) || version < 1) {
+      throw ApiError.validation({ version: 'positive integer required' });
+    }
+    await this.content.restore(slug, version, principal.id);
+    return { ok: true };
+  }
+
+  /** Draft preview — the only way to see unpublished content. */
+  @Get('posts/:slug/preview')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  async preview(@Param('slug') slug: string): Promise<{ post: unknown }> {
+    const post = await this.content.preview(slug);
+    if (!post) {
+      throw ApiError.notFound('post');
+    }
+    return { post };
+  }
+
+  /** The static-site export bundle (what the website build consumes). */
+  @Get('export')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  async exportBundle(): Promise<unknown> {
+    return this.content.publishedFeed();
   }
 
   // ── Staff-grant management (platform operators only) ────────────────────

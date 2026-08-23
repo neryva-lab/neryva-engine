@@ -44,7 +44,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
       return next.handle();
     }
 
-    const ttlMs: number = (context.getHandler()[IDEMPOTENT_KEY] as IdempotencyOptions | undefined)?.ttlMs ?? 24 * 60 * 60 * 1000;
+    const ttlMs: number =
+      (context.getHandler() as unknown as Record<string, IdempotencyOptions | undefined>)[IDEMPOTENT_KEY]?.ttlMs ?? 24 * 60 * 60 * 1000;
     const principal = request.principal;
     const principalScope = principal ? `${principal.kind}:${principal.id}` : `anon:${request.ip ?? 'unknown'}`;
     const fingerprint = createHash('sha256')

@@ -1,6 +1,7 @@
 import { Body, Controller, Post } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal, RequireScopes } from '../../common/auth/decorators';
-import { L2Principal, L3Principal } from '../../common/auth/principal';
+import { L2Principal, L3Principal, satelliteKeyOf } from '../../common/auth/principal';
+import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
 import { RateLimit } from '../../common/http/rate-limit';
 import { QuotaService, QuotaReservation } from './quota.service';
@@ -20,6 +21,7 @@ export class MeteringController {
   constructor(
     private readonly ingestService: SpendIngestService,
     private readonly quota: QuotaService,
+    private readonly events: EventBus,
   ) {}
 
   /**
@@ -40,6 +42,7 @@ export class MeteringController {
     if (events.length > MAX_INGEST_BATCH) {
       throw ApiError.validation({ events: `batch exceeds the ${MAX_INGEST_BATCH}-event cap — split the push` });
     }
+    this.tickActivity(principal, 'ingest', events.length);
     return this.ingestService.ingest(principal.id, events);
   }
 
@@ -50,9 +53,10 @@ export class MeteringController {
   @Post('quota-check')
   @RateLimit({ name: 'metering-quota', capacity: 600, refillPerSecond: 50, scope: 'principal' })
   async quotaCheck(
-    @CurrentPrincipal() _principal: L3Principal | L2Principal,
+    @CurrentPrincipal() principal: L3Principal | L2Principal,
     @Body() body: { org_id?: string; product?: string; project_id?: string | null; estimated_cost_usd?: number; units?: number },
   ) {
+    this.tickActivity(principal, 'quota_check');
     if (!body.org_id || !body.product) {
       throw ApiError.validation({ input: 'org_id and product are required' });
     }
@@ -65,4 +69,12 @@ export class MeteringController {
     };
     return this.quota.checkAndReserve(reservation);
   }
+  /** Compliance evidence (gap X-3): one activity tick per satellite request. */
+  private tickActivity(principal: L3Principal | L2Principal, scope: 'ingest' | 'quota_check', events?: number): void {
+    const key = satelliteKeyOf(principal);
+    if (key) {
+      void this.events.emit(EngineEvents.SatelliteActivity, { key, scope, ...(events !== undefined ? { events } : {}) });
+    }
+  }
+
 }

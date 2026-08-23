@@ -7,6 +7,21 @@
 
 > **2026-08-23 (implementation note):** D-1…D-5 implemented in `src/modules/deployment` (eng-0005, schema `product_deployment`) — marked `[~]` until gates run. L5 runner minting stays with the handover track (correction C18); the workflow acts as the audited system principal until then.
 
+> **2026-08-24 (deepening, eng-0017):** dense pass over the whole module.
+> Rollout ladders are configurable per stage/org (`{weight, soak_seconds,
+> manual}` steps — Argo/Vercel/CodeDeploy shapes) and PERSISTED on the run
+> row with resumable state (60s reconciler = crash safety). Run controls:
+> pause/resume, promote (gate + ladder), cancel, gate reject, instant
+> rollback that restores the environment's previous live version.
+> Environment protection rules (approval_mode manual, concurrency,
+> maintenance) join stage gate policies (env floors approvals at 1).
+> Secrets vault: masked previews, expiry + rotation cadence + daily scan
+> notifications, versioning, and the L3 runtime-config resolve
+> (`engine:config:pull`) — the only plaintext read path, audited per call.
+> New surfaces: releases timeline + KPIs, org activity feed, org settings
+> singleton, full `/v1/deployments` CI lifecycle, quota reservation at
+> trigger, event-log retention per plan. max_pipelines enforced.
+
 ### D-1 — Schema
 - [~] `pipelines`, `pipeline_stages` (gate_policy), `environments`, `deployments` (status machine), `deployment_events` (immutable), `secrets` (envelope + kms_ref) — engine-owned from creation; RLS; schema `product_deployment`
 - **Gate:** migrations clean; boundary rules green

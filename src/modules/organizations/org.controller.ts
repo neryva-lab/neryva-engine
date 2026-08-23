@@ -1,33 +1,121 @@
 import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
+import { IsBoolean, IsInt, IsOptional, IsString, Length, Max, MaxLength, Min } from 'class-validator';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
-import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
-import { RequireStepUp, StepUpGuard } from '../../common/policy/step-up.guard';
 import { Idempotent } from '../../common/http/idempotency';
 import { RateLimit } from '../../common/http/rate-limit';
-import { ApiError } from '../../common/http/api-error';
-import { DbService } from '../../common/infra/db/db.service';
+import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { MembershipsService } from './memberships.service';
 import { InvitesService } from './invites.service';
-import { ProjectsService } from './projects.service';
+import { EntitlementsService } from './entitlements.service';
+import { OrgSettingsService } from './org-settings.service';
 import { OrgAccessService } from './org-access.service';
 
+export class RedeemInviteDto {
+  @IsString()
+  @Length(16, 256)
+  token!: string;
+}
+
+export class BrandingDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(2_000_000)
+  logo_dataurl?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @Length(7, 7)
+  brand_color?: string | null;
+}
+
+export class PreferencesDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 32)
+  default_runtime?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  audit_retention_days?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  log_retention_days?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  auto_rollback?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  canary_percentage?: number;
+}
+
+export class UpdateOrgDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 256)
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 32)
+  region?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  retention_days?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(320)
+  support_email?: string | null;
+
+  @IsOptional()
+  @IsString()
+  default_project_id?: string | null;
+
+  @IsOptional()
+  branding?: BrandingDto;
+
+  @IsOptional()
+  preferences?: PreferencesDto;
+}
+
+export class StartTrialDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  days?: number;
+}
+
 /**
- * The org admin API (O-4): /console/org/** furniture. All L1 + membership
- * roles per the access-model matrix; privileged acts (owner/admin
- * assignment) are step-up gated — the UI-only rule, enforced in code.
+ * Org context + profile surfaces (O-4): context resolution for the org
+ * picker, the settings page payloads, and invite redemption (which runs
+ * OUTSIDE any org scope — the invitee is not a member yet). All L1.
+ *
+ * Route order matters: literal segments (contexts, invites) are declared
+ * before the ':orgId' wildcard so Nest matches them first.
  */
 @Controller('console/org')
 @AuthLayer('l1')
-@UseGuards(OrgRolesGuard)
 export class OrgController {
   constructor(
+    private readonly orgAccess: OrgAccessService,
     private readonly memberships: MembershipsService,
     private readonly invites: InvitesService,
-    private readonly projects: ProjectsService,
-    private readonly orgAccess: OrgAccessService,
-    private readonly db: DbService,
+    private readonly entitlements: EntitlementsService,
+    private readonly settings: OrgSettingsService,
   ) {}
 
   // ── Context resolution (no org scope: the account's own memberships) ────
@@ -37,145 +125,91 @@ export class OrgController {
     return { contexts: await this.orgAccess.listContexts(principal.id) };
   }
 
-  // ── Members (all roles view; owner/admin manage) ─────────────────────────
-
-  @Get(':orgId/members')
-  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
-  async listMembers(@Param('orgId') orgId: string): Promise<{ members: unknown[] }> {
-    return { members: await this.memberships.listMembers(orgId) };
-  }
-
-  @Patch(':orgId/members/:accountId/role')
-  @Roles('owner')
-  @UseGuards(StepUpGuard)
-  @RequireStepUp()
-  async changeRole(
-    @Param('orgId') orgId: string,
-    @Param('accountId') accountId: string,
-    @Body() body: { role: string },
-    @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ ok: true }> {
-    await this.memberships.changeRole({ orgId, accountId, role: body.role as never, actorId: principal.id });
-    return { ok: true };
-  }
-
-  @Post(':orgId/members/:accountId/remove')
-  @Roles('owner', 'admin')
-  async removeMember(
-    @Param('orgId') orgId: string,
-    @Param('accountId') accountId: string,
-    @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ ok: true }> {
-    if (accountId !== principal.id) {
-      const actorRole = await this.orgAccess.getMembershipRole(principal.id, orgId);
-      const targetRole = await this.orgAccess.getMembershipRole(accountId, orgId);
-      if (actorRole === 'admin' && targetRole === 'owner') {
-        throw ApiError.forbidden('Only an owner may remove an owner');
-      }
-    }
-    await this.memberships.removeMember({ orgId, accountId, actorId: principal.id });
-    return { ok: true };
-  }
-
-  // ── Invites (owner/admin create; the only join path) ─────────────────────
-
-  @Post(':orgId/invites')
-  @Roles('owner', 'admin')
-  @Idempotent()
-  @RateLimit({ name: 'org-invite-create', capacity: 20, refillPerSecond: 0.05, scope: 'principal' })
-  async createInvite(
-    @Param('orgId') orgId: string,
-    @Body() body: { email: string; role: string },
-    @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ inviteId: string }> {
-    const orgName = await this.orgName(orgId);
-    return this.invites.create({
-      orgId,
-      email: body.email,
-      role: body.role,
-      actorId: principal.id,
-      orgName,
-      inviterEmail: principal.email ?? 'a member of your team',
-    });
-  }
-
-  @Get(':orgId/invites')
-  @Roles('owner', 'admin')
-  async listInvites(@Param('orgId') orgId: string): Promise<{ invites: unknown[] }> {
-    return { invites: await this.invites.list(orgId) };
-  }
-
-  @Post(':orgId/invites/:inviteId/revoke')
-  @Roles('owner', 'admin')
-  async revokeInvite(
-    @Param('orgId') orgId: string,
-    @Param('inviteId') inviteId: string,
-    @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ ok: true }> {
-    await this.invites.revoke({ orgId, inviteId, actorId: principal.id });
-    return { ok: true };
-  }
-
-  /** Redeem runs under the invitee's L1 session, outside any org scope. */
+  /** Invite redemption runs under the invitee's L1 session, outside any org scope. */
   @Post('invites/:inviteId/redeem')
   @Idempotent()
+  @RateLimit({ name: 'org-invite-redeem', capacity: 10, refillPerSecond: 0.1, scope: 'principal' })
   async redeemInvite(
     @Param('inviteId') inviteId: string,
-    @Body() body: { token: string },
+    @Body() dto: RedeemInviteDto,
     @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ ok: true }> {
-    await this.invites.redeem({ inviteId, token: body.token, accountId: principal.id });
-    return { ok: true };
+  ): Promise<{ ok: true; orgId: string; role: string }> {
+    const joined = await this.invites.redeem({ inviteId, token: dto.token, accountId: principal.id });
+    return { ok: true, ...joined };
   }
 
-  // ── Projects (owner/admin/developer manage) ──────────────────────────────
+  // ── Org profile + settings ────────────────────────────────────────────────
 
-  @Get(':orgId/projects')
+  @Get(':orgId')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
-  async listProjects(@Param('orgId') orgId: string): Promise<{ projects: unknown[] }> {
-    return { projects: await this.projects.list(orgId) };
+  @UseGuards(OrgRolesGuard)
+  async profile(@Param('orgId') orgId: string): Promise<unknown> {
+    return this.settings.profile(orgId);
   }
 
-  @Post(':orgId/projects')
-  @Roles('owner', 'admin', 'developer')
+  @Patch(':orgId/settings')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
   @Idempotent()
-  async createProject(
+  async updateSettings(
     @Param('orgId') orgId: string,
-    @Body() body: { name: string; description?: string },
-    @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ project: unknown }> {
-    return { project: await this.projects.create({ orgId, name: body.name, description: body.description, actorId: principal.id }) };
-  }
-
-  @Post(':orgId/projects/:projectId/archive')
-  @Roles('owner', 'admin', 'developer')
-  async archiveProject(
-    @Param('orgId') orgId: string,
-    @Param('projectId') projectId: string,
+    @Body() dto: UpdateOrgDto,
     @CurrentPrincipal() principal: L1Principal,
   ): Promise<{ ok: true }> {
-    await this.projects.archive({ orgId, projectId, actorId: principal.id });
+    await this.settings.update({
+      orgId,
+      actorId: principal.id,
+      ...(dto.name !== undefined ? { name: dto.name } : {}),
+      ...(dto.region !== undefined ? { region: dto.region } : {}),
+      ...(dto.retention_days !== undefined ? { retentionDays: dto.retention_days } : {}),
+      ...(dto.support_email !== undefined ? { supportEmail: dto.support_email } : {}),
+      ...(dto.default_project_id !== undefined ? { defaultProjectId: dto.default_project_id } : {}),
+      ...(dto.branding ? { branding: dto.branding } : {}),
+      ...(dto.preferences ? { preferences: dto.preferences } : {}),
+    });
     return { ok: true };
   }
 
-  // ── Audit view (owner/admin/billing/developer) ───────────────────────────
+  // ── Member summary (seat cards — every role sees the org's shape) ────────
 
-  @Get(':orgId/audit')
-  @Roles('owner', 'admin', 'billing', 'developer')
-  async auditView(@Param('orgId') orgId: string): Promise<{ events: unknown[] }> {
-    // Shared audit_events has no RLS (Python-owned) — explicit tenant filter.
-    const rows = await this.db.root.execute<Record<string, unknown>>(sql`
-      select id, actor_type, actor_id, action, resource_type, resource_id, details, created_at
-      from audit_events
-      where tenant_id = ${orgId}
-      order by created_at desc
-      limit 100
-    `);
-    return { events: rows.rows };
+  @Get(':orgId/summary')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @UseGuards(OrgRolesGuard)
+  async summary(@Param('orgId') orgId: string): Promise<unknown> {
+    return this.memberships.summary(orgId);
   }
 
-  private async orgName(orgId: string): Promise<string> {
-    const rows = await this.db.root.execute<{ name: string }>(sql`select name from tenants where id = ${orgId} limit 1`);
-    return rows.rows[0]?.name ?? 'your organization';
+  // ── Entitlements (read for everyone; the state machine itself is
+  //    platform-owned — only trial starts are console-writable) ────────────
+
+  @Get(':orgId/entitlements')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @UseGuards(OrgRolesGuard)
+  async listEntitlements(@Param('orgId') orgId: string): Promise<{ entitlements: unknown[] }> {
+    return { entitlements: await this.entitlements.listForOrg(orgId) };
+  }
+
+  @Get(':orgId/entitlements/:product')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  @UseGuards(OrgRolesGuard)
+  async getEntitlement(@Param('orgId') orgId: string, @Param('product') product: string): Promise<{ entitlement: unknown; effective_limits: Record<string, unknown> }> {
+    return {
+      entitlement: await this.entitlements.getFor(orgId, product),
+      effective_limits: await this.entitlements.effectiveLimits(orgId, product),
+    };
+  }
+
+  @Post(':orgId/entitlements/:product/trial')
+  @Roles('owner', 'billing')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  @RateLimit({ name: 'org-trial-start', capacity: 5, refillPerSecond: 0.01, scope: 'principal' })
+  async startTrial(
+    @Param('orgId') orgId: string,
+    @Param('product') product: string,
+    @Body() dto: StartTrialDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ entitlement: unknown }> {
+    return { entitlement: await this.entitlements.startTrial({ orgId, product, days: dto?.days, actorId: principal.id }) };
   }
 }

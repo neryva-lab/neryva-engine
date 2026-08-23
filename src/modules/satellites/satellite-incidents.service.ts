@@ -89,6 +89,16 @@ export class SatelliteIncidentsService {
       .limit(Math.min(Math.max(limit, 1), 500));
   }
 
+  /** Unresolved incidents only (the detail view's "open now" panel). */
+  async listOpen(satelliteKey: string, limit = 50): Promise<SatelliteIncidentRow[]> {
+    return this.db.root
+      .select()
+      .from(satelliteIncidents)
+      .where(and(eq(satelliteIncidents.satelliteKey, satelliteKey), isNull(satelliteIncidents.resolvedAt)))
+      .orderBy(desc(satelliteIncidents.openedAt))
+      .limit(Math.min(Math.max(limit, 1), 200));
+  }
+
   /** The status page feed: every satellite's recent incidents, newest first. */
   async recent(limit = 100): Promise<SatelliteIncidentRow[]> {
     return this.db.root

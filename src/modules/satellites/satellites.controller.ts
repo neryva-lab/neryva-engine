@@ -149,8 +149,11 @@ export class SatellitesController {
   @AuthLayer('l2')
   @UseGuards(PlatformStaffGuard)
   @StaffRoles('super_admin', 'tenant_admin', 'operator', 'auditor')
-  async status(): Promise<{ satellites: unknown[] }> {
-    return { satellites: await this.registry.statusView() };
+  async status(): Promise<{ satellites: unknown[]; open_incidents_total: number }> {
+    return {
+      satellites: await this.registry.statusView(),
+      open_incidents_total: await this.incidents.openCount(),
+    };
   }
 
   /** One satellite's detail (row + compliance evidence + open incidents). */
@@ -166,7 +169,7 @@ export class SatellitesController {
     return {
       satellite,
       compliance: await this.activity.compliance(key, this.registry.heartbeatIntervalSeconds),
-      open_incidents: await this.incidents.listFor(key, 20),
+      open_incidents: await this.incidents.listOpen(key),
     };
   }
 
@@ -178,6 +181,16 @@ export class SatellitesController {
   async history(@Param('key') key: string, @Query('limit') limit?: string): Promise<{ heartbeats: unknown[] }> {
     const parsed = limit ? Number.parseInt(limit, 10) : 200;
     return { heartbeats: await this.registry.history(key, Number.isFinite(parsed) ? parsed : 200) };
+  }
+
+  /** Fleet-wide heartbeat history window (the status page's trend graph). */
+  @Get('history/recent')
+  @AuthLayer('l2')
+  @UseGuards(PlatformStaffGuard)
+  @StaffRoles('super_admin', 'tenant_admin', 'operator', 'auditor')
+  async recentHistory(@Query('minutes') minutes?: string): Promise<{ heartbeats: unknown[] }> {
+    const parsed = minutes ? Number.parseInt(minutes, 10) : 60;
+    return { heartbeats: await this.registry.recentHistory(Math.min(Math.max(Number.isFinite(parsed) ? parsed : 60, 5), 1440)) };
   }
 
   /** The incident timeline (status-page history for one satellite). */

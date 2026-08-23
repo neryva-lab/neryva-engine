@@ -4,6 +4,7 @@ import { validateFlagMatrix } from './config/feature-flags';
 import { DbService } from './infra/db/db.service';
 import { RedisService } from './infra/redis.service';
 import { QueueService } from './infra/queue.service';
+import { StorageService } from './infra/storage/storage.service';
 import { JwksService } from './auth/jwks.service';
 import { AuthGuard } from './auth/auth.guard';
 import { AuditService } from './audit/audit.service';
@@ -18,8 +19,9 @@ import { MetricsController } from './observability/metrics.controller';
 
 /**
  * The shared kernel (locked list — additions require an ADR): config,
- * pg/redis/bullmq factories, the auth guards, audit emitter, error envelope
- * + request-id + idempotency + rate limiting, health.
+ * pg/redis/bullmq factories, object-storage presigning (ADR-008), the auth
+ * guards, audit emitter, error envelope + request-id + idempotency + rate
+ * limiting, health.
  *
  * The kernel imports no module. Its PORT tokens (session registry, org
  * access, service clients) are bound by the feature modules and resolved
@@ -34,6 +36,7 @@ import { MetricsController } from './observability/metrics.controller';
     DbService,
     RedisService,
     QueueService,
+    StorageService,
     JwksService,
     AuditService,
     EventBus,
@@ -42,7 +45,7 @@ import { MetricsController } from './observability/metrics.controller';
     { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
   ],
   controllers: [HealthController, MetricsController],
-  exports: [DbService, RedisService, QueueService, JwksService, AuditService, EventBus, HealthRegistry],
+  exports: [DbService, RedisService, QueueService, StorageService, JwksService, AuditService, EventBus, HealthRegistry],
 })
 export class KernelModule implements NestModule {
   constructor() {

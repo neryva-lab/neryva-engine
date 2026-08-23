@@ -245,6 +245,15 @@ export class CareersService {
     return { applications: rows.rows, total: total.rows[0]?.count ?? 0, limit, offset };
   }
 
+  /** Single application for staff drill-down (attachment download source). */
+  async applicationById(applicationId: string): Promise<typeof careerApplications.$inferSelect | null> {
+    if (!/^[0-9a-f-]{36}$/i.test(applicationId)) {
+      throw ApiError.validation({ application_id: 'must be a uuid' });
+    }
+    const rows = await this.db.root.select().from(careerApplications).where(eq(careerApplications.id, applicationId)).limit(1);
+    return rows[0] ?? null;
+  }
+
   /** Pipeline transition: validated against the explicit table, audited, noted. */
   async transitionApplication(input: { applicationId: string; target: ApplicationStatus; notes?: string; actorId: string }) {
     const rows = await this.db.root.select().from(careerApplications).where(eq(careerApplications.id, input.applicationId)).limit(1);

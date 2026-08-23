@@ -123,6 +123,41 @@ export class InboxController {
     });
   }
 
+  /**
+   * Download an application's attachment (ADR-008 storage): a time-limited
+   * presigned GET — the document never proxies through the engine, and the
+   * URL dies in minutes. Filenames come from the stored object key, so a
+   * hostile original filename can't reach the Content-Disposition header
+   * un-sanitized.
+   */
+  @Get('applications/:applicationId/attachment')
+  @AuthLayer('l1')
+  @RateLimit({ name: 'corporate-attachment-download', capacity: 30, refillPerSecond: 1, scope: 'principal' })
+  async applicationAttachment(@Param('applicationId') applicationId: string): Promise<unknown> {
+    if (!this.storage.available) {
+      throw ApiError.unavailable('Attachment downloads');
+    }
+    const application = await this.careers.applicationById(applicationId);
+    if (!application) {
+      throw ApiError.notFound('application');
+    }
+    if (!application.fileRef) {
+      throw ApiError.notFound('attachment');
+    }
+    const key = application.fileRef;
+    if (!/^careers\/[0-9a-f-]{36}\/[\w.\-]+$/.test(key)) {
+      throw ApiError.conflict('stored attachment reference is malformed');
+    }
+    const filename = key.split('/').pop() ?? 'attachment';
+    const download = this.storage.presignDownload({
+      key,
+      expiresIn: 300,
+      responseContentType: 'application/octet-stream',
+      responseContentDisposition: `attachment; filename="${filename.replace(/["\\]/g, '')}"`,
+    });
+    return { application_id: application.id, download };
+  }
+
   @Post('applications/:applicationId/transition')
   @AuthLayer('l1')
   @RateLimit({ name: 'corporate-application-transition', capacity: 60, refillPerSecond: 1, scope: 'principal' })

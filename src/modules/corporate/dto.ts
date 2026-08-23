@@ -1,4 +1,5 @@
-import { IsEmail, IsIn, IsOptional, IsString, Length, MaxLength, Matches, IsUrl, IsBoolean } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsEmail, IsIn, IsInt, IsOptional, IsString, Length, Max, MaxLength, Matches, Min, IsUrl, IsBoolean } from 'class-validator';
 
 /**
  * Public-form DTOs — the ONLY unauthenticated input surfaces on the engine,
@@ -131,4 +132,27 @@ export class ContentPostDto {
   @IsString()
   @MaxLength(200_000)
   tags?: string; // comma-separated; parsed server-side into the jsonb array
+}
+
+/**
+ * Direct-upload request (ADR-008 object storage): the client asks for a
+ * presigned POST for one attachment. `size_bytes` participates in the
+ * storage-side content-length-range — a lied-about size fails at the
+ * storage service, not in the engine.
+ */
+export class AttachmentPresignDto {
+  @IsString()
+  @Length(1, 128)
+  @Matches(/^[\w.\- ()]+$/, { message: 'filename: letters, digits, dot, dash, underscore, spaces, parens' })
+  filename!: string;
+
+  @IsString()
+  @Length(3, 256)
+  content_type!: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_485_760) // 10 MiB
+  size_bytes!: number;
 }

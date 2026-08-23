@@ -1,28 +1,45 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, Req, Res } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { Public } from '../../common/auth/decorators';
 import { Idempotent } from '../../common/http/idempotency';
 import { RateLimit } from '../../common/http/rate-limit';
 import { ApiError } from '../../common/http/api-error';
+import { verifyTurnstile } from '../../common/http/turnstile';
+import { StorageService } from '../../common/infra/storage/storage.service';
 import { CareersService } from './careers.service';
 import { ContactInboxService } from './contact-inbox.service';
 import { ContentService } from './content.service';
 import { FeedsService } from './feeds.service';
 import { NewsletterService } from './newsletter.service';
 import { SuppressionService } from './suppression.service';
-import { CareerDto, ContactDto, NewsletterDto } from './dto';
+import { AttachmentPresignDto, CareerDto, ContactDto, NewsletterDto } from './dto';
+
+/** Resume attachments: exact content-type ↔ extension pairs the pipeline accepts. */
+const ATTACHMENT_TYPES: Record<string, string> = {
+  'application/pdf': '.pdf',
+  'application/msword': '.doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+  'application/rtf': '.rtf',
+  'text/plain': '.txt',
+  'text/markdown': '.md',
+};
+const ATTACHMENT_MAX_BYTES = 10_485_760; // 10 MiB
 
 /**
  * The public surface (corporate E-2/E-3): the ONLY unauthenticated routes
  * on the engine. Posture: per-IP token buckets, Idempotency-Key on every
  * mutating POST, strict DTO whitelisting (the honeypot `company_url` is
  * dropped by the whitelist — the response is indistinguishable from
- * success so bots get no signal), content-length link heuristics, and
- * audit on every stored submission.
+ * success so bots get no signal), content-length link heuristics,
+ * Cloudflare Turnstile on the mutating forms (ADR-008 — on and fail-closed
+ * the moment TURNSTILE_SECRET_KEY is set), and audit on every stored
+ * submission.
  *
  * v2 additions: careers job listings, one-click unsubscribe (GET+POST),
  * provider bounce/complaint webhooks (secret-authenticated), the blog's
- * public reading endpoints, and RSS/Atom/JSON/sitemap syndication.
+ * public reading endpoints, RSS/Atom/JSON/sitemap syndication, and
+ * presigned direct uploads for resume attachments (ADR-008 storage).
  */
 @Controller('public')
 export class PublicController {
@@ -33,7 +50,17 @@ export class PublicController {
     private readonly content: ContentService,
     private readonly feeds: FeedsService,
     private readonly suppressions: SuppressionService,
+    private readonly storage: StorageService,
   ) {}
+
+  /** Turnstile gate — inert until TURNSTILE_SECRET_KEY is configured. */
+  private async assertHuman(req: FastifyRequest): Promise<void> {
+    const header = req.headers['x-turnstile-token'];
+    const token = Array.isArray(header) ? header[0] : header;
+    if (!(await verifyTurnstile(token, req.ip ?? null))) {
+      throw ApiError.forbidden('bot verification failed');
+    }
+  }
 
   @Public()
   @Post('contact')
@@ -41,6 +68,7 @@ export class PublicController {
   @Idempotent()
   @RateLimit({ name: 'public-contact', capacity: 3, refillPerSecond: 0.02 }) // ~1/minute sustained, burst 3
   async contact(@Body() dto: ContactDto, @Req() req: FastifyRequest): Promise<{ ok: true }> {
+    await this.assertHuman(req);
     await this.inbox.intake({
       name: dto.name,
       email: dto.email,
@@ -57,7 +85,8 @@ export class PublicController {
   @HttpCode(202)
   @Idempotent()
   @RateLimit({ name: 'public-newsletter', capacity: 3, refillPerSecond: 0.02 })
-  async subscribeNewsletter(@Body() dto: NewsletterDto): Promise<{ ok: true }> {
+  async subscribeNewsletter(@Body() dto: NewsletterDto, @Req() req: FastifyRequest): Promise<{ ok: true }> {
+    await this.assertHuman(req);
     await this.newsletter.subscribe(dto.email);
     return { ok: true };
   }
@@ -124,12 +153,53 @@ export class PublicController {
     return this.careers.publishedJobBySlug(slug);
   }
 
+  /**
+   * Presign a resume upload (ADR-008 storage): the client POSTs this form
+   * data directly to object storage — the engine never proxies bytes. The
+   * storage-side policy binds exact key, exact content-type, and the
+   * content-length-range, so the returned upload cannot be reused for a
+   * different file. The resulting `file_ref` (the key) goes on the career
+   * application; staff download it through a time-limited presigned GET.
+   */
+  @Public()
+  @Post('careers/attachments/presign')
+  @HttpCode(200)
+  @RateLimit({ name: 'public-careers-presign', capacity: 3, refillPerSecond: 0.02 })
+  async presignAttachment(@Body() dto: AttachmentPresignDto, @Req() req: FastifyRequest): Promise<unknown> {
+    await this.assertHuman(req);
+    if (!this.storage.available) {
+      throw ApiError.unavailable('Attachment uploads');
+    }
+    const extension = ATTACHMENT_TYPES[dto.content_type];
+    if (!extension) {
+      throw ApiError.validation({ content_type: `must be one of: ${Object.keys(ATTACHMENT_TYPES).join(', ')}` });
+    }
+    const safeName = dto.filename
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[.-]+/, '')
+      .slice(-64);
+    if (!safeName.endsWith(extension)) {
+      throw ApiError.validation({ filename: `extension must match content type (${extension})` });
+    }
+    const key = `careers/${randomUUID()}/${safeName}`;
+    const upload = this.storage.presignUpload({
+      key,
+      contentType: dto.content_type,
+      sizeRange: { min: 1, max: ATTACHMENT_MAX_BYTES },
+      expiresIn: 600,
+    });
+    return { path: key, file_ref: key, upload };
+  }
+
   @Public()
   @Post('careers')
   @HttpCode(202)
   @Idempotent()
   @RateLimit({ name: 'public-careers', capacity: 3, refillPerSecond: 0.01 })
   async submitCareer(@Body() dto: CareerDto, @Req() req: FastifyRequest): Promise<{ ok: true }> {
+    await this.assertHuman(req);
     await this.careers.submitApplication({
       name: dto.name,
       email: dto.email,

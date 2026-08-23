@@ -1,8 +1,9 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal, RequireScopes } from '../../common/auth/decorators';
 import { L2Principal, L3Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
 import { RateLimit } from '../../common/http/rate-limit';
+import { PlatformStaffGuard, StaffRoles } from '../../common/policy/staff.guard';
 import { SatelliteActivityService, satelliteKeyFor } from './satellite-activity.service';
 import { RevocationLogService } from './revocation-log.service';
 
@@ -47,5 +48,34 @@ export class RevocationsController {
       }
       throw err;
     }
+  }
+
+  /**
+   * Ops/verification window view (staff, L2): rows in [from, to] — the
+   * "what did we revoke during the incident" query the cursor feed cannot
+   * answer backwards. Overrides the class scope (staff keys don't carry
+   * engine:revocations) and pins to L2 only.
+   */
+  @Get('window')
+  @AuthLayer('l2')
+  @RequireScopes()
+  @UseGuards(PlatformStaffGuard)
+  @StaffRoles('super_admin', 'tenant_admin', 'operator', 'auditor')
+  @RateLimit({ name: 'revocations-window', capacity: 30, refillPerSecond: 0.5, scope: 'principal' })
+  async window(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+  ): Promise<{ revocations: unknown[] }> {
+    const fromIso = from ?? new Date(Date.now() - 3_600_000).toISOString();
+    const toIso = to ?? new Date().toISOString();
+    if (!Number.isFinite(Date.parse(fromIso)) || !Number.isFinite(Date.parse(toIso))) {
+      throw ApiError.validation({ from: 'from/to must be ISO timestamps' });
+    }
+    if (Date.parse(fromIso) > Date.parse(toIso)) {
+      throw ApiError.validation({ from: 'from must precede to' });
+    }
+    const parsedLimit = limit ? Number.parseInt(limit, 10) : 200;
+    return { revocations: await this.log.between(fromIso, toIso, Number.isFinite(parsedLimit) ? parsedLimit : 200) };
   }
 }

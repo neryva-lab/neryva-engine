@@ -124,6 +124,29 @@ const envSchema = z.object({
   /** Where contact-form team notifications land (unset = no team email). */
   CORPORATE_CONTACT_INBOX_EMAIL: z.string().optional().default(''),
 
+  // ── Platform tooling (ADR-008) — every plane is optional-by-design and ────
+  // degrades loudly at its surface (503 / no-op) rather than failing boot.
+
+  /** Observability identity for traces and logs. */
+  SERVICE_NAME: z.string().min(1).default('neryva-engine'),
+  /** OpenTelemetry traces: off unless explicitly enabled (requires endpoint). */
+  OTEL_TRACING_ENABLED: boolean(false),
+  /** OTLP/HTTP traces endpoint, e.g. http://localhost:4318/v1/traces. */
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional().default(''),
+  /** Sentry error tracking: no DSN, no SDK. */
+  SENTRY_DSN: z.string().optional().default(''),
+  /** Object storage (S3/MinIO/R2): configured when bucket+region+keys set. */
+  S3_ENDPOINT: z.string().optional().default(''),
+  S3_REGION: z.string().optional().default(''),
+  S3_BUCKET: z.string().optional().default(''),
+  S3_ACCESS_KEY_ID: z.string().optional().default(''),
+  S3_SECRET_ACCESS_KEY: z.string().optional().default(''),
+  S3_FORCE_PATH_STYLE: boolean(true),
+  /** Public/CDN base for public-read objects (blog covers). */
+  S3_PUBLIC_BASE_URL: z.string().optional().default(''),
+  /** Cloudflare Turnstile on public forms: unset = off; set = fail-closed. */
+  TURNSTILE_SECRET_KEY: z.string().optional().default(''),
+
   ENGINE_ENCRYPTION_KEY: z.string().optional().default(''),
 });
 

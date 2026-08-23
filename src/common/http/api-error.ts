@@ -89,6 +89,11 @@ export class ApiError extends HttpException {
     return new ApiError(HttpStatus.CONFLICT, ERROR_CODES.CONFLICT, message, details);
   }
 
+  /** A backing subsystem (e.g. object storage) is not configured/reachable. */
+  static unavailable(what: string): ApiError {
+    return new ApiError(HttpStatus.SERVICE_UNAVAILABLE, ERROR_CODES.SERVICE_UNAVAILABLE, `${what} is unavailable`);
+  }
+
   static internal(): ApiError {
     return new ApiError(HttpStatus.INTERNAL_SERVER_ERROR, ERROR_CODES.INTERNAL, 'Internal error');
   }

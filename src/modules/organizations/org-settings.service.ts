@@ -130,6 +130,9 @@ export class OrgSettingsService {
     }
 
     if (input.region !== undefined || input.retentionDays !== undefined) {
+      const current = await this.db.root.execute<{ region: string | null; retention_days: number | null }>(sql`
+        select region, retention_days from tenants where id = ${input.orgId} limit 1
+      `);
       const tenantUpdate: Record<string, unknown> = { updated_at: new Date().toISOString() };
       if (input.region !== undefined) {
         const region = input.region.trim().slice(0, 32);
@@ -137,7 +140,9 @@ export class OrgSettingsService {
           throw ApiError.validation({ region: 'region cannot be empty when provided' });
         }
         tenantUpdate.region = region;
-        changes.region = region;
+        if (region !== current.rows[0]?.region) {
+          changes.region = { from: current.rows[0]?.region ?? null, to: region };
+        }
       }
       if (input.retentionDays !== undefined) {
         const days = Math.floor(input.retentionDays);
@@ -145,7 +150,9 @@ export class OrgSettingsService {
           throw ApiError.validation({ retention_days: `must be ${RETENTION_BOUNDS.min}–${RETENTION_BOUNDS.max} days` });
         }
         tenantUpdate.retentionDays = days;
-        changes.retention_days = days;
+        if (days !== current.rows[0]?.retention_days) {
+          changes.retention_days = { from: current.rows[0]?.retention_days ?? null, to: days };
+        }
       }
       await this.db.root
         .update(legacyTenants)

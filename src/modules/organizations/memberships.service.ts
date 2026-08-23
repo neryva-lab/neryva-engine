@@ -9,7 +9,7 @@ import { EmailService } from '../corporate/email/email.service';
 import { accounts } from '../identity/schema';
 import { AccountsService } from '../identity/accounts.service';
 import { getOrgName } from './org-info';
-import { INVITABLE_ROLES, ORG_ROLES, OrgRole, orgGroupMembers, orgGroups, orgInvites, orgMemberships, orgServiceAccounts } from './schema';
+import { INVITABLE_ROLES, ORG_ROLES, OrgRole, orgGroupMembers, orgGroups, orgInvites, orgMemberships, orgServiceAccounts, productEntitlements } from './schema';
 
 /** The member row the console renders: identity + membership + provenance. */
 export interface MemberRow {
@@ -158,7 +158,9 @@ export class MembershipsService {
 
   /**
    * The seat/summary cards: members by status, pending invites, active
-   * service accounts, groups. Pending is computed (not-yet-accepted,
+   * service accounts, groups, and seat utilization against every
+   * seat-based entitlement (billing writes `seats`; the card renders
+   * active/max per product). Pending is computed (not-yet-accepted,
    * not-revoked, not-expired) so it can never drift from the token state.
    */
   async summary(orgId: string): Promise<{
@@ -167,6 +169,7 @@ export class MembershipsService {
     serviceAccounts: { total: number; active: number };
     groups: number;
     maxMembers: number;
+    seats: Array<{ product: string; plan: string; seats: number | null; activeMembers: number; utilization: number | null; state: string }>;
   }> {
     const byStatus = await this.db.withOrg(orgId, (tx) =>
       tx.select({ status: orgMemberships.status, n: count() }).from(orgMemberships).where(eq(orgMemberships.orgId, orgId)).groupBy(orgMemberships.status),
@@ -193,6 +196,9 @@ export class MembershipsService {
     );
     const saCount = new Map(serviceAccountsByStatus.map((r) => [r.status, Number(r.n)]));
     const groupRows = await this.db.withOrg(orgId, (tx) => tx.select({ n: count() }).from(orgGroups).where(eq(orgGroups.orgId, orgId)));
+    const entitlementRows = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ product: productEntitlements.product, plan: productEntitlements.plan, seats: productEntitlements.seats, status: productEntitlements.status }).from(productEntitlements).where(eq(productEntitlements.orgId, orgId)),
+    );
 
     return {
       members: { total: active + suspended, active, suspended },
@@ -200,6 +206,14 @@ export class MembershipsService {
       serviceAccounts: { total: (saCount.get('active') ?? 0) + (saCount.get('disabled') ?? 0), active: saCount.get('active') ?? 0 },
       groups: Number(groupRows[0]?.n ?? 0),
       maxMembers: env.ORG_MAX_MEMBERS,
+      seats: entitlementRows.map((row) => ({
+        product: row.product,
+        plan: row.plan,
+        seats: row.seats ?? null,
+        activeMembers: active,
+        utilization: row.seats && row.seats > 0 ? Math.round((active / row.seats) * 100) / 100 : null,
+        state: row.status,
+      })),
     };
   }
 

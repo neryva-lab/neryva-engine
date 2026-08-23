@@ -1,11 +1,16 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
 import { ApiError } from './api-error';
+import { captureEngineError } from '../observability/sentry';
 
 /**
  * One envelope for every error: validation, guards, domain errors, and the
  * unknown-exception path. request_id propagates from the middleware so a
  * client can correlate an error with the server log line.
+ *
+ * Sentry capture (ADR-008): domain ApiErrors never report (client outcomes,
+ * not defects); unknown exceptions and 5xx HttpExceptions do, with the
+ * request id attached so the issue links back to logs and traces.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -14,7 +19,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<FastifyReply>();
-    const request = ctx.getRequest<{ requestId?: string }>();
+    const request = ctx.getRequest<{ requestId?: string; url?: string }>();
 
     const requestId = request?.requestId ?? 'unknown';
 
@@ -33,6 +38,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
+      if (status >= 500) {
+        captureEngineError(exception, { requestId, route: request?.url });
+      }
       const payload = exception.getResponse();
       const message = typeof payload === 'string' ? payload : ((payload as { message?: string | string[] }).message ?? HttpStatus[status] ?? 'error');
       const details = typeof payload === 'object' && payload !== null && 'message' in payload && Array.isArray((payload as { message: unknown }).message)
@@ -52,6 +60,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // Unknown: log with stack, return a clean 500. Never leak internals.
     const err = exception as { message?: string; stack?: string };
     this.logger.error(`unhandled exception req=${requestId}: ${err?.message ?? String(exception)}`, err?.stack);
+    captureEngineError(exception, { requestId, route: request?.url });
     void response.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
       error: {
         code: 'internal_error',

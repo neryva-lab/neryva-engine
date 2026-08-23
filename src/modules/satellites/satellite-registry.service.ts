@@ -431,8 +431,9 @@ export class SatelliteRegistryService implements OnModuleInit {
 
     // Version floor (progressive-delivery lever): a beat below the floor
     // opens an incident — the lease stays (visibility first; the staff
-    // action to take is quarantine/drain, not blindness).
-    if (satellite.versionFloor && input.version && input.version < satellite.versionFloor) {
+    // action to take is quarantine/drain, not blindness). Comparison is
+    // numeric per segment: '10.0.0' must NOT sort below '9.0.0'.
+    if (satellite.versionFloor && input.version && versionLt(input.version, satellite.versionFloor)) {
       const open = await this.incidents.unresolved(input.key, 'version_floor');
       if (!open) {
         await this.incidents.open({ satelliteKey: input.key, kind: 'version_floor', detail: { reported: input.version, floor: satellite.versionFloor } });
@@ -446,7 +447,7 @@ export class SatelliteRegistryService implements OnModuleInit {
           details: { reported: input.version, floor: satellite.versionFloor },
         });
       }
-    } else if (!input.version || !satellite.versionFloor || input.version >= satellite.versionFloor) {
+    } else if (!input.version || !satellite.versionFloor || !versionLt(input.version, satellite.versionFloor)) {
       await this.incidents.resolve({ satelliteKey: input.key, kind: 'version_floor' });
     }
 
@@ -506,4 +507,27 @@ function sanitizeJson(input: Record<string, unknown> | undefined): Record<string
     return { truncated: true, size: serialized.length };
   }
   return { ...input };
+}
+
+/**
+ * Numeric-segment version compare (a < b). Segments parse as integers with
+ * a lexical tiebreak for non-numeric suffixes ('1.2.3-rc1'); shorter rows
+ * pad with zeros ('1.2' === '1.2.0').
+ */
+export function versionLt(a: string, b: string): boolean {
+  const pa = a.split(/[.-]/).map((s) => (/^\d+$/.test(s) ? Number.parseInt(s, 10) : s));
+  const pb = b.split(/[.-]/).map((s) => (/^\d+$/.test(s) ? Number.parseInt(s, 10) : s));
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i += 1) {
+    const sa = pa[i] ?? 0;
+    const sb = pb[i] ?? 0;
+    if (sa === sb) {
+      continue;
+    }
+    if (typeof sa === 'number' && typeof sb === 'number') {
+      return sa < sb;
+    }
+    return String(sa) < String(sb);
+  }
+  return false;
 }

@@ -89,16 +89,16 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
     prunedRevocations: number;
     massLossSuspected: boolean;
   }> {
-    const livenessChanges = await this.transitionLiveness();
+    const { changes, massLossSuspected } = await this.transitionLiveness();
     const configDrift = await this.detectConfigDrift();
     const prunedSamples = await this.pruneSamples();
     const prunedRevocations = await this.pruneRevocations();
     return {
-      livenessChanges,
+      livenessChanges: changes,
       configDrift,
       prunedSamples,
       prunedRevocations,
-      massLossSuspected: false, // set inside transitionLiveness when detected
+      massLossSuspected,
     };
   }
 
@@ -111,11 +111,14 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
    * A satellite that never beat keeps liveness=`never` — informational,
    * never an outage (the client half of the contract may not exist yet).
    */
-  private async transitionLiveness(): Promise<Array<{ key: string; from: string; to: string }>> {
+  private async transitionLiveness(): Promise<{ changes: Array<{ key: string; from: string; to: string }>; massLossSuspected: boolean }> {
     const connected = await this.db.root.select().from(satellites).where(sql`${satellites.status} <> 'retired' and ${satellites.status} <> 'placeholder'`);
     const nowMs = Date.now();
     const timeoutMs = env.SATELLITE_HEARTBEAT_TIMEOUT_SECONDS * 1000;
     const changes: Array<{ key: string; from: string; to: string }> = [];
+    // Effective post-pass liveness per tracked satellite (mass-loss reads
+    // the AFTER state — evaluating pre-update rows would under-detect).
+    const effective = new Map<string, string>();
 
     for (const satellite of connected) {
       if (satellite.liveness === 'never') {
@@ -123,6 +126,7 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
       }
       const ageMs = satellite.lastHeartbeatAt ? nowMs - Date.parse(satellite.lastHeartbeatAt) : Number.POSITIVE_INFINITY;
       const target = ageMs <= timeoutMs ? 'live' : ageMs <= 2 * timeoutMs ? 'stale' : 'offline';
+      effective.set(satellite.key, target);
       if (target === satellite.liveness) {
         continue;
       }
@@ -150,18 +154,20 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
 
     // Eureka self-preservation signal: every connected satellite stale+ at
     // once is almost certainly OUR fault (clock, DB, network), not theirs.
-    const tracked = connected.filter((s) => s.liveness !== 'never');
-    if (tracked.length > 1 && tracked.every((s) => s.liveness === 'stale' || s.liveness === 'offline')) {
+    const tracked = [...effective.values()];
+    let massLossSuspected = false;
+    if (tracked.length > 1 && tracked.every((l) => l === 'stale' || l === 'offline')) {
+      massLossSuspected = true;
       SatelliteSweeperWorker.logger.error('mass liveness loss suspected — engine-side fault more likely than every satellite failing at once');
       await this.audit.add({
         action: 'satellite.mass_loss_suspected',
         resourceType: 'satellite',
         resourceId: 'fleet',
         actorType: 'system',
-        details: { affected: tracked.map((s) => s.key) },
+        details: { affected: [...effective.keys()] },
       });
     }
-    return changes;
+    return { changes, massLossSuspected };
   }
 
   /**

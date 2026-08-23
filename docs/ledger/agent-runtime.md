@@ -32,5 +32,8 @@
 - [ ] Runtime's own quota plane, key management UI/API, operator auth, config editing → thin clients → deleted; runtime keeps: session engine, threads, gateway, guardrail enforcement, RAG
 - **Gate:** 410s two releases on superseded routes; ownership map updated; runtime suite green
 
-### A-6 — Optional TS rebuild (trigger-gated, never required)
-- [ ] Opens only if the Python runtime blocks something the business needs; rebuild as a clean capability service under the same contract
+### A-6 — From-scratch NestJS reimplementation (DECIDED — [ADR-007](../architecture/decisions/ADR-007-legacy-backends-references.md); the main build track, not an option)
+- [ ] Fresh NestJS service (standalone capability deployment) implementing the **verified scope** in [`../agent-studio-backend.md`](../agent-studio-backend.md): gateway, provider adapter (LiteLLM-pattern), guardrail stack, session engine, context stack, orchestration loop, tools/MCP, escalation/handoff, governance enforcement, workers, `/v1` + `/surfaces` APIs — zero Python code ported; the Python suite ports as acceptance tests
+- [ ] Per-namespace parity flips (contract snapshot + acceptance + shadow): `/v1` first, then `/surfaces`
+- [ ] Python retires when the last namespace flips; its behavior-spec duty ends and the reference file freezes
+- **Gate:** each flip: shadow zero-diff + acceptance green + load parity; final flip retires the Python deployment

@@ -25,9 +25,10 @@ engine/
 │   │   ├── organizations/       #   memberships, invites, projects, entitlements [spec: dev/organizations]
 │   │   ├── console/             #   manifests, /console/home, summaries, org API [spec: dev/control-plane]
 │   │   ├── corporate/           #   email, forms, content (neryva_backend ingested) [spec: dev/corporate]
-│   │   ├── agent-studio/        #   product module [spec: dev/agent-studio + Python runtime]
+│   │   ├── billing/             #   spend ingestion, ledgers, multi-tier quotas, invoices [spec: dev/metering]
+│   │   ├── agent-studio/        #   product module [spec: dev/agent-studio]
 │   │   └── deployment/          #   product module [spec: dev/deployment]
-│   └── runtime/                 #   strangler ports, last: session, gateway, guardrails, governance
+│   └── (satellites: connected via L3 contract — agent-runtime, inference)
 ├── test/                        # contract snapshots + ported acceptance tests (the Python suite is the spec)
 └── package.json                 # joins the existing pnpm workspace
 ```

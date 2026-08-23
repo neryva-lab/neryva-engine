@@ -1,7 +1,10 @@
 # ADR-003 — Backend Topology: One Engine, Two API Faces, Products as Registered Modules
 
-**Status:** Accepted · **Date:** 2026-08-23
+**Status:** Accepted (Amended by [ADR-004](ADR-004-frontend-portal-corporate.md), [ADR-005](ADR-005-engine-typescript-nestjs.md), and [ADR-006](ADR-006-engine-core-capabilities.md)) · **Date:** 2026-08-23
 **Decides:** the question *"we have two architectures on the backend — the normal-customer backend and the console/platform backend — where should the Deployment product be, and how are products allowed access to each architecture?"*
+**Amendments:**
+- **ADR-004:** Corporate backend is absorbed into the engine's `corporate` module (`neryva_backend` retired); single web app (`neryva-website`).
+- **ADR-005 & ADR-006:** The engine core is TypeScript on NestJS (core logic: identity, tenancy, billing, control plane, corporate, governance). Heavy workloads are **Capability Deployments (Satellites)** connecting via the 4-part connection contract (the existing Python runtime is `agent-runtime`).
 
 ## The reframing (the decision hiding inside the question)
 

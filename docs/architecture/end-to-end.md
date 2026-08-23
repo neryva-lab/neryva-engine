@@ -1,53 +1,45 @@
 # Neryva — End-to-End Architecture Explained
 
-**Date:** 2026-08-23 · **Purpose:** the single, self-contained explanation of the target architecture — for understanding, review, and external consultation. Everything here is decided and documented; sources are the ADRs and plans in this directory plus `docs/final_analysis/05–07`.
+**Date:** 2026-08-23 · **Purpose:** the single, self-contained explanation of the target architecture — for understanding, review, and external consultation. Sources are the binding ADRs (ADR-001 through ADR-006) and plans in this directory plus `docs/final_analysis/05–07`.
 
 ---
 
 ## 1. The one-paragraph version
 
-Neryva is **one AI platform engine** with **two API faces** (a control plane for the developer console and a runtime plane for products and APIs), carrying **a small register of products** (Agent Studio today, Deployment next, consumer Chat later) that plug into the engine through a fixed registration contract — never by building their own engine. **One identity plane** (a single Neryva Account that works everywhere, with organization contexts and enterprise SSO as separate axes) lets a consumer, a developer, and an enterprise IT department all knock on different doors of the same building. **One metering/governance plane** means every model call — from any product, any surface — passes the same gateway, guardrails, policies, and audit chain, and is billed per product. The corporate website is a separate, boring system that sells all of this.
+Neryva is **one AI platform engine** (TypeScript/NestJS core) with **two API faces** (a control plane for the developer console and a runtime plane for products and APIs), carrying **a small register of products** (Agent Studio today, Deployment next, consumer Chat later) that plug into the engine through a fixed registration contract. Heavy runtime workloads run as **Capability Deployments (Satellites)** that connect to the engine via a standard 4-part connection contract (the existing studio runtime is the first satellite: `agent-runtime`). **One identity plane** (a single Neryva Account that works everywhere, with organization contexts and enterprise SSO as separate axes) provides unified authentication across all surfaces. **One metering/governance plane** ensures every model call passes the same gateway, guardrails, policies, and audit chain, billed independently per product. A single unified web application (`corporate/neryva-website`) hosts marketing, the `/platform` console, and deep-linked product areas (`/studio/**`, `/deployment/**`), with corporate forms and email handled directly by the engine's `corporate` module.
 
 ## 2. The map
 
-```
    CONSUMERS                     COMPANIES (developers/admins/billing)        NERYVA STAFF
       │                                │                                        │
       ▼                                ▼                                        ▼
-┌──────────────┐            ┌─────────────────────┐            ┌──────────────────────────┐
-│ Chat product │            │ DEVELOPER CONSOLE   │            │ same console, staff roles│
-│ (future) /   │            │ (one shell, product │            │ (tenants, harness, ops)  │
-│ widget on    │            │  cards, org tools)  │            └────────────┬─────────────┘
-│ customer site│            └──────────┬──────────┘                         │
-└──────┬───────┘                       │ L1 console sessions                │
-       │ L4 anonymous tokens           ▼                                    │
-       │                   ┌────────────────────────────────────────────────┴────────┐
-       │                   │            CONTROL PLANE  (console APIs)                 │
-       │                   │  orgs · members · invites · projects · entitlements ·    │
-       │                   │  product manifests · summaries · billing views           │
-       │                   ├──────────────────────────────────────────────────────────┤
-       │  L2 API keys ────▶│            RUNTIME PLANE  (public APIs)                   │
-       │  L5 agent idents ▶│  OpenAI-compatible API · surfaces/widget · webhooks ·     │
-       │                   │  product runtime routes (deployment API, chat runtime)    │
-       │                   ├──────────────────────────────────────────────────────────┤
-       └──────────────────▶│         ONE PLATFORM ENGINE  (same deployable)            │
-                           │  identity (accounts, OIDC provider, L1–L5 tokens)         │
-                           │  tenancy + RLS · LLM gateway · guardrail stack ·          │
-                           │  policy engine (deny-by-default) · evidence/audit chain   │
-                           │  metering & quotas · worker/queue · observability         │
-                           │  ┌──────────────────────────────────────────────────┐    │
-                           │  │ PRODUCT MODULES (bounded contexts)               │    │
-                           │  │  products/agent_studio   products/deployment    │    │
-                           │  │  (future) products/chat                          │    │
-                           │  └──────────────────────────────────────────────────┘    │
-                           └──────────────────────────────────────────────────────────┘
-                                        │ contracts/SDKs · token exchange (L3)
-   ┌────────────────────────────────────┼──────────────────────────────┐
-   │ CORPORATE PLANE (separate forever) │  RESEARCH (PhaseForge, etc.) │
-   │ neryva.com website + website       │  feeds the engine, never     │
-   │ backend; federated sign-in only    │  deploys                     │
-   └────────────────────────────────────┴──────────────────────────────┘
-```
+┌──────────────┐            ┌─────────────────────────────────────────────────────────┐
+│ Chat product │            │ UNIFIED WEB APP (neryva-website)                         │
+│ (future) /   │            │ / (marketing) · /platform (console) · /studio · /deploy │
+│ widget on    │            └──────────────────────────┬──────────────────────────────┘
+│ customer site│                                       │ L1 console sessions
+└──────┬───────┘                                       ▼
+       │ L4 anonymous tokens               ┌──────────────────────────────────────────────────┐
+       │                                   │          CONTROL PLANE  (console APIs)           │
+       │                                   │  orgs · members · invites · projects ·           │
+       │                                   │  entitlements · manifests · summaries · billing  │
+       │                                   ├──────────────────────────────────────────────────┤
+       │  L2 API keys ────────────────────▶│          RUNTIME PLANE  (public APIs)            │
+       │  L5 agent idents ────────────────▶│  OpenAI-compatible API · surfaces/widget ·       │
+       │                                   │  product runtime routes (deployment API)         │
+       │                                   ├──────────────────────────────────────────────────┤
+       └──────────────────────────────────▶│  ENGINE CORE (TypeScript / NestJS — Brain/Money) │
+                                           │  identity (accounts, OIDC provider, L1–L5 tokens)│
+                                           │  tenancy + RLS · governance & policy decision   │
+                                           │  metering ledgers & quotas · corporate module    │
+                                           │  audit chain · product manifests & console home  │
+                                           └──────────────────┬───────────────────────────────┘
+                                                              │ 4-part connection contract (L3)
+                                           ┌──────────────────┴───────────────────────────────┐
+                                           │ CAPABILITY DEPLOYMENTS (Satellites)              │
+                                           │ ├── agent-runtime (Python - session/gateway/RAG) │
+                                           │ └── (future) inference (GPU model serving)       │
+                                           └──────────────────────────────────────────────────┘
 
 ## 3. Layer 1 — Identity: one account, many contexts
 
@@ -98,9 +90,9 @@ One web application (evolved from the existing studio admin console):
 - **Authorization composes three axes:** membership role × entitlement state × product scopes. Privileged acts (role assignment, ownership transfer, purchases, publishing policies) require **step-up MFA** — our equivalent of Anthropic's "owner/admin roles cannot be assigned via API" rule. Neryva staff roles (super_admin/operator/auditor) are a separate overlay in the same shell, never customer roles.
 - The console is product-agnostic and identity-plane-safe: it is an **L1-only surface**; widget visitors and API programs never touch it.
 
-## 7. Layer 5 — The corporate plane, kept boring
+## 7. Layer 5 — The corporate plane, absorbed and unified (ADR-004)
 
-neryva.com (website + its own Express/MongoDB backend) markets the company: blog, careers, contact, newsletter, website accounts. It federates ("Sign in with Neryva") to the platform identity plane and depends on nothing else. It never serves product traffic, and product architecture never leaks into it (the earlier analysis found the website hand-cloning 41 pages of fictional consoles — that approach is retired in favor of marketing the *real* console and, later, a seeded demo tenant of it).
+`neryva-website` is the **single frontend web application** across the company: marketing (`/`), the developer console (`/platform/**`), and deep-linked product pages (`/studio/**`, `/deployment/**`). There is **no separate corporate backend** — `neryva_backend` (Express/MongoDB) is absorbed into the engine's `corporate` module (`engine/src/modules/corporate`) and retired. Form submissions (`/public/{contact,newsletter,careers}`), transactional email, and blog content admin run directly on the engine core in PostgreSQL.
 
 ## 8. Three end-to-end journeys
 
@@ -114,28 +106,36 @@ neryva.com (website + its own Express/MongoDB backend) markets the company: blog
 
 | Data | Home |
 |---|---|
-| Accounts, sessions, clients, invites, memberships, entitlements | Platform identity schema |
-| Tenants, projects, keys, policies, tool registry, model catalog | Platform |
-| Threads/messages, evidence, audit, spend/quota | Platform |
-| Product-owned data (knowledge corpora, prompt suites · pipelines/environments/deployments/secrets · chat sharing/preferences) | The product module's own schemas (same DB, RLS-isolated; extractable) |
-| Website content, newsletter, careers | Corporate MongoDB — stays |
+| Accounts, sessions, clients, invites, memberships, entitlements | Platform identity schema (`identity.*` / `public`) |
+| Tenants, projects, keys, policies, tool registry, model catalog | Platform core schema |
+| Threads/messages, evidence, audit, spend/quota | Platform / `agent-runtime` satellite |
+| Product-owned data (knowledge corpora, prompt suites · pipelines/environments/deployments/secrets · chat sharing/preferences) | The product module's own schemas (same PostgreSQL DB, RLS-isolated; extractable) |
+| Website content, newsletter, careers, contact | Corporate module schema in PostgreSQL (absorbed per ADR-004; MongoDB retired) |
 | Never, anywhere | A password outside the identity schema; a provider key outside the gateway; an unaudited privileged action; production state in the research plane |
 
 ## 10. The invariants (the elevator defense for any consultant)
 
 1. **One identity plane** — every surface federates to it; no product stores credentials. *(Benchmark: Google/OpenAI account unification; the industry's converged console patterns.)*
 2. **One gateway/safety/metering plane** — all model traffic, all products, same guardrails and billing events.
-3. **Contract-first seams** — products integrate via manifest + public contract + token exchange, never shared tables.
+3. **Contract-first seams** — products and capability satellites integrate via manifest + public contract + token exchange (L3), never shared tables.
 4. **Products own product data; the platform owns identity, tenancy, policy, metering.**
-5. **The corporate site stays separate and boring.**
+5. **One engine core, one web frontend, zero duplicate backends.**
 6. **A new product is configuration + one module** — never an identity change, never a console fork.
 
 **Deliberately rejected:** two parallel engines (duplicates the hard 80% forever); per-product consoles (marketing becomes the most expensive place to ship a product — we lived a mild version of this already); Anthropic-style split consumer/developer accounts (double identity infrastructure, destroyed conversion path); products as separate services from day one (distributed cost before users); the website as IdP or product host (wrong plane).
 
 ## 11. Honest state: what exists, what's next (consultation-ready)
 
-**Exists today (verified in code):** the engine's runtime plane (session/threads, gateway, guardrails, policies, governance/RLS/audit, metering) with a 103-path pinned OpenAI contract; L2 keys, L4 end-user tokens, L5 agent identities, operator sessions, OIDC relying-party login, TOTP step-up; a working console frontend; the widget; corporate plane.
+**Exists today (verified in code):** the engine's runtime plane (session/threads, gateway, guardrails, policies, governance/RLS/audit, metering) with a 103-path pinned OpenAI contract; L2 keys, L4 end-user tokens, L5 agent identities, operator sessions, OIDC relying-party login, TOTP step-up; a working console frontend; the widget.
 
-**Designed, not yet built (in order):** platform/product import boundary in CI (no code moves) → identity module with first-party OIDC provider and email-code login (I-0/I-1) → projects + invites (Δ2/Δ3) → website federation (I-2) → token exchange + entitlements (I-3) → passkeys, enterprise SAML/SCIM (I-4) → the Deployment product module → consumer Chat on business trigger → repo extraction to an org monorepo on its defined triggers.
-
-**Open questions worth consultant input:** email-delivery architecture for the platform; timing of the consumer launch; data-residency posture for enterprise tenants; whether/when to move from a first-party OIDC provider to a dedicated IdP product (Ory/Keycloak) — triggers are documented.
+**Designed, not yet built (in order):** 
+1. Git recovery & baseline (E0)
+2. NestJS engine core with shared kernel & corporate email (E1)
+3. Identity module with first-party OIDC provider and email-code login (E2)
+4. Organizations, memberships, invites, projects, and entitlement state machine (E3)
+5. Partitioning linters & namespacing (E4)
+6. Control plane manifests, console home, and billing/metering engine (E5)
+7. `agent-runtime` satellite connection handover (E6 / ADR-006)
+8. Corporate completion, web frontend unification, and `neryva_backend` retirement (E7 / ADR-004)
+9. Deployment product module & worker workflows (E8)
+10. Hardening, benchmarking & final completeness audit (E9)

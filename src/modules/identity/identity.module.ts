@@ -102,7 +102,7 @@ export class IdentityBoot implements OnModuleInit {
         kind: 'service',
         name: 'agent-runtime satellite',
         redirectUris: [] as string[],
-        scopes: ['engine:ingest', 'engine:keys:validate'],
+        scopes: ['engine:ingest', 'engine:keys:validate', 'engine:config:pull', 'engine:heartbeat'],
         grantTypes: ['client_credentials'],
       },
     ];

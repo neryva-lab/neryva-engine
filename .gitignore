@@ -1,0 +1,43 @@
+# ── Secrets & environment — NEVER commit ────────────────────────────────────
+# The OP signing key, MFA proof key, and any local .env live here (see
+# src/README.md). secrets/ is referenced by .env.example defaults.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+!drizzle/meta/*
+
+# ── Dependencies & build output ─────────────────────────────────────────────
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# ── Runtime artifacts ───────────────────────────────────────────────────────
+# Dev email transport outbox (EMAIL_FILE_PATH) and general scratch
+var/
+*.log
+logs/
+pids/
+*.pid
+
+# Local databases / test artifacts (mirrors the studio repo's hygiene rule:
+# SQLite test DBs were committed by accident once — never again)
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Test & coverage ─────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+junit*.xml
+
+# ── Tooling caches ──────────────────────────────────────────────────────────
+.eslintcache
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.DS_Store
+Thumbs.db

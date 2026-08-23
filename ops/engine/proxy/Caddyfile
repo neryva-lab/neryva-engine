@@ -1,0 +1,41 @@
+# The Neryva edge proxy — the strangler's control point (correction C8).
+#
+# Route table (ledger agent-runtime A-0 / ADR-005 D2):
+#   /v1/**, /surfaces/**  → agent-runtime satellite (Python, production
+#                           until per-namespace parity flips per ADR-007 D4)
+#   everything else       → engine (this TS core: /auth, /console, /public,
+#                           /internal, /health, /login)
+#
+# The runtime's own ops/job plane does NOT pass through this edge — it is a
+# staff surface on its own upstream. Flip procedure (per namespace): change
+# one route block below, redeploy the proxy; rollback = revert the block.
+# Health-checked upstreams make a bad flip self-evident (502 within
+# seconds) instead of silently routing into a void.
+
+{$ENGINE_UPSTREAM:=http://engine:3001}
+{$RUNTIME_UPSTREAM:=http://agent-runtime:8000}
+
+:80 {
+	# Security headers on every response (the engine adds its own CSP on the
+	# login pages; these are the floor for everything else).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# ── Satellite plane: the agent-runtime serves the runtime API ──────────
+	handle /v1/* {
+		reverse_proxy {$RUNTIME_UPSTREAM}
+	}
+	handle /surfaces/* {
+		reverse_proxy {$RUNTIME_UPSTREAM}
+	}
+
+	# ── Engine plane: everything else ──────────────────────────────────────
+	handle {
+		reverse_proxy {$ENGINE_UPSTREAM}
+	}
+}

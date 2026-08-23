@@ -1,0 +1,55 @@
+# Product manifest — the contract a product "signs" to exist on the platform
+# (console/product-integration.md). Reviewed like an ADR: changes to this
+# file add public surface and entitlement meaning.
+#
+# stage lifecycle (modularity §5): registered → building → shadow → ga → deprecated
+# Bijection with the composed contract is enforced only for stage: ga.
+key: agent_studio
+version: 1
+stage: ga
+display_name: Neryva Agent Studio
+category: workspace
+icon: agent-studio
+brief: Build, govern, and run LLM agents — console pages, embeddable widget, and an OpenAI-compatible API.
+docs_url: https://neryva.com/products/agent-studio
+
+faces:
+  control: true
+  # runtime routes are served by the agent-runtime satellite (ADR-006 D3),
+  # not by the engine — hence "external" with the prefixes it owns.
+  runtime: external
+  consumer: false
+
+console:
+  base_route: /console/agent-studio
+  nav:
+    - section: Workspace
+      items: [dashboard, agents, conversations, activity]
+    - section: Knowledge
+      items: [knowledge, models, templates, prompts]
+    - section: Insights
+      items: [evaluations, usage, analytics]
+    - section: Governance
+      items: [policies, evidence, escalations]
+    - section: Settings
+      items: [team, api-keys, webhooks, guardrails]
+
+portal:
+  base_path: /studio
+
+scopes: [studio:read, studio:write, studio:publish]
+
+entitlements:
+  plans: [studio-team, studio-enterprise]
+
+summary_provider:
+  route: /console/agent-studio/summary
+  cache_seconds: 60
+
+metering:
+  product_tag: agent_studio
+
+# Engine-served runtime routes (none — the satellite owns them).
+runtime_routes: []
+# Satellite-owned route prefixes (map to the runtime's pinned contract).
+satellite_runtime_routes: [/v1, /surfaces]

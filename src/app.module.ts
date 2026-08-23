@@ -5,6 +5,13 @@ import { ModuleFlags } from './common/config/feature-flags';
 import { CorporateModule } from './modules/corporate/corporate.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { ConsoleModule } from './modules/console/console.module';
+import { BillingModule } from './modules/billing/billing.module';
+import { AgentStudioModule } from './modules/agent-studio/agent-studio.module';
+import { DeploymentModule } from './modules/deployment/deployment.module';
+import { KeysModule } from './modules/keys/keys.module';
+import { ConfigPublishModule } from './modules/config-publish/config-publish.module';
+import { SatellitesModule } from './modules/satellites/satellites.module';
 
 /**
  * Assembly ONLY: imports module registries, no logic. Modules register
@@ -25,6 +32,13 @@ const imports = [
   ...(ModuleFlags.corporate ? [CorporateModule] : []),
   ...(ModuleFlags.identity ? [IdentityModule] : []),
   ...(ModuleFlags.organizations ? [OrganizationsModule] : []),
+  ...(ModuleFlags.console ? [ConsoleModule] : []),
+  ...(ModuleFlags.billing ? [BillingModule] : []),
+  ...(ModuleFlags.agentStudio ? [AgentStudioModule] : []),
+  ...(ModuleFlags.deployment ? [DeploymentModule] : []),
+  ...(ModuleFlags.keys ? [KeysModule] : []),
+  ...(ModuleFlags.satellites ? [SatellitesModule] : []),
+  ...(ModuleFlags.configPublish ? [ConfigPublishModule] : []),
 ];
 
 @Module({

@@ -1,0 +1,42 @@
+# Product #2 (ADR-002 register). stage: building — the module lands at P7;
+# the card renders on /console/home immediately (state: none → trial CTA),
+# and bijection with the contract activates when it reaches ga.
+key: deployment
+version: 1
+stage: building
+display_name: Neryva Deployment
+category: orchestration
+icon: deployment
+brief: Pipelines, environments, and rollout orchestration for agents — promote dev → staging → prod with policy gates and instant rollback.
+docs_url: https://neryva.com/products/deployment
+
+faces:
+  control: true
+  runtime: true
+  consumer: false
+
+console:
+  base_route: /console/deployment
+  nav:
+    - section: Delivery
+      items: [pipelines, deployments, environments]
+    - section: Operations
+      items: [infrastructure, logs, alerts, cost, secrets, compliance]
+
+portal:
+  base_path: /deployment
+
+scopes: [deployment:read, deployment:write, deployment:operate]
+
+entitlements:
+  plans: [deployment-usage]
+
+summary_provider:
+  route: /console/deployment/summary
+  cache_seconds: 60
+
+metering:
+  product_tag: deployment
+
+runtime_routes: [/v1/deployments]
+satellite_runtime_routes: []

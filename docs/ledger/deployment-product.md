@@ -5,23 +5,25 @@
 
 ## Phases
 
+> **2026-08-23 (implementation note):** D-1…D-5 implemented in `src/modules/deployment` (eng-0005, schema `product_deployment`) — marked `[~]` until gates run. L5 runner minting stays with the handover track (correction C18); the workflow acts as the audited system principal until then.
+
 ### D-1 — Schema
-- [ ] `pipelines`, `pipeline_stages` (gate_policy), `environments`, `deployments` (status machine), `deployment_events` (immutable), `secrets` (envelope + kms_ref) — engine-owned from creation; RLS; schema `product_deployment`
+- [~] `pipelines`, `pipeline_stages` (gate_policy), `environments`, `deployments` (status machine), `deployment_events` (immutable), `secrets` (envelope + kms_ref) — engine-owned from creation; RLS; schema `product_deployment`
 - **Gate:** migrations clean; boundary rules green
 
 ### D-2 — Manifest + entitlement + summary stub
-- [ ] `deployment-usage` plans (environments count, retention, canary); card renders not-owned/trial on `/console/home`
+- [~] `deployment-usage` plans (environments count, retention, canary); card renders not-owned/trial on `/console/home`
 - **Gate:** fake-product-style card test passes for deployment
 
 ### D-3 — Console APIs
-- [ ] Pipelines/environments/deployments list+detail + events log; 403/402 entitlement semantics
+- [~] Pipelines/environments/deployments list+detail + events log; 403/402 entitlement semantics
 - **Gate:** route tests per entitlement state; contract snapshot (owner `deployment`)
 
 ### D-4 — The workflow
-- [ ] `deployment.run` job on the `deployment:` queue namespace: stage gates evaluated by the **engine policy service**; snapshot agent config (reads the runtime via its public contract, L3 token, acting product recorded); surface binding updates; promote/rollback events — every transition audited
-- [ ] Runner credentials: L5 agent identities (existing 0015 pattern)
+- [~] `deployment.run` job on the `deployment:` queue namespace: stage gates evaluated by the **engine policy service**; snapshot agent config (reads the runtime via its public contract, L3 token, acting product recorded); surface binding updates; promote/rollback events — every transition audited
+- [~] Runner credentials: L5 agent identities (existing 0015 pattern)
 - **Gate:** promote→canary→rollback e2e with stubbed gateway; DLQ path tested
 
 ### D-5 — Operations pages
-- [ ] Canary metrics (from runtime's observability feed), alerts, cost (engine metering, tag `deployment`), secrets vault (rotation)
+- [~] Canary metrics (from runtime's observability feed), alerts, cost (engine metering, tag `deployment`), secrets vault (rotation)
 - **Gate:** canary decision tests; quota buckets per (org→project→environment)

@@ -1,8 +1,9 @@
 # engine/src — the TypeScript core
 
 The Neryva engine core (ADR-005/006): identity, organizations, corporate
-(email seed), and the shared kernel. Console, agent-studio furniture,
-billing, and deployment land in later phases per
+(email + public forms + content), the console control plane, billing &
+metering, the agent-studio product furniture, and the deployment product —
+on the shared kernel. Phase order:
 [`docs/dev/ENGINE-EXECUTION-PLAN.md`](../docs/dev/ENGINE-EXECUTION-PLAN.md).
 
 ## Layout
@@ -17,13 +18,28 @@ kernel's ports (`SESSION_REGISTRY_PORT`, `SERVICE_CLIENT_PORT`,
 ```bash
 cp .env.example .env          # fill DATABASE_URL, REDIS_URL, secrets
 pnpm install
-pnpm migrate                  # applies drizzle/ (eng-0001, eng-0002)
+pnpm migrate                  # applies drizzle/ (eng-0001…eng-0006)
 pnpm dev                      # tsx watch
 ```
 
-Flags: `MODULES__{CORPORATE,IDENTITY,ORGANIZATIONS}_ENABLED`. The boot-time
-flag matrix refuses invalid combinations (identity requires corporate;
-organizations requires identity).
+Flags: `MODULES__{CORPORATE,IDENTITY,ORGANIZATIONS,CONSOLE,BILLING,
+AGENT_STUDIO,DEPLOYMENT}_ENABLED`. The boot-time flag matrix refuses invalid
+combinations (identity requires corporate; organizations requires identity;
+console requires organizations; billing requires console + organizations;
+agent-studio and deployment each require console + billing).
+
+## Contract composition (C-2')
+
+```bash
+npx tsx scripts/export-openapi.ts var/engine-openapi.json
+npx tsx scripts/compose-contract.ts \
+  --runtime ../contracts/openapi/openapi.v1.json \
+  --engine var/engine-openapi.json \
+  --out ../contracts/openapi/openapi.composed.v1.json
+```
+
+The composed contract carries `x-neryva-owner` on every path and fails on
+unowned paths, collisions, or missing routes of stage-ga manifests.
 
 ## Generate the OP signing key (development)
 
@@ -47,3 +63,5 @@ required — the OP refuses auto-generated keys.
   schemas — the SQL in `drizzle/` is the applied truth.
 - The migrations touch ONLY engine-owned tables (verify against
   `ownership-map.json`).
+- Public-form DTOs rely on `class-validator`/`class-transformer` being
+  installed for the global ValidationPipe (they are in package.json).

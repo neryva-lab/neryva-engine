@@ -57,4 +57,12 @@ export const EngineEvents = {
   LoginSuccess: 'login.success',
   LoginFailure: 'login.failure',
   EntitlementTransitioned: 'entitlement.transitioned',
+  ConfigPublished: 'config.published',
 } as const;
+
+export interface ConfigPublishedEvent {
+  orgId: string;
+  scope: string;
+  product: string | null;
+  version: number;
+}

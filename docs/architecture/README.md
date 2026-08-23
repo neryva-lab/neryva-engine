@@ -38,7 +38,9 @@ docs/architecture/
 
 **`engine/docs/dev/` — the implementation layer** (the engine's own documentation home; one subdirectory per workstream): start at [`engine/docs/dev/END-TO-END.md`](../dev/END-TO-END.md) — the complete engine map (full verified inventory, the auth map for every endpoint class, phases E0–E9, completeness matrix). Roadmap and per-workstream plans live alongside it in `engine/docs/dev/`.
 
-Review log: [`reviews/2026-08-23-senior-review.md`](reviews/2026-08-23-senior-review.md) — full consistency + claims-vs-code audit; 8 findings, all fixed; residual open items listed for consultation.
+Review log:
+- [`reviews/2026-08-23-senior-review.md`](reviews/2026-08-23-senior-review.md) — full consistency + claims-vs-code audit; 8 findings, all fixed; residual open items listed for consultation.
+- [`reviews/2026-08-23-implementation-gap-analysis.md`](reviews/2026-08-23-implementation-gap-analysis.md) — **the feature gap audit vs. enterprise production-grade requirements**: every capability domain (identity, orgs, keys, console, billing, studio, deployment, corporate, satellite ops, platform services) with severity-graded missing features (9 BLOCKER / 34 HIGH / 27 MEDIUM / 7 ROADMAP) and a dependency-aware build order. Read this before continuing implementation.
 
 ## Reading order
 

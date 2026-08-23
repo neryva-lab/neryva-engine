@@ -36,7 +36,7 @@ async function bootstrap(): Promise<void> {
 
   await app.listen(env.PORT, env.HOST);
   new Logger('Engine').log(
-    `listening on ${env.HOST}:${env.PORT} (${env.NODE_ENV}) — corporate=${ModuleFlags.corporate ? 'on' : 'off'} identity=${ModuleFlags.identity ? 'on' : 'off'} organizations=${ModuleFlags.organizations ? 'on' : 'off'}`,
+    `listening on ${env.HOST}:${env.PORT} (${env.NODE_ENV}) — corporate=${ModuleFlags.corporate ? 'on' : 'off'} identity=${ModuleFlags.identity ? 'on' : 'off'} organizations=${ModuleFlags.organizations ? 'on' : 'off'} console=${ModuleFlags.console ? 'on' : 'off'} billing=${ModuleFlags.billing ? 'on' : 'off'} agent-studio=${ModuleFlags.agentStudio ? 'on' : 'off'} deployment=${ModuleFlags.deployment ? 'on' : 'off'}`,
   );
 }
 

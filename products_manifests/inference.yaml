@@ -1,0 +1,33 @@
+# Pre-registered placeholder (ledger inference N-0): the future inference
+# capability deployment registers through the SAME schema as every product
+# (console C-1). stage: registered — opening it requires an ADR-002 register
+# amendment; until then the console renders "coming soon" (no trial CTA, no
+# entitlement meaning). Runtime-only face: no console section.
+key: inference
+version: 1
+stage: registered
+display_name: Neryva Inference
+category: inference
+icon: inference
+brief: Managed model inference endpoints with per-token metering and SLOs (capability deployment #2).
+
+faces:
+  control: false
+  runtime: true
+  consumer: false
+
+scopes: [inference:read, inference:write]
+
+entitlements:
+  plans: [inference-usage]
+
+# Declared for graduation; not served while stage: registered.
+summary_provider:
+  route: /console/inference/summary
+  cache_seconds: 300
+
+metering:
+  product_tag: inference
+
+runtime_routes: []
+satellite_runtime_routes: [/v1/inference]

@@ -1,0 +1,87 @@
+# The engine deploy lane (A-0 / correction C8) — the edge proxy plus the
+# engine service. Postgres and Redis are shared with the Python runtime's
+# stack during the strangler window (same DATABASE_URL / REDIS_URL); for a
+# local bring-up uncomment the infrastructure blocks.
+#
+# The agent-runtime service lives in the runtime's own ops/ (studio repo
+# ops/docker); point RUNTIME_UPSTREAM at it on the shared network.
+#
+# Bring-up:
+#   docker network create neryva || true
+#   docker compose -f ops/engine/docker-compose.yml up -d
+#   cd .. && pnpm --filter @neryva/engine migrate   # eng-0001..eng-0004
+
+services:
+  engine:
+    build:
+      context: ../..
+      dockerfile: ops/engine/engine.Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      ENGINE_BASE_URL: ${ENGINE_BASE_URL:-http://localhost:8080}
+      MODULES__CORPORATE_ENABLED: ${MODULES__CORPORATE_ENABLED:-true}
+      MODULES__IDENTITY_ENABLED: ${MODULES__IDENTITY_ENABLED:-false}
+      MODULES__ORGANIZATIONS_ENABLED: ${MODULES__ORGANIZATIONS_ENABLED:-false}
+      MODULES__CONSOLE_ENABLED: ${MODULES__CONSOLE_ENABLED:-false}
+      MODULES__BILLING_ENABLED: ${MODULES__BILLING_ENABLED:-false}
+      MODULES__KEYS_ENABLED: ${MODULES__KEYS_ENABLED:-false}
+      MODULES__CONFIG_PUBLISH_ENABLED: ${MODULES__CONFIG_PUBLISH_ENABLED:-false}
+      MODULES__SATELLITES_ENABLED: ${MODULES__SATELLITES_ENABLED:-false}
+      IDENTITY_ISSUER: ${IDENTITY_ISSUER:-}
+      IDENTITY_JWT_SIGNING_KEY_FILE: /run/secrets/oidc-signing.pem
+      IDENTITY_COOKIE_KEYS: ${IDENTITY_COOKIE_KEYS:?set IDENTITY_COOKIE_KEYS}
+      MFA_PROOF_SIGNING_KEY_FILE: /run/secrets/mfa-proof.key
+      EMAIL_TRANSPORT: ${EMAIL_TRANSPORT:-file}
+    secrets:
+      - oidc-signing.pem
+      - mfa-proof.key
+    networks: [neryva]
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:3001/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  edge:
+    image: caddy:2-alpine
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      ENGINE_UPSTREAM: ${ENGINE_UPSTREAM:-http://engine:3001}
+      RUNTIME_UPSTREAM: ${RUNTIME_UPSTREAM:-http://agent-runtime:8000}
+    ports:
+      - '8080:80'
+    networks: [neryva]
+    restart: unless-stopped
+    depends_on:
+      engine:
+        condition: service_healthy
+
+  # ── Local-only infrastructure (comment out when sharing the runtime's) ──
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: neryva
+  #     POSTGRES_PASSWORD: change-me
+  #     POSTGRES_DB: neryva
+  #   volumes: [pgdata:/var/lib/postgresql/data]
+  #   networks: [neryva]
+  # redis:
+  #   image: redis:7-alpine
+  #   networks: [neryva]
+
+networks:
+  neryva:
+    external: true
+
+secrets:
+  oidc-signing.pem:
+    file: ${IDENTITY_JWT_SIGNING_KEY_FILE:-../../secrets/oidc-signing.pem}
+  mfa-proof.key:
+    file: ${MFA_PROOF_SIGNING_KEY_FILE:-../../secrets/mfa-proof.key}
+
+# volumes:
+#   pgdata:

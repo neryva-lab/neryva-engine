@@ -15,6 +15,41 @@
       "when": 1761232100000,
       "tag": "0002_org_furniture",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1761232200000,
+      "tag": "0003_corporate_public",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1761232300000,
+      "tag": "0004_billing_metering",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1761232400000,
+      "tag": "0005_product_deployment",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1761232500000,
+      "tag": "0006_agent_studio_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1761232600000,
+      "tag": "0007_satellite_surfaces",
+      "breakpoints": true
     }
   ]
 }

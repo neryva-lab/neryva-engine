@@ -33,6 +33,16 @@ const envSchema = z.object({
   MODULES__CORPORATE_ENABLED: boolean(true),
   MODULES__IDENTITY_ENABLED: boolean(false),
   MODULES__ORGANIZATIONS_ENABLED: boolean(false),
+  MODULES__CONSOLE_ENABLED: boolean(false),
+  MODULES__BILLING_ENABLED: boolean(false),
+  MODULES__AGENT_STUDIO_ENABLED: boolean(false),
+  MODULES__DEPLOYMENT_ENABLED: boolean(false),
+  MODULES__KEYS_ENABLED: boolean(false),
+  MODULES__CONFIG_PUBLISH_ENABLED: boolean(false),
+  MODULES__SATELLITES_ENABLED: boolean(false),
+
+  /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
+  BILLING_ANOMALY_CRON: z.string().default('15 3 * * *'),
 
   IDENTITY_ISSUER: z.string().url(),
   IDENTITY_API_AUDIENCE: z.string().min(1).default('neryva-engine'),
@@ -88,6 +98,12 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
     }
     if (env.MODULES__IDENTITY_ENABLED && !env.IDENTITY_COOKIE_KEYS) {
       throw new Error('IDENTITY_COOKIE_KEYS is required in production when the identity module is enabled');
+    }
+    // The deployment secrets vault (and confidential client secrets) seal
+    // values with the AES-256-GCM envelope at WRITE time — a missing key
+    // must be a boot failure, never a 500 on the first secret set.
+    if (env.MODULES__DEPLOYMENT_ENABLED && !env.ENGINE_ENCRYPTION_KEY) {
+      throw new Error('ENGINE_ENCRYPTION_KEY (32-byte base64) is required in production when the deployment module is enabled (secrets vault envelope)');
     }
   }
   return env;

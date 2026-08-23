@@ -27,6 +27,6 @@
 - **Gate:** typecheck clean; migration 0015 additive; all surfaces audited
 
 ## Known follow-ups (deliberate, documented)
-- The Python runtime's engine client (0/5 scopes implemented — ledger agent-runtime A-1…A-4): heartbeat sender, revocation poller, config puller, key-validation cache, metering pusher
+- The Python runtime's engine client (2026-08-24: heartbeat sender, key-validation cache, L1 JWKS acceptance landed — [`agent-runtime`](agent-runtime.md) A-1/A-2; remaining: revocation poller, config puller, metering pusher — A-3/A-4)
 - Frontend status page UI consuming `/console/status` (payload now carries per-satellite `liveness`); the marketing uptime figures need that surface behind them
 - SLO windows over the incident timeline (uptime % per component) once real liveness data accumulates

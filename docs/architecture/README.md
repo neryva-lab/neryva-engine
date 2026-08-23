@@ -39,8 +39,9 @@ docs/architecture/
 **`engine/docs/dev/` — the implementation layer** (the engine's own documentation home; one subdirectory per workstream): start at [`engine/docs/dev/END-TO-END.md`](../dev/END-TO-END.md) — the complete engine map (full verified inventory, the auth map for every endpoint class, phases E0–E9, completeness matrix). Roadmap and per-workstream plans live alongside it in `engine/docs/dev/`.
 
 Review log:
+- [`reviews/2026-08-24-feature-completeness-audit.md`](reviews/2026-08-24-feature-completeness-audit.md) — **the current feature audit** (supersedes the 08-23 gap analysis): five code-verified sweeps of every module + the cross-cutting planes; 2 BLOCKER / 8 HIGH / 17 MEDIUM / 19 LOW functional gaps with file:line evidence, a verified-complete list, and a fix order. Read this before continuing implementation.
 - [`reviews/2026-08-23-senior-review.md`](reviews/2026-08-23-senior-review.md) — full consistency + claims-vs-code audit; 8 findings, all fixed; residual open items listed for consultation.
-- [`reviews/2026-08-23-implementation-gap-analysis.md`](reviews/2026-08-23-implementation-gap-analysis.md) — **the feature gap audit vs. enterprise production-grade requirements**: every capability domain (identity, orgs, keys, console, billing, studio, deployment, corporate, satellite ops, platform services) with severity-graded missing features (9 BLOCKER / 34 HIGH / 27 MEDIUM / 7 ROADMAP) and a dependency-aware build order. Read this before continuing implementation.
+- [`reviews/2026-08-23-implementation-gap-analysis.md`](reviews/2026-08-23-implementation-gap-analysis.md) — the earlier feature gap audit (9 BLOCKER / 34 HIGH / 27 MEDIUM / 7 ROADMAP — all blockers implemented since; superseded by the 08-24 audit above for current state).
 
 ## Reading order
 

@@ -3,19 +3,26 @@ import { FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 
 /**
- * Request-id propagation: honor an inbound X-Request-Id (clamped), else mint
- * one. Attached to the request for guards/audit correlation and echoed on the
- * response.
+ * Request-id propagation: ONE id per request across every plane — Fastify's
+ * own request logs (via genReqId, ADR-008), the error envelope, audit
+ * correlation. genReqId already honors/clamps an inbound X-Request-Id at
+ * request creation, so its id is authoritative here; the inbound-header
+ * path below only matters for non-Fastify-shaped requests (tests).
  */
 @Injectable()
 export class RequestIdMiddleware implements NestMiddleware {
-  use(request: FastifyRequest, response: FastifyReply, next: () => void): void {
-    const inbound = request.headers['x-request-id'];
-    const candidate = Array.isArray(inbound) ? inbound[0] : inbound;
+  use(request: FastifyRequest & { id?: string }, response: FastifyReply, next: () => void): void {
     const requestId =
-      candidate && /^[A-Za-z0-9_.:-]{8,64}$/.test(candidate) ? candidate : randomUUID();
+      typeof request.id === 'string' && /^[A-Za-z0-9_.:-]{8,64}$/.test(request.id)
+        ? request.id
+        : mintFromHeader(request.headers['x-request-id']);
     (request as FastifyRequest & { requestId: string }).requestId = requestId;
     response.header('x-request-id', requestId);
     next();
   }
+}
+
+function mintFromHeader(inbound: string | string[] | undefined): string {
+  const candidate = Array.isArray(inbound) ? inbound[0] : inbound;
+  return candidate && /^[A-Za-z0-9_.:-]{8,64}$/.test(candidate) ? candidate : randomUUID();
 }

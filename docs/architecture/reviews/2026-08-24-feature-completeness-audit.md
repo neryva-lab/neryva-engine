@@ -36,6 +36,7 @@ ergonomics gap against the module's own contract.
 | **H-6** | **Account deletion (GDPR right-to-erasure) absent** | proof-of-absence: no `DELETE /auth/me`, no anonymize/disable endpoint anywhere in identity (only FK cascade declarations) | No self-service account deletion — a compliance blocker for EU-facing operation; personal data orphans indefinitely |
 | **H-7** | **Account email change absent** | `PATCH /auth/me` accepts only `display_name` (`account.controller.ts:93-101`); email is the sole identity key | A user who loses a mailbox can never migrate their account |
 | **H-8** | **Career attachments are a dead field** | `dto.ts:81-84` documents `file_ref` as "presigned upload result"; grep across src for `presign|multipart|FileInterceptor|signedUrl|s3` matches only that comment; stored raw (`careers.service.ts:203`) and echoed back (:231) | Applicants can never actually attach a resume — the field persists an arbitrary client string nothing issues, serves, or validates |
+| | *→ CLOSED 2026-08-24 (ADR-008):* S3-compatible storage with in-house SigV4 presigning (`common/infra/storage`), public upload endpoint `POST /public/careers/attachments/presign` (type↔extension allowlist, 10 MiB storage-enforced length policy, Turnstile-gated), staff download `GET /console/corporate/applications/:id/attachment` (5-min presigned GET, sanitized disposition), and CMS cover presign `POST /console/content/posts/cover/presign` (image types, CDN public URL) | |
 
 ## MEDIUM
 

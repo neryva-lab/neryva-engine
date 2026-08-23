@@ -1,9 +1,11 @@
 import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { AuthLayer, CurrentPrincipal, RequireScopes } from '../../common/auth/decorators';
 import { L1Principal, L2Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
 import { RateLimit } from '../../common/http/rate-limit';
+import { StorageService } from '../../common/infra/storage/storage.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { DbService } from '../../common/infra/db/db.service';
 import { ContentService } from './content.service';
@@ -23,6 +25,7 @@ export class ContentController {
     private readonly content: ContentService,
     private readonly audit: AuditService,
     private readonly db: DbService,
+    private readonly storage: StorageService,
   ) {}
 
   // ── Staff authoring (L1 + grant) ────────────────────────────────────────
@@ -40,6 +43,58 @@ export class ContentController {
   @RateLimit({ name: 'content-write', capacity: 30, refillPerSecond: 0.2, scope: 'principal' })
   async upsert(@Body() dto: ContentPostDto, @CurrentPrincipal() principal: L1Principal): Promise<{ post: unknown }> {
     return { post: await this.content.upsert(dto, principal.id) };
+  }
+
+  /**
+   * Presign a cover-image upload (ADR-008 storage): returns the multipart
+   * POST fields for a direct-to-storage upload plus the PUBLIC URL to store
+   * on the post's cover_image — feeds embed covers, so per-request signing
+   * is impossible and the object must live under the CDN base. Image types
+   * only, 5 MiB cap enforced by the storage-side length policy.
+   */
+  @Post('posts/cover/presign')
+  @AuthLayer('l1')
+  @UseGuards(ContentStaffGuard)
+  @RateLimit({ name: 'content-cover-presign', capacity: 12, refillPerSecond: 0.05, scope: 'principal' })
+  async presignCover(@Body() body: { filename?: string; content_type?: string; size_bytes?: number }): Promise<unknown> {
+    if (!this.storage.available) {
+      throw ApiError.unavailable('Cover image uploads');
+    }
+    const allowed: Record<string, string> = {
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/avif': '.avif',
+    };
+    const contentType = body.content_type ?? '';
+    const extension = allowed[contentType];
+    if (!extension) {
+      throw ApiError.validation({ content_type: `must be one of: ${Object.keys(allowed).join(', ')}` });
+    }
+    const size = Number(body.size_bytes);
+    if (!Number.isInteger(size) || size < 1 || size > 5_242_880) {
+      throw ApiError.validation({ size_bytes: 'integer between 1 and 5242880 (5 MiB)' });
+    }
+    if (!body.filename || !/^[\w.\- ()]{1,128}$/.test(body.filename)) {
+      throw ApiError.validation({ filename: 'invalid' });
+    }
+    const safeName = body.filename
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[.-]+/, '')
+      .slice(-64);
+    if (!safeName.endsWith(extension)) {
+      throw ApiError.validation({ filename: `extension must match content type (${extension})` });
+    }
+    const key = `content/covers/${randomUUID()}-${safeName}`;
+    const upload = this.storage.presignUpload({
+      key,
+      contentType,
+      sizeRange: { min: 1, max: 5_242_880 },
+      expiresIn: 600,
+    });
+    return { path: key, upload, public_url: this.storage.publicUrl(key) };
   }
 
   @Post('posts/:slug/publish')

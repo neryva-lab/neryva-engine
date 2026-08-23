@@ -4,6 +4,7 @@ import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
 import { RateLimit } from '../../common/http/rate-limit';
+import { StorageService } from '../../common/infra/storage/storage.service';
 import { CareersService, ApplicationStatus } from './careers.service';
 import { ContactInboxService, ContactStatus } from './contact-inbox.service';
 import { ContentStaffGuard } from './content-staff.guard';
@@ -25,6 +26,7 @@ export class InboxController {
     private readonly careers: CareersService,
     private readonly newsletter: NewsletterService,
     private readonly suppressions: SuppressionService,
+    private readonly storage: StorageService,
   ) {}
 
   private actor(principal: L1Principal): string {

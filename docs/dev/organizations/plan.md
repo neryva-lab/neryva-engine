@@ -1,7 +1,7 @@
 # Organizations — Implementation Plan
 
 **Workstream:** org furniture — memberships, invites, projects, entitlements (the state machine).
-**Binding docs:** 06 §4/§7/§11 (+Δ2/Δ3/Δ4/Δ5), [partitioning.md](../../../architecture/partitioning.md) §2 Tier-3, [`console/access-model.md`](../../../architecture/console/access-model.md).
+**Binding docs:** 06 §4/§7/§11 (+Δ2/Δ3/Δ4/Δ5), [partitioning.md](../../architecture/partitioning.md) §2 Tier-3, [`console/access-model.md`](../../architecture/console/access-model.md).
 **Depends on:** identity I-0/I-1 (accounts must exist for memberships).
 
 ## Current state (verified)

@@ -1,7 +1,7 @@
 # Control Plane — Implementation Plan
 
 **Workstream:** the `/console/**` APIs behind the web app's `/platform` area: product manifests, console home with product cards, summary providers, and contract ownership.
-**Binding docs:** [`console/product-integration.md`](../../../architecture/console/product-integration.md) (the contract, incl. the contract-composition rule), [`console/overview.md`](../../../architecture/console/overview.md), [ADR-004](../../../architecture/decisions/ADR-004-frontend-portal-corporate.md).
+**Binding docs:** [`console/product-integration.md`](../../architecture/console/product-integration.md) (the contract, incl. the contract-composition rule), [`console/overview.md`](../../architecture/console/overview.md), [ADR-004](../../architecture/decisions/ADR-004-frontend-portal-corporate.md).
 **Depends on:** organizations (entitlement states, projects), partitioning (route/manifest enforcement).
 
 ## Current state (verified)

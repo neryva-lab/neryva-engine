@@ -2,6 +2,8 @@
 
 **Date:** 2026-08-23 · **Scope:** EVERYTHING the engine is and will become — every module, every route, every auth path. Detail lives in the workstream plans (`dev/*/plan.md`); this file is the complete map and the single execution order. Paths are studio-repo-relative (`backend/…`); after tree alignment they become `engine/…`.
 
+> **⚠️ ADR-005 amendment (same date): the engine is TypeScript on NestJS.** This inventory and auth map remain **the complete behavioral specification**; the TS build implements them via the strangler migration. The TS execution steps (M1–M8), engine layout, route namespaces, and the ingestion playbook live in [`modularity/plan.md`](modularity/plan.md) — read it alongside the E-phases below: E1–E5 correspond to M3–M5 (net-new TS modules), E6/E8 to M6, and the runtime dispositions in §1.4–§1.6 to the M7 ports. The Python backend serves production until each namespace flips.
+
 **Dispositions used below:** `KEEP` (platform service, unchanged), `EXTEND` (exists, gains capabilities per plan), `MOVE→PRODUCT` (route ownership moves to a product module), `NEW` (to be built).
 
 ---

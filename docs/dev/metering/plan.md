@@ -1,7 +1,7 @@
 # Metering & Ledgers — Implementation Plan
 
 **Workstream:** the product/project dimensions on spend, per-(org × product) billing ledgers, and the consolidated usage view.
-**Binding docs:** [partitioning.md](../../../architecture/partitioning.md) §3 (billing separation), [ADR-001](../../../architecture/decisions/ADR-001-account-model.md) §3, [`console/overview.md`](../../../architecture/console/overview.md) (usage/billing pages).
+**Binding docs:** [partitioning.md](../../architecture/partitioning.md) §3 (billing separation), [ADR-001](../../architecture/decisions/ADR-001-account-model.md) §3, [`console/overview.md`](../../architecture/console/overview.md) (usage/billing pages).
 **Depends on:** partitioning P-2 (quota levels), agent-studio S-3 (first tagged emitter).
 
 ## Current state (verified)

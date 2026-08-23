@@ -1,7 +1,7 @@
 # Corporate — Implementation Plan
 
 **Workstream:** the engine's `corporate` module — email service first, then the public forms/content endpoints that retire `neryva_backend`.
-**Binding docs:** [ADR-004](../../../architecture/decisions/ADR-004-frontend-portal-corporate.md) (D3/D4 + Am.1), [`frontend-and-portal-plan.md`](../../frontend-and-portal-plan.md) §5/§8, [partitioning.md](../../../architecture/partitioning.md) (Tier-2 isolation).
+**Binding docs:** [ADR-004](../../architecture/decisions/ADR-004-frontend-portal-corporate.md) (D3/D4 + Am.1), [`frontend-and-portal-plan.md`](../../architecture/frontend-and-portal-plan.md) §5/§8, [partitioning.md](../../architecture/partitioning.md) (Tier-2 isolation).
 
 ## Current state (verified)
 

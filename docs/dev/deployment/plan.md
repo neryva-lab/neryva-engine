@@ -1,7 +1,7 @@
 # Deployment Product — Implementation Plan
 
 **Workstream:** product #2 — pipelines, environments, gated rollouts, secrets — as `backend/app/products/deployment/`.
-**Binding docs:** [`products/deployment/plan.md`](../../../architecture/products/deployment/plan.md) (domain model + build sequence), [product-integration](../../../architecture/console/product-integration.md) (manifest example), [ADR-002](../../../architecture/decisions/ADR-002-product-taxonomy.md).
+**Binding docs:** [`products/deployment/plan.md`](../../architecture/products/deployment/plan.md) (domain model + build sequence), [product-integration](../../architecture/console/product-integration.md) (manifest example), [ADR-002](../../architecture/decisions/ADR-002-product-taxonomy.md).
 **Depends on:** control-plane (manifests, entitlements), partitioning (P-2 quotas, P-3 queue namespaces), L5 agent identities (**already exist** — migration 0015).
 
 ## Current state

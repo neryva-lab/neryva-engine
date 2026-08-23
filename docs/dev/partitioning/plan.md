@@ -1,7 +1,7 @@
 # Partitioning — Implementation Plan
 
 **Workstream:** enforce shared-vs-dedicated: import boundaries, quota product/project levels, per-product namespaces, route enforcement.
-**Binding docs:** [`partitioning.md`](../../../architecture/partitioning.md) (the four tiers + §5 enforcement points), [ADR-003](../../../architecture/decisions/ADR-003-backend-topology.md).
+**Binding docs:** [`partitioning.md`](../../architecture/partitioning.md) (the four tiers + §5 enforcement points), [ADR-003](../../architecture/decisions/ADR-003-backend-topology.md).
 
 ## Current state (verified)
 

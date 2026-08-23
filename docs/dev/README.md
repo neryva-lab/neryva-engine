@@ -1,16 +1,18 @@
 # Engine Implementation Plans — `dev/`
 
-**Created:** 2026-08-23 · **Parent docs:** the [ADR/plans](../../../architecture/README.md) one level up. This directory is the **implementation layer**: one subdirectory per engine workstream, each with a concrete, file-anchored plan.
+**Created:** 2026-08-23 · **Parent docs:** the [ADR/plans](../architecture/README.md) one level up. This directory is the **implementation layer**: one subdirectory per engine workstream, each with a concrete, file-anchored plan.
+
+> **⚠️ ADR-005 (2026-08-23): the engine is TypeScript on NestJS.** The workstream plans below were written against the Python codebase and remain valid as **behavioral specifications** (schemas, state machines, flows, gates) — the TypeScript build implements them. The TS engine's structure, route architecture, module lifecycle, ingestion playbook (neryva_backend as the worked case), and execution steps M1–M8 live in [`modularity/plan.md`](modularity/plan.md). The Python backend stays in production through the strangler migration (ADR-005 D2).
 
 ## ⚠️ State of the tree (read before executing anything)
 
-The **canonical repository** is `products/neryva_agent_studio/` (its `.git` is intact at `c1d24b3`). `console/neryva-website` and `corporate/neryva_backend` are parked per ADR-004; the deleted studio frontend is recoverable from git HEAD. **The root also carries stale copies of `contracts/`, `ops/`, `sdks/` from the earlier moves — treat the studio repo's copies as the only source of truth** and let Wave 0 (`../reorganization-guide.md`) reconcile/deduplicate. All plans below use **studio-repo-relative paths** (`backend/…`); after the tree alignment these become `engine/…` — same files, one rename.
+The **canonical repository** is `products/neryva_agent_studio/` (its `.git` is intact at `c1d24b3`). `console/neryva-website` and `corporate/neryva_backend` are parked per ADR-004; the deleted studio frontend is recoverable from git HEAD. **The root also carries stale copies of `contracts/`, `ops/`, `sdks/` from the earlier moves — treat the studio repo's copies as the only source of truth** and let Wave 0 (`../architecture/reorganization-guide.md`) reconcile/deduplicate. All plans below use **studio-repo-relative paths** (`backend/…`); after the tree alignment these become `engine/…` — same files, one rename.
 
 ## The roadmap (waves, dependencies, gates)
 
 | Wave | Workstream (plan) | Depends on | Unblocks |
 |---|---|---|---|
-| **0** | Tree/git recovery — [`../reorganization-guide.md`](../../../architecture/reorganization-guide.md) | — (commit the 103-file batch first) | everything |
+| **0** | Tree/git recovery — [`../architecture/reorganization-guide.md`](../architecture/reorganization-guide.md) | — (commit the 103-file batch first) | everything |
 | **1** | [`corporate/`](corporate/plan.md) **step E1: the email service** | Wave 0 | identity's email-code login (doc 06 Q1 resolved) |
 | **1** | [`identity/`](identity/plan.md) — accounts, first-party OIDC provider, L1 sessions | E1 email | organizations (client rows), control-plane, the whole web app |
 | **1** | [`organizations/`](organizations/plan.md) — memberships, invites, projects, entitlements | identity (accounts) | control-plane cards, all products' entitlements |

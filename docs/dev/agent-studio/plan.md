@@ -1,7 +1,7 @@
 # Agent Studio Module — Implementation Plan
 
 **Workstream:** the studio backend becomes a registered product module (`backend/app/products/agent_studio/`) with manifest, entitlement, summary provider, and metering tag.
-**Binding docs:** [`products/agent-studio/plan.md`](../../../architecture/products/agent-studio/plan.md) (the product plan), [product-integration](../../../architecture/console/product-integration.md), [ADR-003](../../../architecture/decisions/ADR-003-backend-topology.md) (D1 modules).
+**Binding docs:** [`products/agent-studio/plan.md`](../../architecture/products/agent-studio/plan.md) (the product plan), [product-integration](../../architecture/console/product-integration.md), [ADR-003](../../architecture/decisions/ADR-003-backend-topology.md) (D1 modules).
 **Depends on:** partitioning P-1/P-2 (boundaries + quota levels), control-plane C-1/C-3 (manifest + summaries).
 
 ## Current state (verified)

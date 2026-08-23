@@ -1,7 +1,7 @@
 # Identity — Implementation Plan
 
 **Workstream:** the Neryva Account, the first-party OIDC provider, L1 console sessions.
-**Binding docs:** [06-identity-architecture](../../../../products/neryva_agent_studio/docs/final_analysis/06-identity-architecture.md) (D1–D8, Δ1–Δ8, §11 schema, §12 phases), [ADR-001](../../../architecture/decisions/ADR-001-account-model.md), [ADR-004 Am.1](../../../architecture/decisions/ADR-004-frontend-portal-corporate.md).
+**Binding docs:** [06-identity-architecture](../../architecture/final_analysis/06-identity-architecture.md) (D1–D8, Δ1–Δ8, §11 schema, §12 phases), [ADR-001](../../architecture/decisions/ADR-001-account-model.md), [ADR-004 Am.1](../../architecture/decisions/ADR-004-frontend-portal-corporate.md).
 **Depends on:** corporate E1 (email delivery — the one-time code login is dead code without it).
 
 ## Current state (verified)

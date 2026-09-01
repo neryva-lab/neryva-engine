@@ -2,6 +2,8 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
+import { env } from '../../common/config/env';
+import { RedisService } from '../../common/infra/redis.service';
 import { EmailService } from '../corporate/email/email.service';
 import { MembershipsService } from '../organizations/memberships.service';
 import { AccountsService } from '../identity/accounts.service';
@@ -23,14 +25,29 @@ import { notifications } from './schema';
  *   org.role_changed              → the member (info)
  *   deployment.failed/rolled_back → the triggering actor if resolvable (warn)
  *   webhook.dead                  → webhook creator org's owner/admin (warn)
+ *   org.member_added/suspended/reactivated/removed → the member (in-app;
+ *     email already handled by the memberships flow itself — no doubles)
+ *   org.invite_created            → the invited account if one exists (info)
+ *   org.invite_accepted           → owner/admin of the org (info)
+ *   satellite.{quarantined,draining,retired,liveness_lost,
+ *              version_floor_violated,config_drift} → the ops team inbox
+ *     (platform-plane events — no org/account target exists)
+ *   login.failure                 → the account after a threshold of failed
+ *     attempts within an hour window (warn, email) — never per-attempt
+ *   account.deletion_requested    → the account (info, email)
+ *   account.email_changed         → the account (warn)
  */
 @Injectable()
 export class NotificationsService implements OnModuleInit {
   private static readonly logger = new Logger(NotificationsService.name);
 
+  /** Failed sign-ins inside one hour that trip ONE security notice. */
+  private static readonly LOGIN_FAILURE_ALERT_THRESHOLD = 5;
+
   constructor(
     private readonly db: DbService,
     private readonly events: EventBus,
+    private readonly redis: RedisService,
     private readonly email: EmailService,
     private readonly memberships: MembershipsService,
     private readonly accounts: AccountsService,
@@ -104,6 +121,181 @@ export class NotificationsService implements OnModuleInit {
         data: { delivery_id: event.deliveryId, org_id: event.orgId },
       });
     });
+
+    // ── org membership lifecycle (emails already ride the memberships
+    // flow itself; here it is the in-app feed only — no doubles) ────────────
+
+    this.events.on<{ orgId: string; accountId: string; role: string }>(EngineEvents.OrgMemberAdded, (event) => {
+      void this.notifyAccount(event.accountId, {
+        orgId: event.orgId,
+        kind: 'org.member_added',
+        severity: 'info',
+        title: 'You were added to an organization',
+        body: `You are now a ${event.role} of this organization.`,
+        data: { org_id: event.orgId, role: event.role },
+      });
+    });
+
+    this.events.on<{ orgId: string; accountId: string }>(EngineEvents.OrgMemberSuspended, (event) => {
+      void this.notifyAccount(event.accountId, {
+        orgId: event.orgId,
+        kind: 'org.member_suspended',
+        severity: 'warn',
+        title: 'Your organization access was suspended',
+        body: 'An administrator suspended your access. Contact them if you believe this is a mistake.',
+        data: { org_id: event.orgId },
+      });
+    });
+
+    this.events.on<{ orgId: string; accountId: string }>(EngineEvents.OrgMemberReactivated, (event) => {
+      void this.notifyAccount(event.accountId, {
+        orgId: event.orgId,
+        kind: 'org.member_reactivated',
+        severity: 'info',
+        title: 'Your organization access was restored',
+        body: 'Your membership was reactivated — welcome back.',
+        data: { org_id: event.orgId },
+      });
+    });
+
+    this.events.on<{ orgId: string; accountId: string; role: string; self?: boolean }>(EngineEvents.OrgMemberRemoved, (event) => {
+      if (event.self) {
+        return; // you left — no notice to yourself
+      }
+      void this.notifyAccount(event.accountId, {
+        orgId: event.orgId,
+        kind: 'org.member_removed',
+        severity: 'warn',
+        title: 'You were removed from an organization',
+        body: `Your ${event.role} access to this organization was revoked.`,
+        data: { org_id: event.orgId, role: event.role },
+      });
+    });
+
+    this.events.on<{ orgId: string; inviteId: string; email: string; role: string }>(EngineEvents.OrgInviteCreated, (event) => {
+      // The invite email itself is the invite's channel; the feed row is a
+      // convenience for people who ALREADY have an account here.
+      void this.accounts
+        .findByEmail(event.email.toLowerCase())
+        .then((account) =>
+          account
+            ? this.notifyAccount(account.id, {
+                orgId: event.orgId,
+                kind: 'org.invite_created',
+                severity: 'info',
+                title: `You were invited to join an organization as ${event.role}`,
+                body: 'Open the link in the invitation email to accept.',
+                data: { org_id: event.orgId, invite_id: event.inviteId, role: event.role },
+              })
+            : undefined,
+        )
+        .catch(() => undefined);
+    });
+
+    this.events.on<{ orgId: string; inviteId: string; accountId: string; role: string }>(EngineEvents.OrgInviteAccepted, (event) => {
+      void this.notifyOrgRoles(event.orgId, ['owner', 'admin'], {
+        kind: 'org.invite_accepted',
+        severity: 'info',
+        title: 'A pending invitation was accepted',
+        body: `The invitee joined as ${event.role}.`,
+        data: { org_id: event.orgId, account_id: event.accountId, role: event.role },
+      });
+    });
+
+    // ── satellite lifecycle incidents → ops inbox (platform-plane events:
+    // no org/account target exists, so there is no in-app feed row) ────────
+
+    this.events.on<{ key: string; reason: string }>(EngineEvents.SatelliteQuarantined, (event) => {
+      void this.notifyPlatform({
+        kind: 'satellite.quarantined',
+        severity: 'error',
+        title: `Satellite ${event.key} was quarantined`,
+        body: `A satellite was quarantined: ${event.reason}`,
+        data: { satellite_key: event.key, reason: event.reason },
+      });
+    });
+
+    this.events.on<{ key: string }>(EngineEvents.SatelliteDraining, (event) => {
+      void this.notifyPlatform({
+        kind: 'satellite.draining',
+        severity: 'warn',
+        title: `Satellite ${event.key} is draining`,
+        body: 'A satellite stopped accepting new work for graceful retirement. Confirm this was planned.',
+        data: { satellite_key: event.key },
+      });
+    });
+
+    this.events.on<{ key: string }>(EngineEvents.SatelliteRetired, (event) => {
+      void this.notifyPlatform({
+        kind: 'satellite.retired',
+        severity: 'warn',
+        title: `Satellite ${event.key} was retired`,
+        body: 'A satellite was retired permanently. It will never accept heartbeats again — register a new key instead.',
+        data: { satellite_key: event.key },
+      });
+    });
+
+    this.events.on<{ key: string; state: string }>(EngineEvents.SatelliteLivenessLost, (event) => {
+      void this.notifyPlatform({
+        kind: 'satellite.liveness_lost',
+        severity: 'error',
+        title: `Satellite ${event.key} liveness lost (${event.state})`,
+        body: 'Heartbeats stopped arriving and the lease expired twice. The satellite is hard down from the engine’s point of view.',
+        data: { satellite_key: event.key, state: event.state },
+      });
+    });
+
+    this.events.on<{ key: string; reported: string; floor: string }>(EngineEvents.SatelliteVersionFloorViolated, (event) => {
+      void this.notifyPlatform({
+        kind: 'satellite.version_floor_violated',
+        severity: 'warn',
+        title: `Satellite ${event.key} reported version below the floor`,
+        body: `Reported ${event.reported} against floor ${event.floor}. Quarantine or drain if this was not a rollback.`,
+        data: { satellite_key: event.key, reported: event.reported, floor: event.floor },
+      });
+    });
+
+    this.events.on<{ key: string; unacked: number }>(EngineEvents.SatelliteConfigDrift, (event) => {
+      void this.notifyPlatform({
+        kind: 'satellite.config_drift',
+        severity: 'warn',
+        title: `Satellite ${event.key} config drift`,
+        body: `${event.unacked} published config notification(s) went unacknowledged past the drift window.`,
+        data: { satellite_key: event.key, unacked: event.unacked },
+      });
+    });
+
+    // ── security alerts: failed sign-ins, throttled to one notice per hour ──
+
+    this.events.on<{ reason: string; accountId?: string }>(EngineEvents.LoginFailure, (event) => {
+      if (!event.accountId) {
+        return; // unknown-account noise has no recipient to alert
+      }
+      void this.recordLoginFailure(event.accountId);
+    });
+
+    // ── account lifecycle (H-6/H-7 producers) ───────────────────────────────
+
+    this.events.on<{ accountId: string; scheduledPurgeAt: string }>(EngineEvents.AccountDeletionRequested, (event) => {
+      void this.notifyAccount(event.accountId, {
+        kind: 'account.deletion_requested',
+        severity: 'info',
+        title: 'Your account deletion was scheduled',
+        body: `The account will be permanently erased on ${event.scheduledPurgeAt.slice(0, 10)}. Sign back in before then to cancel.`,
+        data: { scheduled_purge_at: event.scheduledPurgeAt },
+        email: false, // the dedicated deletion receipt email already went out
+      });
+    });
+
+    this.events.on<{ accountId: string; from: string; to: string }>(EngineEvents.AccountEmailChanged, (event) => {
+      void this.notifyAccount(event.accountId, {
+        kind: 'account.email_changed',
+        severity: 'warn',
+        title: 'Your email address was changed',
+        body: `All sessions were signed out after the change to the new address.`,
+        data: { from_domain: event.from.split('@')[1] ?? '' },
+      });
+    });
   }
 
   /** The core write: one in-app row (+ optional email), never throws to callers. */
@@ -154,6 +346,53 @@ export class NotificationsService implements OnModuleInit {
     } catch (err) {
       NotificationsService.logger.error(`org-role notification failed (${input.kind} for ${orgId}): ${(err as Error).message}`);
     }
+  }
+
+  // ── subscriber helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Fixed-window failure counter (Redis): the Nth failed sign-in inside one
+   * hour trips exactly ONE notice — per-attempt security emails are their
+   * own denial-of-service. Redis unavailable ⇒ skip silently.
+   */
+  private async recordLoginFailure(accountId: string): Promise<void> {
+    const window = Math.floor(Date.now() / 3_600_000);
+    const key = `notif:loginfail:${accountId}:${window}`;
+    try {
+      const count = await this.redis.raw.incr(key);
+      if (count === 1) {
+        await this.redis.raw.expire(key, 3700);
+      }
+      if (count !== NotificationsService.LOGIN_FAILURE_ALERT_THRESHOLD) {
+        return;
+      }
+      await this.notifyAccount(accountId, {
+        kind: 'security.login_failures',
+        severity: 'warn',
+        title: 'Multiple failed sign-in attempts',
+        body: 'We blocked several failed attempts to sign in to your account in the last hour. If this was not you, change your password and enable two-factor authentication.',
+        data: { window_hour: new Date(window * 3_600_000).toISOString() },
+        email: true,
+      });
+    } catch (err) {
+      NotificationsService.logger.warn(`login-failure alert accounting failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Platform-plane events have no org/account target — the ops inbox only. */
+  private async notifyPlatform(input: { kind: string; severity: 'info' | 'warn' | 'error'; title: string; body: string; data?: Record<string, unknown> }): Promise<void> {
+    const inbox = env.CORPORATE_CONTACT_INBOX_EMAIL;
+    if (!inbox) {
+      return; // no team inbox configured on this deployment
+    }
+    await this.email
+      .sendTemplate({
+        template: 'notification.generic',
+        to: inbox,
+        vars: { title: input.title.slice(0, 160), body: input.body.slice(0, 500) },
+        metadata: { kind: input.kind },
+      })
+      .catch(() => undefined);
   }
 
   // ── the account-facing feed ────────────────────────────────────────────────

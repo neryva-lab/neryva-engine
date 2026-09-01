@@ -182,5 +182,6 @@ export class IdentityBoot implements OnModuleInit {
     { provide: SESSION_REGISTRY_PORT, useExisting: IdentityPublicService },
     { provide: SERVICE_CLIENT_PORT, useExisting: IdentityPublicService },
   ],
-  exports: [AccountsService, OIDC_PROVIDER, SESSION_REGISTRY_PORT, SERVICE_CLIENT_PORT, JwksCustody, PasswordService, MfaService, SocialAccountService],})
+  exports: [AccountsService, OIDC_PROVIDER, SESSION_REGISTRY_PORT, SERVICE_CLIENT_PORT, JwksCustody, PasswordService, MfaService, SocialAccountService],
+})
 export class IdentityModule {}

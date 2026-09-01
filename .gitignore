@@ -41,3 +41,4 @@ junit*.xml
 .pytest_cache/
 .DS_Store
 Thumbs.db
+legacy

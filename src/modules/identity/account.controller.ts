@@ -8,6 +8,8 @@ import { Idempotent } from '../../common/http/idempotency';
 import { MfaService } from './mfa.service';
 import { PasswordService } from './password.service';
 import { AccountsService } from './accounts.service';
+import { AccountDeletionService } from './account-deletion.service';
+import { EmailChangeService } from './email-change.service';
 
 /**
  * The account lifecycle surface — the audit's blockers I-1/I-2 plus the
@@ -21,6 +23,8 @@ import { AccountsService } from './accounts.service';
  *    POST /auth/me/password[|/set] · POST /auth/email-verification/request
  *    POST /auth/mfa/{totp/enroll,totp/activate,totp/disable,proof,recovery/rotate}
  *    GET  /auth/mfa
+ *    POST /auth/me/delete[/cancel] · GET /auth/me/deletion-status   (H-6)
+ *    POST /auth/me/email-change/request|confirm                     (H-7)
  */
 @Controller()
 export class AccountController {
@@ -28,6 +32,8 @@ export class AccountController {
     private readonly password: PasswordService,
     private readonly mfa: MfaService,
     private readonly accounts: AccountsService,
+    private readonly deletion: AccountDeletionService,
+    private readonly emailChange: EmailChangeService,
   ) {}
 
   // ── public: password reset ────────────────────────────────────────────────
@@ -216,5 +222,67 @@ export class AccountController {
       throw ApiError.validation({ code: 'a live TOTP or recovery code is required' });
     }
     return this.mfa.rotateRecoveryCodes(principal.id, body.code);
+  }
+
+  // ── authenticated: self-service deletion (H-6) ────────────────────────────
+
+  /** Stages deletion behind re-auth (password + live second factor when enrolled). */
+  @Post('auth/me/delete')
+  @AuthLayer('l1')
+  @Idempotent()
+  @RateLimit({ name: 'account-delete', capacity: 3, refillPerSecond: 0.01, scope: 'principal' })
+  async requestDeletion(@CurrentPrincipal() principal: L1Principal, @Body() body: { password?: string; code?: string }): Promise<{ scheduled_purge_at: string }> {
+    return this.deletion.request({ accountId: principal.id, password: body.password, factor: body.code });
+  }
+
+  @Post('auth/me/delete/cancel')
+  @AuthLayer('l1')
+  @Idempotent()
+  @RateLimit({ name: 'account-delete-cancel', capacity: 5, refillPerSecond: 0.02, scope: 'principal' })
+  async cancelDeletion(@CurrentPrincipal() principal: L1Principal): Promise<{ ok: true }> {
+    await this.deletion.cancel(principal.id);
+    return { ok: true };
+  }
+
+  @Get('auth/me/deletion-status')
+  @AuthLayer('l1')
+  async deletionStatus(@CurrentPrincipal() principal: L1Principal): Promise<{ deletion: { scheduled_purge_at: string } | null }> {
+    return { deletion: await this.deletion.status(principal.id) };
+  }
+
+  // ── authenticated: email change (H-7) ─────────────────────────────────────
+
+  /** Re-auth + uniqueness check → a code goes to the NEW address. */
+  @Post('auth/me/email-change/request')
+  @AuthLayer('l1')
+  @RateLimit({ name: 'email-change-request', capacity: 3, refillPerSecond: 0.02, scope: 'principal' })
+  async requestEmailChange(
+    @CurrentPrincipal() principal: L1Principal,
+    @Body() body: { new_email?: string; current_password?: string; code?: string },
+    @Req() req: FastifyRequest,
+  ): Promise<{ ok: true }> {
+    if (!body.new_email || typeof body.new_email !== 'string') {
+      throw ApiError.validation({ new_email: 'required' });
+    }
+    return this.emailChange.request({
+      accountId: principal.id,
+      newEmail: body.new_email,
+      password: body.current_password,
+      factor: body.code,
+      requestIp: req.ip ?? null,
+    });
+  }
+
+  @Post('auth/me/email-change/confirm')
+  @AuthLayer('l1')
+  @RateLimit({ name: 'email-change-confirm', capacity: 10, refillPerSecond: 0.05, scope: 'principal' })
+  async confirmEmailChange(@CurrentPrincipal() principal: L1Principal, @Body() body: { new_email?: string; code?: string }): Promise<{ ok: true }> {
+    if (!body.new_email || typeof body.new_email !== 'string') {
+      throw ApiError.validation({ new_email: 'required' });
+    }
+    if (!body.code || typeof body.code !== 'string') {
+      throw ApiError.validation({ code: 'the code is 8 digits' });
+    }
+    return this.emailChange.confirm({ accountId: principal.id, newEmail: body.new_email, code: body.code });
   }
 }

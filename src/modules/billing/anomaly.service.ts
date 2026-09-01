@@ -115,7 +115,17 @@ export class AnomalyService {
       });
     }
     if (anomalies.length > 0) {
-      await this.events.emit('billing.cost_anomaly', { anomalies });
+      // One event per org — every payload carries a top-level orgId so the
+      // notification/webhook sinks can route it.
+      const byOrg = new Map<string, CostAnomaly[]>();
+      for (const anomaly of anomalies) {
+        const list = byOrg.get(anomaly.orgId) ?? [];
+        list.push(anomaly);
+        byOrg.set(anomaly.orgId, list);
+      }
+      for (const [orgId, orgAnomalies] of byOrg) {
+        await this.events.emit('billing.cost_anomaly', { orgId, anomalies: orgAnomalies });
+      }
       AnomalyService.logger.warn(`cost anomaly scan: ${anomalies.length} ledger(s) flagged (labels: ${anomalies.map((a) => a.product).join(', ')})`);
     }
     return { checked: byLedger.size, anomalies };

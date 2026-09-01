@@ -37,6 +37,7 @@ const PLATFORM_PREFIXES: readonly string[] = [
   '/console/usage', // billing views
   '/console/billing', // billing views
   '/internal', // satellite + staff plane (keys/validate, satellites, config, metering, revocations, staff, price catalog)
+  '/webhooks/stripe', // the H-1 payment rail's provider callback (HMAC-authenticated)
   '/v1/deployments', // the deployment product's engine-owned runtime plane
   '/metrics', // observability exposition
 ];

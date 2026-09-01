@@ -69,8 +69,33 @@ export class MeteringController {
     };
     return this.quota.checkAndReserve(reservation);
   }
+
+  /**
+   * Release a reservation (M-1): the metered call failed or came in under
+   * estimate. Symmetric with quota-check — same buckets, clamped at zero,
+   * never fails the caller (advisory; the ledger is billing truth).
+   */
+  @Post('quota-release')
+  @RateLimit({ name: 'metering-quota-release', capacity: 600, refillPerSecond: 50, scope: 'principal' })
+  async quotaRelease(
+    @CurrentPrincipal() principal: L3Principal | L2Principal,
+    @Body() body: { org_id?: string; product?: string; project_id?: string | null; estimated_cost_usd?: number; units?: number },
+  ) {
+    this.tickActivity(principal, 'quota_release');
+    if (!body.org_id || !body.product) {
+      throw ApiError.validation({ input: 'org_id and product are required' });
+    }
+    const released = await this.quota.release({
+      orgId: body.org_id,
+      product: body.product,
+      projectId: body.project_id ?? null,
+      estimatedCostUsd: body.estimated_cost_usd,
+      units: body.units,
+    });
+    return { released };
+  }
   /** Compliance evidence (gap X-3): one activity tick per satellite request. */
-  private tickActivity(principal: L3Principal | L2Principal, scope: 'ingest' | 'quota_check', events?: number): void {
+  private tickActivity(principal: L3Principal | L2Principal, scope: 'ingest' | 'quota_check' | 'quota_release', events?: number): void {
     const key = satelliteKeyOf(principal);
     if (key) {
       void this.events.emit(EngineEvents.SatelliteActivity, { key, scope, ...(events !== undefined ? { events } : {}) });

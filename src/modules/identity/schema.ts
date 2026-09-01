@@ -44,6 +44,8 @@ export const accounts = pgTable('accounts', {
   createdVia: varchar('created_via', { length: 32 }).notNull().default('email_code'),
   /** Global session kill-switch: sessions issued before this instant are dead. */
   sessionsRevokedAt: timestamp('sessions_revoked_at', { withTimezone: true, mode: 'string' }),
+  /** Staged self-service deletion (H-6): the grace-window deadline; NULL = live. */
+  deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true, mode: 'string' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),

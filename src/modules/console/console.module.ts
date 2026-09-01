@@ -3,6 +3,7 @@ import { HealthRegistry } from '../../common/health/health.controller';
 import { DbService } from '../../common/infra/db/db.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { BillingModule } from '../billing/billing.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { SatellitesModule } from '../satellites/satellites.module';
 import { ConsoleHomeController } from './console-home.controller';
@@ -44,7 +45,7 @@ export class ConsoleBoot implements OnModuleInit {
  * status center reads satellite liveness, the limits view reads quotas).
  */
 @Module({
-  imports: [OrganizationsModule, SatellitesModule, BillingModule],
+  imports: [OrganizationsModule, SatellitesModule, BillingModule, NotificationsModule],
 // (in-app notifications live in modules/notifications — eng-0011; the console
 // platform controller proxies its read surface under /console for the shell)
   controllers: [ConsoleHomeController, ConsolePlatformController],

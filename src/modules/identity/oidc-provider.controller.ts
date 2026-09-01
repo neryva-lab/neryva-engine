@@ -2,7 +2,7 @@ import { All, Controller, Inject, Req, Res } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import type Provider from 'oidc-provider';
 import { Public } from '../../common/auth/decorators';
-import { OIDC_PROVIDER } from './identity.module';
+import { OIDC_PROVIDER } from './oidc/oidc-provider.token';
 
 /**
  * Mounts the entire OP under /auth — every oidc-provider route

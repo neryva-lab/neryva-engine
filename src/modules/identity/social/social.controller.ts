@@ -6,7 +6,7 @@ import { L1Principal } from '../../../common/auth/principal';
 import { RateLimit } from '../../../common/http/rate-limit';
 import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../../common/events/event-bus';
-import { OIDC_PROVIDER } from '../identity.module';
+import { OIDC_PROVIDER } from '../oidc/oidc-provider.token';
 import { AccountsService } from '../accounts.service';
 import { SocialAccountService } from './social-account.service';
 import { SocialLoginService } from './social-login.service';

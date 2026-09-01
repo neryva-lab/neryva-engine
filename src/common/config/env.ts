@@ -48,6 +48,19 @@ const envSchema = z.object({
 
   /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
   BILLING_ANOMALY_CRON: z.string().default('15 3 * * *'),
+  /** Billing: hourly trial-expiry sweep (H-3) — minute offset avoids the anomaly scan. */
+  BILLING_TRIAL_SWEEP_CRON: z.string().default('40 * * * *'),
+  /** Billing: hourly quota-counter reconciliation from billing.spend_events (M-1). */
+  BILLING_QUOTA_RECONCILE_CRON: z.string().default('20 * * * *'),
+  /**
+   * Stripe payment rail (H-1): off unless explicitly enabled AND a secret key
+   * is present. The webhook secret verifies event signatures (fail-closed).
+   */
+  STRIPE_ENABLED: boolean(false),
+  STRIPE_SECRET_KEY: z.string().optional().default(''),
+  STRIPE_WEBHOOK_SECRET: z.string().optional().default(''),
+  STRIPE_CHECKOUT_SUCCESS_URL: z.string().optional().default(''),
+  STRIPE_CHECKOUT_CANCEL_URL: z.string().optional().default(''),
   /**
    * Ingest cost posture (the B-1 trust fix): 'derive' = the engine computes
    * cost from the platform price catalog when derivable (satellite-reported
@@ -58,6 +71,8 @@ const envSchema = z.object({
   BILLING_COST_VALIDATION: z.enum(['derive', 'enforce', 'trust']).default('derive'),
   /** Org deletion grace window before the purge job erases engine-owned rows. */
   ORG_DELETION_GRACE_DAYS: positiveInt(30, 365),
+  /** Account deletion grace window before the identity purge job erases the account. */
+  ACCOUNT_DELETION_GRACE_DAYS: positiveInt(30, 365),
   /** Invite lifetime (days) — the accept window offered to a invited email. */
   ORG_INVITE_TTL_DAYS: positiveInt(7, 30),
   /** Safety caps: pending (unaccepted) invites and total members per org. */

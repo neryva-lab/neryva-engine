@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { sql } from 'drizzle-orm';
 import { RedisService } from '../../common/infra/redis.service';
+import { DbService } from '../../common/infra/db/db.service';
 import { EntitlementsService } from '../organizations/entitlements.service';
 
 /**
@@ -71,12 +73,28 @@ redis.call('EXPIRE', KEYS[2], tonumber(ARGV[7]))
 return {1, ''}
 `;
 
+/** Release a reservation: decrement the same buckets the reserve touched,
+ * clamped at zero (a release can never push a counter negative — that would
+ * hand out free headroom). Empty-string keys are skipped. */
+const RELEASE_LUA = `
+for i = 1, 4 do
+  if KEYS[i] ~= '' then
+    local next = tonumber(redis.call('GET', KEYS[i]) or '0') - tonumber(ARGV[i])
+    if next < 0 then next = 0 end
+    redis.call('SET', KEYS[i], tostring(next))
+    redis.call('EXPIRE', KEYS[i], tonumber(ARGV[5]))
+  end
+end
+return 1
+`;
+
 @Injectable()
 export class QuotaService {
   private static readonly logger = new Logger(QuotaService.name);
 
   constructor(
     private readonly redis: RedisService,
+    private readonly db: DbService,
     private readonly entitlements: EntitlementsService,
   ) {}
 
@@ -147,6 +165,98 @@ export class QuotaService {
         project: null,
       };
     }
+  }
+
+  /**
+   * Release a previously-made reservation (M-1): the metered call failed or
+   * came in under estimate. Symmetric with checkAndReserve — same buckets,
+   * same month window — and clamped at zero. Never throws: a release is
+   * advisory (the spend ledger stays billing truth), so Redis-down degrades
+   * to `false` + a log, exactly like the fail-open reserve path.
+   */
+  async release(input: QuotaReservation): Promise<boolean> {
+    const month = monthKey();
+    const keys = [
+      `quota:${input.orgId}:${input.product}:${month}:usd`,
+      `quota:${input.orgId}:${input.product}:${month}:events`,
+      input.projectId ? `quota:${input.orgId}:${input.product}:${input.projectId}:${month}:usd` : '',
+      input.projectId ? `quota:${input.orgId}:${input.product}:${input.projectId}:${month}:events` : '',
+    ];
+    const cost = Math.max(0, input.estimatedCostUsd ?? 0);
+    const events = Math.max(0, input.units ?? 1);
+    try {
+      await this.redis.raw.eval(
+        RELEASE_LUA,
+        4,
+        keys[0],
+        keys[1],
+        keys[2],
+        keys[3],
+        String(cost),
+        String(events),
+        '0',
+        '0',
+        String(32 * 86_400),
+      );
+      return true;
+    } catch (err) {
+      QuotaService.logger.error(`quota release unavailable (ignored): ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Reconcile the windowed quota counters against the authoritative spend
+   * ledger (M-1): INCR-based counters drift (releases, crashes, partial
+   * writes), so on every pass the current month's buckets are recomputed
+   * from billing.spend_events and SET back over Redis. Reservations that
+   * are in flight but not yet ingested read as headroom until their event
+   * lands — accepted slack; the reserve path re-checks limits atomically.
+   * Fail-open: an error resyncs nothing and logs loudly.
+   */
+  async reconcileMonth(): Promise<{ ledgers: number; counters: number }> {
+    const month = monthKey();
+    let rows: Array<{ org_id: string; product: string; project_id: string | null; usd: string; events: number }>;
+    try {
+      const result = await this.db.withBypass((tx) =>
+        tx.execute<{ org_id: string; product: string; project_id: string | null; usd: string; events: number }>(sql`
+          select org_id, product, project_id,
+                 sum(cost_usd)::text as usd,
+                 count(*)::int as events
+          from billing.spend_events
+          where occurred_at >= date_trunc('month', now())
+          group by 1, 2, 3
+        `),
+      );
+      rows = result.rows;
+    } catch (err) {
+      QuotaService.logger.error(`quota reconciliation could not read spend ledger: ${(err as Error).message}`);
+      return { ledgers: 0, counters: 0 };
+    }
+
+    let counters = 0;
+    for (const row of rows) {
+      const base = `quota:${row.org_id}:${row.product}`;
+      const pairs: Array<[string, string]> = [
+        [`${base}:${month}:usd`, row.usd],
+        [`${base}:${month}:events`, String(row.events)],
+      ];
+      if (row.project_id) {
+        pairs.push([`${base}:${row.project_id}:${month}:usd`, row.usd], [`${base}:${row.project_id}:${month}:events`, String(row.events)]);
+      }
+      try {
+        const pipeline = this.redis.raw.pipeline();
+        for (const [key, value] of pairs) {
+          pipeline.set(key, value);
+          pipeline.expire(key, 32 * 86_400);
+        }
+        await pipeline.exec();
+        counters += pairs.length;
+      } catch (err) {
+        QuotaService.logger.error(`quota counter resync failed for ${row.org_id}/${row.product}: ${(err as Error).message}`);
+      }
+    }
+    return { ledgers: rows.length, counters };
   }
 
   /** Read-only view of current month usage (console usage pages). */

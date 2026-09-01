@@ -35,7 +35,9 @@ async function bootstrap(): Promise<void> {
       // request id the error envelope and audit trail use (the rule lives
       // in one place — genReqId mirrors request-id.middleware).
       genReqId,
-      logger: rootLogger,
+      // Fastify 5: a logger INSTANCE goes on loggerInstance; `logger` only
+      // accepts a configuration object.
+      loggerInstance: rootLogger,
       disableRequestLogging: env.NODE_ENV === 'test',
     }),
     { logger },
@@ -60,6 +62,23 @@ async function bootstrap(): Promise<void> {
     (request: unknown, body: string, done: (err: Error | null, result?: unknown) => void) => {
       try {
         done(null, Object.fromEntries(new URLSearchParams(String(body))));
+      } catch (err) {
+        done(err as Error);
+      }
+    },
+  );
+
+  // JSON bodies keep a pristine copy of the raw payload on request.rawBody:
+  // the Stripe webhook verifies its HMAC over the EXACT bytes Stripe signed
+  // (re-serializing the parsed object would change them). Otherwise identical
+  // to Fastify's default JSON parser.
+  app.getHttpAdapter().getInstance().addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (request: unknown, body: string, done: (err: Error | null, result?: unknown) => void) => {
+      try {
+        (request as { rawBody?: string }).rawBody = body;
+        done(null, JSON.parse(body));
       } catch (err) {
         done(err as Error);
       }

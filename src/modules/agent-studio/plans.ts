@@ -14,6 +14,8 @@ export interface StudioPlan {
   label: string;
   /** Trial window in days when a trial starts on this plan. */
   trialDays: number | null;
+  /** List price per month (USD) — the plan-change proration basis; null = not priced. */
+  monthlyPriceUsd: number | null;
   /** Quota-engine limits (null value = unlimited at that axis). */
   limits: {
     monthly_spend_usd: number | null;
@@ -26,6 +28,7 @@ export const STUDIO_PLANS: Record<string, StudioPlan> = {
     plan: 'studio-team',
     label: 'Agent Studio Team',
     trialDays: 14,
+    monthlyPriceUsd: 99,
     limits: {
       monthly_spend_usd: 250,
       monthly_events: 50_000,
@@ -35,6 +38,7 @@ export const STUDIO_PLANS: Record<string, StudioPlan> = {
     plan: 'studio-enterprise',
     label: 'Agent Studio Enterprise',
     trialDays: null, // enterprise starts active via contract, not self-serve trial
+    monthlyPriceUsd: 499,
     limits: {
       monthly_spend_usd: null,
       monthly_events: null,

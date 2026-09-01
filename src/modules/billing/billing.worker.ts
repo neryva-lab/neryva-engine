@@ -5,6 +5,8 @@ import { QueueService } from '../../common/infra/queue.service';
 import { AnomalyService } from './anomaly.service';
 import { BillingCreditsService } from './billing-credits.service';
 import { BillingCycleService } from './billing-cycle.service';
+import { QuotaService } from './quota.service';
+import { TrialExpiryService } from './trial-expiry.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DbService } from '../../common/infra/db/db.service';
 import { sql } from 'drizzle-orm';
@@ -14,6 +16,8 @@ import { sql } from 'drizzle-orm';
  * `{namespace}:default` queue). Jobs:
  *
  *  - `billing.anomaly_scan` (repeatable, daily) — the B-5 cost-anomaly pass.
+ *  - `billing.trial_sweep` (repeatable, hourly) — H-3 trial expiry.
+ *  - `billing.quota_reconcile` (repeatable, hourly) — M-1 counter resync.
  *
  * Failures retry with backoff; after the final attempt the job lands in the
  * failed set (BullMQ's DLQ) and is logged loudly — a missed daily scan is
@@ -31,6 +35,8 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     private readonly cycle: BillingCycleService,
     private readonly notifications: NotificationsService,
     private readonly db: DbService,
+    private readonly trialExpiry: TrialExpiryService,
+    private readonly quota: QuotaService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -42,6 +48,11 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     await queue.add('billing.cycle_draft', {}, { repeat: { pattern: '10 0 1 * *' }, removeOnFail: { age: 90 * 86_400 }, removeOnComplete: { age: 90 * 86_400 } });
     // B-3: budget threshold evaluation — hourly, so 50/80/100% alerts land the hour they cross.
     await queue.add('billing.budget_eval', {}, { repeat: { pattern: '5 * * * *' }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
+
+    // H-3: expired-trial sweep — hourly at :40 (offset from the other passes).
+    await queue.add('billing.trial_sweep', {}, { repeat: { pattern: env.BILLING_TRIAL_SWEEP_CRON }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
+    // M-1: quota-counter reconciliation — hourly at :20, after most ingest traffic.
+    await queue.add('billing.quota_reconcile', {}, { repeat: { pattern: env.BILLING_QUOTA_RECONCILE_CRON }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
 
     this.worker = new Worker(
       'billing:default',
@@ -71,6 +82,18 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
         if (job.name === 'billing.anomaly_scan') {
           const result = await this.anomalies.scan();
           BillingWorker.logger.log(`anomaly scan complete: ${result.checked} ledger(s) checked, ${result.anomalies.length} flagged`);
+          return result;
+        }
+        if (job.name === 'billing.trial_sweep') {
+          const result = await this.trialExpiry.sweep();
+          if (result.expired > 0) {
+            BillingWorker.logger.log(`trial sweep: ${result.expired} of ${result.scanned} expired trial(s) transitioned`);
+          }
+          return result;
+        }
+        if (job.name === 'billing.quota_reconcile') {
+          const result = await this.quota.reconcileMonth();
+          BillingWorker.logger.log(`quota reconcile: ${result.counters} counters resynced across ${result.ledgers} ledger(s)`);
           return result;
         }
         BillingWorker.logger.warn(`unknown billing job "${job.name}" — discarding`);

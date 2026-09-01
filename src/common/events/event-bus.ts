@@ -53,10 +53,20 @@ export interface SessionRevokedEvent {
 
 export const EngineEvents = {
   AccountCreated: 'account.created',
+  AccountEmailChanged: 'account.email_changed',
+  AccountDeletionRequested: 'account.deletion_requested',
+  AccountDeletionCancelled: 'account.deletion_cancelled',
+  AccountPurged: 'account.purged',
   SessionRevoked: 'session.revoked',
   LoginSuccess: 'login.success',
   LoginFailure: 'login.failure',
   EntitlementTransitioned: 'entitlement.transitioned',
+  /** Trial-window expiry sweep moved an entitlement past its period (H-3). */
+  EntitlementExpired: 'entitlement.expired',
+  /** A plan change (upgrade/downgrade) landed on an entitlement (H-4). */
+  BillingPlanChanged: 'billing.plan_changed',
+  /** A payment provider (Stripe) settled an invoice (H-1). */
+  BillingInvoicePaid: 'billing.invoice_paid',
   ConfigPublished: 'config.published',
   /** Durable revocation-log inputs (the satellite feed subscribes to these). */
   IdentityRevocation: 'identity.revocation',

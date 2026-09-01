@@ -209,6 +209,41 @@ export class MfaService {
     return { recovery_codes: codes };
   }
 
+  /**
+   * Login-time challenge policy (H-5): an active TOTP credential is the one
+   * enrollment state that demands a second factor at login. Recovery codes
+   * only exist alongside TOTP, so "codes remaining" adds no separate case —
+   * they are accepted AS the factor below.
+   */
+  async requiresSecondFactor(accountId: string): Promise<boolean> {
+    return (await this.activeCredential(accountId)) !== null;
+  }
+
+  /**
+   * Verify a login-time second factor: a live TOTP code or a single-use
+   * recovery code (consumed atomically on match). Never throws — the caller
+   * owns rate limiting, auditing, and the failure UX.
+   */
+  async verifyLoginFactor(accountId: string, presented: string): Promise<boolean> {
+    const active = await this.activeCredential(accountId);
+    if (!active) {
+      return false;
+    }
+    const viaRecovery = await this.tryConsumeRecoveryCode(accountId, presented);
+    if (viaRecovery) {
+      return true;
+    }
+    if (!verifyTotp(this.activeSecret(active), presented)) {
+      return false;
+    }
+    const now = new Date().toISOString();
+    await this.db.root
+      .update(accountCredentials)
+      .set({ lastUsedAt: now, updatedAt: now })
+      .where(eq(accountCredentials.id, active.id));
+    return true;
+  }
+
   async status(accountId: string): Promise<{ mfa_level: string; totp_enabled: boolean; pending_enrollment: boolean; unused_recovery_codes: number }> {
     const [accountRow] = await this.db.root.select({ mfaLevel: accounts.mfaLevel }).from(accounts).where(eq(accounts.id, accountId)).limit(1);
     const active = await this.activeCredential(accountId);

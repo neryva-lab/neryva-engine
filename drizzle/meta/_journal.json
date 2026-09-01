@@ -127,6 +127,13 @@
       "when": 1761236600000,
       "tag": "0017_deployment_dense",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1761237700000,
+      "tag": "0018_account_deletion",
+      "breakpoints": true
     }
   ]
 }

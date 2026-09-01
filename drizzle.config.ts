@@ -1,6 +1,14 @@
+import { existsSync } from 'node:fs';
 import type { Config } from 'drizzle-kit';
 
+// Local dev convenience: honor a repo-local .env when running drizzle-kit
+// directly (`npm run migrate`); CI/compose provide DATABASE_URL themselves.
+if (existsSync('.env')) process.loadEnvFile('.env');
+
 export default {
+  dbCredentials: {
+    url: process.env.DATABASE_URL ?? 'postgresql://neryva:neryva@127.0.0.1:5432/neryva',
+  },
   // Engine-owned migrations only (ownership map: engine/ownership-map.json).
   // Python-owned tables are never present in the drizzle schemas.
   schema: [

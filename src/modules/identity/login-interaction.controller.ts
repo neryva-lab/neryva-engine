@@ -11,7 +11,8 @@ import { EmailService } from '../corporate/email/email.service';
 import { AccountsService, normalizeEmail } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { EmailCodeService } from './email-code.service';
-import { OIDC_PROVIDER } from './identity.module';
+import { MfaService } from './mfa.service';
+import { OIDC_PROVIDER } from './oidc/oidc-provider.token';
 import { socialProviders } from './social/social.config';
 
 /**
@@ -30,6 +31,7 @@ export class LoginInteractionController {
     private readonly accounts: AccountsService,
     private readonly credentials: CredentialsService,
     private readonly emailCodes: EmailCodeService,
+    private readonly mfa: MfaService,
     private readonly email: EmailService,
     private readonly audit: AuditService,
     private readonly events: EventBus,
@@ -112,7 +114,7 @@ export class LoginInteractionController {
     const verified = await this.emailCodes.verify(account.id, code);
     if (!verified.ok) {
       await this.emailCodes.registerFailedAttempt(account.id);
-      await this.events.emit(EngineEvents.LoginFailure, { reason: `code_${verified.reason}` });
+      await this.events.emit(EngineEvents.LoginFailure, { reason: `code_${verified.reason}`, accountId: account.id });
       await this.audit.add({
         action: 'login.failure',
         resourceType: 'account',
@@ -128,7 +130,7 @@ export class LoginInteractionController {
       throw ApiError.unauthenticated('Invalid code');
     }
 
-    await this.finishLogin(req, reply, uid, interaction, account.id, 'email_code');
+    await this.challengeOrFinish(req, reply, uid, interaction, account.id, 'email_code', email);
   }
 
   /** Secondary path: password (accounts that opted into one). */
@@ -148,7 +150,7 @@ export class LoginInteractionController {
     }
     const ok = await this.credentials.verifyPassword(account.passwordHash, password);
     if (!ok) {
-      await this.events.emit(EngineEvents.LoginFailure, { reason: 'password_invalid' });
+      await this.events.emit(EngineEvents.LoginFailure, { reason: 'password_invalid', accountId: account.id });
       await this.audit.add({
         action: 'login.failure',
         resourceType: 'account',
@@ -162,7 +164,58 @@ export class LoginInteractionController {
     if (this.credentials.needsRehash(account.passwordHash)) {
       await this.accounts.updatePasswordHash(account.id, await this.credentials.hashPassword(password));
     }
-    await this.finishLogin(req, reply, uid, interaction, account.id, 'password');
+    await this.challengeOrFinish(req, reply, uid, interaction, account.id, 'password', email);
+  }
+
+  /**
+   * The MFA challenge step (H-5): when the account has TOTP enrolled, the
+   * first factor alone never issues a session — the interaction stays open
+   * (the OP owns it) and a TOTP or recovery code must be presented at
+   * /login/:uid/mfa before interactionFinished runs.
+   */
+  @Public()
+  @RateLimit({ name: 'login-mfa', capacity: 10, refillPerSecond: 0.1, scope: 'ip' })
+  @Post(':uid/mfa')
+  async verifyMfa(
+    @Param('uid') uid: string,
+    @Body() body: { email?: string; code?: string; first_factor?: string },
+    @Req() req: FastifyRequest,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const interaction = await this.assertInteraction(req, reply, uid);
+    let email: string;
+    try {
+      email = normalizeEmail(String(body.email ?? ''));
+    } catch {
+      throw ApiError.validation({ email: 'invalid email address' });
+    }
+    const code = String(body.code ?? '').trim();
+    if (code.length === 0) {
+      throw ApiError.validation({ code: 'a live TOTP or recovery code is required' });
+    }
+    const firstFactor = body.first_factor === 'email_code' ? 'email_code' : 'password';
+
+    const account = await this.accounts.findByEmail(email);
+    // No account / no enrollment ⇒ this endpoint can NEVER complete a login
+    // on its own — it only finishes interactions that passed a first factor.
+    if (!account || !(await this.mfa.requiresSecondFactor(account.id))) {
+      await this.events.emit(EngineEvents.LoginFailure, { reason: 'mfa_not_enrolled' });
+      throw ApiError.unauthenticated('Invalid code');
+    }
+    const ok = await this.mfa.verifyLoginFactor(account.id, code);
+    if (!ok) {
+      await this.events.emit(EngineEvents.LoginFailure, { reason: 'mfa_invalid', accountId: account.id });
+      await this.audit.add({
+        action: 'login.failure',
+        resourceType: 'account',
+        resourceId: account.id,
+        actorType: 'account',
+        actorId: account.id,
+        details: { reason: 'mfa_invalid' },
+      });
+      throw ApiError.unauthenticated('Invalid code');
+    }
+    await this.finishLogin(req, reply, uid, interaction, account.id, firstFactor, true);
   }
 
   @Public()
@@ -180,6 +233,24 @@ export class LoginInteractionController {
     return details;
   }
 
+  /** Gate between the first factor and session issuance: enrolled ⇒ challenge step. */
+  private async challengeOrFinish(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    uid: string,
+    interaction: { returnTo?: string },
+    accountId: string,
+    method: 'email_code' | 'password',
+    email: string,
+  ): Promise<void> {
+    if (await this.mfa.requiresSecondFactor(accountId)) {
+      reply.header('content-type', 'text/html; charset=utf-8');
+      reply.send(this.page('Two-factor authentication', 'Enter a code from your authenticator app (or a recovery code).', uid, email, 'mfa', method));
+      return;
+    }
+    await this.finishLogin(req, reply, uid, interaction, accountId, method);
+  }
+
   private async finishLogin(
     req: FastifyRequest,
     reply: FastifyReply,
@@ -187,6 +258,7 @@ export class LoginInteractionController {
     interaction: { returnTo?: string },
     accountId: string,
     method: string,
+    mfa = false,
   ): Promise<void> {
     const provider = this.provider();
     await this.accounts.markLoginSuccess(accountId);
@@ -201,21 +273,28 @@ export class LoginInteractionController {
       resourceId: accountId,
       actorType: 'account',
       actorId: accountId,
-      details: { method },
+      details: { method, mfa },
     });
     await this.events.emit(EngineEvents.LoginSuccess, { accountId, method });
     await provider.interactionFinished(req.raw as never, reply.raw as never, { login: { accountId, remember: true } });
     reply.redirect(interaction.returnTo ?? '/', 302);
   }
 
-  private page(title: string, message: string, uid: string, email = '', mode: 'email' | 'code' = 'email'): string {
+  private page(title: string, message: string, uid: string, email = '', mode: 'email' | 'code' | 'mfa' = 'email', firstFactor: 'password' | 'email_code' = 'password'): string {
     const form =
       mode === 'email'
         ? `<form method="post" action="/login/${uid}/email">
 <label for="email">Email</label>
 <input id="email" name="email" type="email" autocomplete="username" required value="${escapeHtml(email)}">
 <button type="submit">Send code</button></form>`
-        : `<form method="post" action="/login/${uid}/verify">
+        : mode === 'mfa'
+          ? `<form method="post" action="/login/${escapeHtml(uid)}/mfa">
+<input type="hidden" name="email" value="${escapeHtml(email)}">
+<input type="hidden" name="first_factor" value="${firstFactor}">
+<label for="code">Authentication code</label>
+<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+<button type="submit">Verify</button></form>`
+          : `<form method="post" action="/login/${uid}/verify">
 <label for="email">Email</label>
 <input id="email" name="email" type="email" autocomplete="username" required value="${escapeHtml(email)}">
 <label for="code">One-time code</label>

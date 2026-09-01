@@ -69,7 +69,9 @@ CREATE INDEX ix_billing_adjustments_org_product ON billing_adjustments (org_id, 
 -- multiple NULLs (pending) and exactly one non-null claim.
 CREATE UNIQUE INDEX uq_billing_adjustments_applied ON billing_adjustments (applied_invoice_id) WHERE applied_invoice_id IS NOT NULL;
 
--- RLS on the org-scoped tables (billing schema, same %I.%I discipline).
+-- RLS on the org-scoped tables (public schema — the extension tables are
+-- plain pgTable in the ORM, unlike 0004's billing-schema core; same %I.%I
+-- discipline).
 DO $$
 DECLARE t text;
 BEGIN
@@ -79,8 +81,8 @@ BEGIN
     IF t IN ('billing_credit_applications', 'billing_invoice_lines') THEN
       CONTINUE;
     END IF;
-    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', 'billing', t);
-    EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', 'billing', t);
+    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', 'public', t);
+    EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', 'public', t);
     EXECUTE format($p$
       CREATE POLICY tenant_isolation ON %I.%I
         USING (
@@ -91,6 +93,6 @@ BEGIN
           org_id = current_setting('app.current_tenant', true)
           OR coalesce(current_setting('app.engine_bypass', true), 'off') = 'on'
         )
-    $p$, 'billing', t);
+    $p$, 'public', t);
   END LOOP;
 END $$;

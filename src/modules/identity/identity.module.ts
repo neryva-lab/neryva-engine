@@ -8,8 +8,11 @@ import { SERVICE_CLIENT_PORT, SESSION_REGISTRY_PORT } from '../../common/auth/po
 import { CorporateModule } from '../corporate/corporate.module';
 import { AccountActionsService } from './account-actions.service';
 import { AccountController } from './account.controller';
+import { AccountDeletionService } from './account-deletion.service';
+import { AccountPurgeWorker } from './account-purge.worker';
 import { AccountsService } from './accounts.service';
 import { CredentialsService } from './credentials.service';
+import { EmailChangeService } from './email-change.service';
 import { EmailCodeService } from './email-code.service';
 import { IdentityPublicService } from './identity-public.service';
 import { LoginInteractionController } from './login-interaction.controller';
@@ -17,6 +20,7 @@ import { MfaService } from './mfa.service';
 import { OidcProviderController } from './oidc-provider.controller';
 import { PasswordService } from './password.service';
 import { JwksCustody } from './oidc/jwks-custody';
+import { OIDC_PROVIDER } from './oidc/oidc-provider.token';
 import { OidcDrizzleAdapter } from './oidc/oidc-adapter';
 import { OidcProviderFactory } from './oidc/oidc-provider.factory';
 import { assertAppleKeyReadable } from './social/idp-verify';
@@ -49,8 +53,6 @@ export class OidcProviderHolder {
     return this.current;
   }
 }
-
-export const OIDC_PROVIDER = 'OIDC_PROVIDER';
 
 export const OidcProviderAccessor: FactoryProvider<() => Provider> = {
   provide: OIDC_PROVIDER,
@@ -101,7 +103,7 @@ export class IdentityBoot implements OnModuleInit {
         clientId: 'neryva-console',
         kind: 'public',
         name: 'Neryva Console (web app /platform)',
-        redirectUris: [`${base}/platform/auth/callback`, 'http://localhost:5173/platform/auth/callback'],
+        redirectUris: [`${base}/platform/auth/callback`, 'http://localhost:5173/platform/auth/callback', 'http://localhost:3000/platform/auth/callback'],
         scopes: ['openid', 'email', 'profile', 'offline_access'],
         grantTypes: ['authorization_code', 'refresh_token'],
         clientSecret: null as string | null,
@@ -160,8 +162,11 @@ export class IdentityBoot implements OnModuleInit {
   controllers: [OidcProviderController, LoginInteractionController, AccountController, SocialController],
   providers: [
     AccountActionsService,
+    AccountDeletionService,
+    AccountPurgeWorker,
     AccountsService,
     CredentialsService,
+    EmailChangeService,
     EmailCodeService,
     IdentityPublicService,
     JwksCustody,
@@ -177,6 +182,5 @@ export class IdentityBoot implements OnModuleInit {
     { provide: SESSION_REGISTRY_PORT, useExisting: IdentityPublicService },
     { provide: SERVICE_CLIENT_PORT, useExisting: IdentityPublicService },
   ],
-  exports: [AccountsService, OIDC_PROVIDER, SESSION_REGISTRY_PORT, SERVICE_CLIENT_PORT, JwksCustody, PasswordService, MfaService, SocialAccountService],
-})
+  exports: [AccountsService, OIDC_PROVIDER, SESSION_REGISTRY_PORT, SERVICE_CLIENT_PORT, JwksCustody, PasswordService, MfaService, SocialAccountService],})
 export class IdentityModule {}

@@ -102,6 +102,49 @@ export const Templates: Record<string, EmailTemplate> = {
       ),
   },
 
+  'identity.email-change': {
+    subject: (v) => `Confirm your new Neryva email address: ${v.code}`,
+    text: (v) =>
+      render(
+        'Enter this code to confirm your new Neryva email address:\n\n  {code}\n\nThe code expires in {ttl_minutes} minutes.\nIf you did not request an email change, ignore this email — your address is unchanged.\n',
+        v,
+      ),
+    html: (v) =>
+      wrapHtml(
+        'Confirm your new email address',
+        `<p>Enter this code to confirm your new Neryva email address:</p>
+<p style="font-size:28px;letter-spacing:6px;font-weight:600;margin:16px 0">${esc(v.code)}</p>
+<p>The code expires in ${esc(v.ttl_minutes)} minutes.</p>
+<p style="color:#777">If you did not request an email change, ignore this email — your address is unchanged.</p>`,
+      ),
+  },
+
+  'identity.email-changed': {
+    subject: () => 'Your Neryva email address was changed',
+    text: (v) => render('Your Neryva account email was changed to {new_email}.\nAll sessions were signed out. If this was not you, contact support immediately.\n', v),
+    html: (v) =>
+      wrapHtml(
+        'Your email address was changed',
+        `<p>Your Neryva account email was changed to <strong>${esc(v.new_email)}</strong>.</p><p>All sessions were signed out.</p><p style="color:#777">If this was not you, contact support immediately.</p>`,
+      ),
+  },
+
+  'identity.account-deletion-requested': {
+    subject: () => 'Your Neryva account deletion was scheduled',
+    text: (v) =>
+      render(
+        'Deletion of your Neryva account was requested.\n\nYou were signed out everywhere and the account will be permanently erased on {purge_date}.\nUntil then you can cancel by signing back in and visiting Settings → Account.\n',
+        v,
+      ),
+    html: (v) =>
+      wrapHtml(
+        'Your account deletion was scheduled',
+        `<p>Deletion of your Neryva account was requested.</p>
+<p>You were signed out everywhere; the account will be permanently erased on <strong>${esc(v.purge_date)}</strong>.</p>
+<p style="color:#777">Until then you can cancel by signing back in and visiting Settings → Account.</p>`,
+      ),
+  },
+
   'org.ownership-transferred': {
     subject: (v) => `Ownership of ${v.org_name} on Neryva was transferred to you`,
     text: (v) => render('You are now the owner of "{org_name}" on Neryva (transferred by {from_email}).\nThe previous owner is now an admin.\n', v),

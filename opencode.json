@@ -1,0 +1,107 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md",
+    "docs/architecture/main.md",
+    "docs/architecture/engine/engine_architecture.md",
+    "docs/architecture/engine/engine_data_and_lifecycle.md",
+    "docs/architecture/engine/engine_implementation_plan.md",
+    "docs/architecture/engine/imp/ledger.md",
+    "docs/architecture/agent_studio/agent_studio_architecture.md",
+    "docs/architecture/neryva_mcp/neryva_mcp_implementation_plan.md"
+  ],
+  "references": {
+    "architecture": {
+      "path": "docs/architecture",
+      "description": "Authoritative system, engine, agent-studio, and Neryva MCP architecture and implementation plans"
+    },
+    "engine-src": {
+      "path": "src",
+      "description": "Engine source — kernel, modules, transport. Use for implementation, migration, and guard inspection"
+    },
+    "mcp-contract": {
+      "path": "../products/neryva_mcp",
+      "description": "Neryva MCP contract (neryva.mcp.v1 proto) at repo root sibling — generated types only, never hand-copy. Check here before implementing MCP authority in engine"
+    },
+    "drizzle": {
+      "path": "drizzle",
+      "description": "Engine-owned migrations (engine-ts). Check ownership-map.json and 0001–0018 history before creating new migration"
+    }
+  },
+  "skills": {
+    "paths": [".opencode/skills"]
+  },
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "ask",
+      "pnpm *": "allow",
+      "npm *": "allow",
+      "npx *": "allow",
+      "git status": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git branch*": "allow",
+      "ls *": "allow",
+      "cat *": "allow",
+      "node *": "allow",
+      "tsc *": "allow",
+      "eslint *": "allow",
+      "drizzle-kit *": "allow",
+      "rm -rf node_modules": "deny",
+      "rm -rf drizzle": "deny",
+      "rm -rf src": "deny"
+    },
+    "external_directory": "allow",
+    "skill": "allow",
+    "webfetch": "allow",
+    "websearch": "allow"
+  },
+  "agent": {
+    "build": {
+      "description": "Production implementation agent — full codebase access, strict enterprise gates enforced",
+      "mode": "primary",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "skill": "allow"
+      }
+    },
+    "plan": {
+      "description": "Read-only planning and architecture review — no edits, no bash mutations",
+      "mode": "primary",
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "git status": "allow",
+          "git diff*": "allow",
+          "git log*": "allow"
+        },
+        "skill": "allow"
+      }
+    }
+  },
+  "formatter": {
+    "prettier": {
+      "command": ["npx", "prettier", "--write"],
+      "extensions": [".ts", ".js", ".json", ".md"]
+    }
+  },
+  "lsp": {
+    "typescript": {
+      "command": ["npx", "typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".js"]
+    }
+  },
+  "share": "disabled",
+  "autoupdate": "notify",
+  "tool_output": {
+    "max_lines": 2000,
+    "max_bytes": 51200
+  },
+  "compaction": {
+    "auto": true,
+    "tail_turns": 15
+  }
+}

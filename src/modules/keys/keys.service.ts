@@ -7,7 +7,7 @@ import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
 import { legacyApiKeys, legacyAuditEvents } from '../../common/infra/db/legacy-schema';
-import { studioProjectKeys } from '../agent-studio/schema';
+import { studioProjectKeys } from '../studio-furniture/schema';
 import { NotificationsService } from '../notifications/notifications.service';
 
 /**

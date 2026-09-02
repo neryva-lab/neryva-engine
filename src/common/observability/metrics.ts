@@ -196,3 +196,12 @@ export const authFailuresTotal = metrics.counter('neryva_engine_auth_failures_to
 export const meteringIngestRows = metrics.counter('neryva_engine_metering_ingest_rows_total', 'Spend rows accepted / duplicated / rejected', ['outcome']);
 export const deploymentTransitions = metrics.counter('neryva_engine_deployment_transitions_total', 'Deployment status transitions', ['from', 'to']);
 export const webhooksDelivered = metrics.counter('neryva_engine_webhook_deliveries_total', 'Webhook delivery attempts by outcome', ['outcome']);
+
+// ── Phase 0.6 / Phase 1.7 — outbox / queue / DB / upload signals (ledger 1.7, 6.3) ──
+export const outboxLagSeconds = metrics.gauge('neryva_engine_outbox_lag_seconds', 'Age of oldest PENDING outbox event', ['aggregate_type']);
+export const deadLettersTotal = metrics.counter('neryva_engine_dead_letters_total', 'Outbox events moved to DEAD_LETTER', ['aggregate_type', 'reason']);
+export const queueDepth = metrics.gauge('neryva_engine_queue_depth', 'BullMQ queue depth by namespace', ['namespace', 'state']);
+export const lockWaitsTotal = metrics.counter('neryva_engine_lock_waits_total', 'PostgreSQL lock wait events (advisory + row)', ['lock_type']);
+export const slowQueriesTotal = metrics.counter('neryva_engine_slow_queries_total', 'Queries exceeding statement_timeout', ['query_family']);
+export const uploadOrphansTotal = metrics.counter('neryva_engine_upload_orphans_total', 'Orphaned upload artifacts (no document, expired session)', ['reason']);
+export const rlsViolationsTotal = metrics.counter('neryva_engine_rls_violations_total', 'RLS / tenant-scope violations detected by harness', ['table']);

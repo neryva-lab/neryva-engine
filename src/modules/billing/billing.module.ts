@@ -15,6 +15,8 @@ import { PlanChangeService } from './plan-change.service';
 import { PriceCatalogController } from './price-catalog.controller';
 import { PriceCatalogService } from './price-catalog.service';
 import { QuotaService } from './quota.service';
+import { UsageLedgerService } from './usage-ledger.service';
+import { BillingReconciliationService } from './billing-reconciliation.service';
 import { SpendIngestService } from './spend-ingest.service';
 import { StripeService } from './stripe.service';
 import { StripeWebhookController } from './stripe.controller';
@@ -51,7 +53,7 @@ import { UsageQueryService } from './usage-query.service';
     PlanChangeService,
     StripeService,
   ],
-  exports: [UsageQueryService, QuotaService, SpendIngestService, PriceCatalogService],
+  exports: [UsageLedgerService, BillingReconciliationService,UsageQueryService, QuotaService, SpendIngestService, PriceCatalogService],
 })
 export class BillingModule {
   constructor(db: DbService, healthRegistry: HealthRegistry) {

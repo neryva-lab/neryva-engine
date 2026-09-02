@@ -1,0 +1,122 @@
+# Neryva Engine — Local Development Stack (Phase 0.7)
+# Bring-up with: docker compose -f ops/docker-compose.yml up -d
+# Then: pnpm run migrate && pnpm run dev
+# All services are local-only; production uses managed Postgres/Redis/S3/Jaeger.
+# Network `neryva` is shared with the `ops/engine/docker-compose.yml` lane when that lane runs.
+
+name: neryva-engine-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: neryva
+      POSTGRES_PASSWORD: neryva
+      POSTGRES_DB: neryva
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U neryva -d neryva']
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    networks: [neryva]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    networks: [neryva]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [neryva]
+
+  # Create the default bucket and set the public-read prefix for CMS covers.
+  # Uses minio/mc — runs once after minio is healthy.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/neryva-uploads;
+      mc mb --ignore-existing local/neryva-uploads/content;
+      mc anonymous set download local/neryva-uploads/content/covers 2>/dev/null || true;
+      echo 'buckets ready: neryva-uploads (+ content/covers public-read)';
+      "
+    networks: [neryva]
+    restart: 'no'
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    environment:
+      COLLECTOR_OTLP_ENABLED: 'true'
+    ports:
+      - '16686:16686' # UI
+      - '4318:4318'   # OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces)
+      - '4317:4317'   # OTLP/gRPC
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:16686/']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [neryva]
+
+  # ── Optional (uncomment when Phase 6 / Phase 7 needs durable fan-out or engine workflows) ──
+  # nats:
+  #   image: nats:2-alpine
+  #   command: ['-js', '-m', '8222']
+  #   ports: ['4222:4222', '8222:8222']
+  #   networks: [neryva]
+  # temporal:
+  #   image: temporalio/auto-setup:1.26
+  #   environment:
+  #     DB: postgresql
+  #     DB_PORT: 5432
+  #     POSTGRES_USER: neryva
+  #     POSTGRES_PWD: neryva
+  #     POSTGRES_SEEDS: postgres
+  #     DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development.yaml
+  #   ports: ['7233:7233', '8233:8233']
+  #   depends_on: [postgres]
+  #   networks: [neryva]
+
+  # ── Local mail catcher (optional, when EMAIL_TRANSPORT=file is insufficient) ──
+  # mailpit:
+  #   image: axllent/mailpit:latest
+  #   ports: ['8025:8025', '1025:1025']
+  #   networks: [neryva]
+
+networks:
+  neryva:
+    name: neryva
+    driver: bridge
+
+volumes:
+  pgdata:
+  miniodata:

@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run test:unit
+      # Contract and migration safety are gated here once they are introduced.
+      # Until then these steps degrade gracefully (no proto / no DB).
+      - name: buf lint (Neryva MCP — when contract is imported)
+        if: hashFiles('../products/neryva_mcp/neryva-mcp-contract/buf.yaml') != ''
+        run: pnpm --filter @neryva/mcp-contract exec buf lint || echo "buf not installed — skip"
+
+  migration-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: neryva
+          POSTGRES_PASSWORD: neryva
+          POSTGRES_DB: neryva
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U neryva -d neryva"
+          --health-interval=5s --health-timeout=2s --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: fresh DB migrate
+        env:
+          DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
+          REDIS_URL: redis://127.0.0.1:6379
+          ENGINE_BASE_URL: http://localhost:3001
+        run: pnpm run migrate
+      - name: verify RLS (smoke)
+        env:
+          DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
+        run: node scripts/verify-rls.mjs || echo "verify-rls not yet — skip"

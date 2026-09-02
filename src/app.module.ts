@@ -5,12 +5,18 @@ import { ModuleFlags } from './common/config/feature-flags';
 import { CorporateModule } from './modules/corporate/corporate.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { AssistantsModule } from './modules/assistants/assistants.module';
+import { ConversationsModule } from './modules/conversations/conversations.module';
+import { McpModule } from './transport/mcp/mcp.module';
+import { WorkersModule } from './workers/workers.module';
+import { KnowledgeModule } from './modules/knowledge/knowledge.module';
+import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
 import { ConsoleModule } from './modules/console/console.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { BillingModule } from './modules/billing/billing.module';
-import { AgentStudioModule } from './modules/agent-studio/agent-studio.module';
+import { AgentStudioModule } from './modules/studio-furniture/agent-studio.module';
 import { DeploymentModule } from './modules/deployment/deployment.module';
 import { KeysModule } from './modules/keys/keys.module';
 import { ConfigPublishModule } from './modules/config-publish/config-publish.module';
@@ -38,6 +44,12 @@ const imports = [
   ...(ModuleFlags.console ? [ConsoleModule] : []),
   ...(ModuleFlags.billing ? [BillingModule] : []),
   ...(ModuleFlags.agentStudio ? [AgentStudioModule] : []),
+  ...(ModuleFlags.assistants ? [AssistantsModule] : []),
+  ...(ModuleFlags.conversations ? [ConversationsModule] : []),
+  ...(ModuleFlags.mcp ? [McpModule] : []),
+  ...(ModuleFlags.knowledge ? [KnowledgeModule] : []),
+  ...(ModuleFlags.conversations ? [LifecycleModule] : []),
+  WorkersModule,
   ...(ModuleFlags.deployment ? [DeploymentModule] : []),
   ...(ModuleFlags.webhooks ? [WebhooksModule] : []),
   ...(ModuleFlags.notifications ? [NotificationsModule] : []),

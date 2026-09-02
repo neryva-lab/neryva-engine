@@ -4,7 +4,7 @@ import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
 import { EntitlementView, EntitlementsService, TransitionSource } from '../organizations/entitlements.service';
 import { BillingCreditsService } from './billing-credits.service';
-import { STUDIO_PLANS, StudioPlan } from '../agent-studio/plans';
+import { STUDIO_PLANS, StudioPlan } from '../studio-furniture/plans';
 
 /**
  * The plan-change path (H-4): the one billing-side writer that swaps an

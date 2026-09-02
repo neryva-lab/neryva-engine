@@ -45,6 +45,11 @@ const envSchema = z.object({
   MODULES__WEBHOOKS_ENABLED: boolean(false),
   MODULES__NOTIFICATIONS_ENABLED: boolean(false),
   MODULES__STAFF_ENABLED: boolean(false),
+  MODULES__ASSISTANTS_ENABLED: boolean(false),
+  MODULES__CONVERSATIONS_ENABLED: boolean(false),
+  WORKERS__OUTBOX_ENABLED: boolean(true),
+  MODULES__MCP_ENABLED: boolean(false),
+  MODULES__KNOWLEDGE_ENABLED: boolean(false),
 
   /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
   BILLING_ANOMALY_CRON: z.string().default('15 3 * * *'),
@@ -111,6 +116,27 @@ const envSchema = z.object({
   // the svc-agent-runtime OP client on boot. Unset = the row keeps whatever
   // envelope it already has.
   IDENTITY_AGENT_RUNTIME_SECRET: z.string().min(16).optional(),
+
+  // Neryva MCP authority (Phase 5). The capability signing key is base64 of
+  // >= 32 random bytes; kid = its sha256 fingerprint. Fail-closed in
+  // production when the MCP module is enabled (see production checks below).
+  MCP_CAPABILITY_SIGNING_KEY: z.string().optional().default(''),
+  MCP_CAPABILITY_TTL_SECONDS: positiveInt(300, 3600),
+  /** Max duration (seconds) a single WatchRunEvents stream may stay open. */
+  MCP_WATCH_MAX_DURATION_SECONDS: positiveInt(300, 3600),
+
+  // Outbox dispatcher (Phase 6.3). NERYVA_RUNTIME_BASE_URL: Studio runtime's
+  // Connect endpoint; empty = run.dispatch consumer skips (runs stay ACCEPTED).
+  OUTBOX_DISPATCH_INTERVAL_MS: positiveInt(1000, 60_000),
+  OUTBOX_BATCH_SIZE: positiveInt(10, 500),
+  OUTBOX_MAX_ATTEMPTS: positiveInt(2, 50),
+  NERYVA_RUNTIME_BASE_URL: z.string().default(''),
+
+  // Knowledge pipeline (Phase 7). EMBEDDING_PROVIDER=local uses a
+  // deterministic lexical hash (NOT semantic) — dev/test only; production
+  // must wire a real embedding provider before retrieval goes live.
+  KNOWLEDGE_MAX_UPLOAD_BYTES: positiveInt(1024, 1_073_741_824),
+  EMBEDDING_PROVIDER: z.enum(['local']).default('local'),
 
   // Social login (doc-06 Δ1) — a provider is enabled exactly when its
   // credentials are present. Redirect URI per provider:
@@ -201,6 +227,60 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
     // must be a boot failure, never a 500 on the first secret set.
     if (env.MODULES__DEPLOYMENT_ENABLED && !env.ENGINE_ENCRYPTION_KEY) {
       throw new Error('ENGINE_ENCRYPTION_KEY (32-byte base64) is required in production when the deployment module is enabled (secrets vault envelope)');
+    }
+    // Neryva MCP capability tokens sign with this key — a missing key must be
+    // a boot failure, never an unauthenticated authority surface.
+    if (env.MODULES__MCP_ENABLED && !env.MCP_CAPABILITY_SIGNING_KEY) {
+      throw new Error('MCP_CAPABILITY_SIGNING_KEY (base64 of >= 32 bytes) is required in production when the MCP module is enabled');
+    }
+    // Stripe is fail-closed: enabled rail with missing keys would charge without webhook verification.
+    if (env.STRIPE_ENABLED) {
+      if (!env.STRIPE_SECRET_KEY) {
+        throw new Error('STRIPE_SECRET_KEY is required in production when STRIPE_ENABLED=true');
+      }
+      if (!env.STRIPE_WEBHOOK_SECRET) {
+        throw new Error('STRIPE_WEBHOOK_SECRET is required in production when STRIPE_ENABLED=true');
+      }
+    }
+    // Object storage is optional-by-design in dev/test, but a partial S3 config in production is a hard fail.
+    const s3Keys = [env.S3_BUCKET, env.S3_REGION, env.S3_ACCESS_KEY_ID, env.S3_SECRET_ACCESS_KEY];
+    const s3Any = s3Keys.some((v) => !!v);
+    const s3All = s3Keys.every((v) => !!v);
+    if (s3Any && !s3All) {
+      throw new Error('S3_* is partially configured in production: set S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY together, or set none');
+    }
+    // OTEL tracing enabled without an endpoint would silently drop traces.
+    if (env.OTEL_TRACING_ENABLED && !env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+      throw new Error('OTEL_EXPORTER_OTLP_ENDPOINT is required in production when OTEL_TRACING_ENABLED=true');
+    }
+    // Unsafe dev-key allowlist must never be enabled in production.
+    if (env.IDENTITY_ALLOW_DEV_KEYS) {
+      throw new Error('IDENTITY_ALLOW_DEV_KEYS must be false in production');
+    }
+    // Production URLs must be https unless explicitly localhost (local staging with http is guarded below).
+    const requireHttps = (label: string, value: string) => {
+      if (value.startsWith('http://') && !value.includes('localhost') && !value.includes('127.0.0.1')) {
+        throw new Error(`${label} must use https in production (got ${value})`);
+      }
+    };
+    requireHttps('ENGINE_BASE_URL', env.ENGINE_BASE_URL);
+    requireHttps('IDENTITY_ISSUER', env.IDENTITY_ISSUER);
+    if (env.S3_ENDPOINT) {
+      try {
+        const u = new URL(env.S3_ENDPOINT);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+          throw new Error(`S3_ENDPOINT must be http or https (got ${env.S3_ENDPOINT})`);
+        }
+      } catch {
+        throw new Error(`S3_ENDPOINT is not a valid URL: ${env.S3_ENDPOINT}`);
+      }
+    }
+    // Neryva MCP protocol versions — unsupported majors must not start in production.
+    const supportedMcpMajors = new Set(['1']);
+    const neryvaMcpVersion = process.env.NERYVA_MCP_PROTOCOL_VERSION ?? '1.0';
+    const mcpMajor = neryvaMcpVersion.split('.')[0];
+    if (!supportedMcpMajors.has(mcpMajor)) {
+      throw new Error(`NERYVA_MCP_PROTOCOL_VERSION major ${mcpMajor} is not supported (supported: ${[...supportedMcpMajors].join(', ')})`);
     }
   }
   return env;

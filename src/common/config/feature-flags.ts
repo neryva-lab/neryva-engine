@@ -46,6 +46,21 @@ export const ModuleFlags = {
   get staff(): boolean {
     return env.MODULES__STAFF_ENABLED;
   },
+  get assistants(): boolean {
+    return env.MODULES__ASSISTANTS_ENABLED;
+  },
+  get conversations(): boolean {
+    return env.MODULES__CONVERSATIONS_ENABLED;
+  },
+  get mcp(): boolean {
+    return env.MODULES__MCP_ENABLED;
+  },
+  get knowledge(): boolean {
+    return env.MODULES__KNOWLEDGE_ENABLED;
+  },
+  get workers(): boolean {
+    return env.WORKERS__OUTBOX_ENABLED;
+  },
 } as const;
 
 /** Dependency rules enforced at boot (fail loudly, never at request time). */
@@ -101,5 +116,17 @@ export function validateFlagMatrix(): void {
   // The staff overlay reads identity/org/billing/satellite state.
   if (ModuleFlags.staff && !(ModuleFlags.organizations && ModuleFlags.billing)) {
     throw new Error('MODULES__STAFF_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__BILLING_ENABLED (org lookup, audit, usage)');
+  }
+  // Assistants need organizations (+ console for manifest/product checks when publishing).
+  if (ModuleFlags.assistants && !ModuleFlags.organizations) {
+    throw new Error('MODULES__ASSISTANTS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED (assistant tenancy)');
+  }
+  // Conversations pin the assistant's active published version + policy snapshot at acceptance.
+  if (ModuleFlags.conversations && !(ModuleFlags.organizations && ModuleFlags.assistants)) {
+    throw new Error('MODULES__CONVERSATIONS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__ASSISTANTS_ENABLED (runs pin assistant versions)');
+  }
+  // The MCP authority surface serves runs; identity issues the workload identities.
+  if (ModuleFlags.mcp && !(ModuleFlags.conversations && ModuleFlags.identity)) {
+    throw new Error('MODULES__MCP_ENABLED requires MODULES__CONVERSATIONS_ENABLED and MODULES__IDENTITY_ENABLED (authority over runs + workload identities)');
   }
 }

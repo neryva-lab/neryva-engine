@@ -51,16 +51,18 @@ engine/
 │   │   ├── infra/db/db.service.ts   # withOrg/withBypass, RLS tenant context
 │   │   ├── auth/auth.guard.ts   # L1 JWT / L2 nrv_live_ / L3 service
 │   │   └── audit/audit.service.ts   # hash-chained, byte-identical to Python
-│   └── modules/                 # 13 feature modules, each behind one flag
+│   └── modules/                 # 14 feature modules, each behind one flag
 │       ├── identity/            # accounts, OIDC, sessions, social
 │       ├── organizations/       # orgs, memberships, projects, entitlements
 │       ├── billing/             # spend_events, invoices, price_catalog, Stripe
-│       ├── agent-studio/        # LEGACY furniture (studio_project_keys) — name collides, see § Non-negotiables
+│       ├── studio-furniture/    # LEGACY furniture (studio_project_keys) — renamed from agent-studio, ledger 3.7
+│       ├── assistants/          # assistants, assistant_versions, policy_snapshots (Phase 3)
+│       ├── conversations/       # conversations, messages, runs, run_events (Phase 4)
 │       ├── deployment/          # product_deployment schema, envelope encryption
 │       ├── config-publish/      # published_configs/config_drafts — exemplar for immutable publish
 │       ├── satellites/          # fleet + revocation feed
 │       ├── keys/, webhooks/, notifications/, staff/, corporate/, console/
-├── drizzle/                     # 0001–0018 SQL — engine-ts owned only
+├── drizzle/                     # 0001–0023 SQL — engine-ts owned only
 ├── drizzle.config.ts            # schema = engine-owned files only (ownership-map.json)
 ├── ownership-map.json           # canonical owner map (engine-ts vs python vs shared)
 ├── products_manifests/          # agent_studio.yaml, deployment.yaml, inference.yaml
@@ -77,9 +79,9 @@ Use `Read` on `docs/architecture/engine/imp/ledger.md:1` to find the current pha
 
 ## Implementation Status (2026-09-01 — do not hallucinate)
 
-- **Engine:** ~45% per `docs/architecture/engine/imp/ledger.md:2` — Phases 0–2 hardened, Phase 3 `assistants` 15%, Phases 4–7 (`conversations`/`runs`/`outbox`/`artifacts`/`knowledge`/`memory`) **0%**, Billing 60%, Lifecycle 40%.
-- **Neryva MCP:** **100% complete end-to-end** in `../products/neryva_mcp/` (`neryva-mcp-contract/proto`, `gen/ts`, `tests`, `buf lint/breaking/generate`) — do NOT reimplement; Engine consumes generated types via `@neryva/mcp-contracts` in ledger Phase 5.
-- **Agent Studio:** **Legacy only** (`src/modules/agent-studio` → `studio_project_keys` `drizzle/0006`). **New Agent Studio 0% — hard-delete planned, rebuild from ground up** per `docs/architecture/agent_studio/agent_studio_architecture.md` + `implementation_plan.md` **after** Engine Phases 0–10. Do NOT add new Agent Studio business logic to Engine before Phase 5; do NOT confuse legacy `agent-studio` module with new Studio execution plane (`docs/architecture/main.md:42`).
+- **Engine:** Phases 0–2 hardened. **Phase 3 code complete** — `assistants`/`assistant_versions`/`policy_snapshots` (`drizzle/0020`/`0021`), immutable publish + snapshot-in-publish-TX + no-op guard + deterministic export/import; legacy module renamed to `src/modules/studio-furniture` (env flag keeps the old name). **Phase 4 code complete** — `conversations`/`conversation_participants`/`messages`/`runs`/`run_events` (`drizzle/0022`) + `outbox_events`/`inbox_events`/`idempotency_records` (`drizzle/0023`, DB idempotency tier pulled forward from 6.7); start-message TX and `commitRunResult` atomic commit implemented in `src/modules/conversations/`. Exit gates for Phases 3–4 are **pending the first full CI/DB run** — do not mark ledger boxes `DONE` until then. Pinned decisions live in `docs/architecture/engine/imp/ledger.md` (Phase 3.1 + Phase 4 header): outbox machine `PENDING→CLAIMED→PUBLISHED→RETRY_WAIT→DEAD_LETTER`; run terminal state is `COMPLETED`; lease columns live on the `runs` row (no `run_leases` table); contract package is `@neryva/mcp-contract` (singular). **Phase 5 code complete** — MCP authority host over ConnectRPC (`src/transport/mcp/`, `MODULES__MCP_ENABLED`), Engine consumes `@neryva/mcp-contract` (file: dep; services from the `*_pb` GenService definitions), run-scoped HS256 capability tokens (`MCP_CAPABILITY_SIGNING_KEY`, fail-closed in production), lease CAS / AppendRunEvents dedup / approvals / memory proposals / tool effects / checkpoints (`drizzle/0024_mcp_authority.sql`). Deferred: mTLS/SPIFFE workload identities, `GetRunArtifact` (Phase 7), usage entry in CommitRunResult (Phase 8), RuntimeControl dispatch (Phase 6). **Phase 6 code complete** — generic outbox dispatcher (`src/common/infra/outbox/dispatcher.ts`, `FOR UPDATE SKIP LOCKED`, backoff+jitter, dead-letter + operator replay, stale-claim recovery `drizzle/0025`), inbox-dedup consumer contract (`consumer.ts`), worker host (`src/workers/`, `WORKERS__OUTBOX_ENABLED`), first consumer delivers `StartRun` to Studio via `RuntimeControlService` when `NERYVA_RUNTIME_BASE_URL` is set (skip = run stays ACCEPTED); EventBus is hints-only (6.8). **Phase 7 code complete** — knowledge plane (drizzle/0026, src/modules/knowledge/, MODULES__KNOWLEDGE_ENABLED): upload sessions with sha256-bound presigned POSTs + headObject verification, ingestion worker (SCANNING→EXTRACTING→INDEXING→READY, resume-safe), pgvector retrieval with ACL-before-scoring (EMBEDDING_PROVIDER=local is a documented non-semantic dev/test hash), memory_items promoted from approved MCP proposals, and the MCP GetRunArtifact claim-check facade (7 fresh checks). **Phases 8–10 code complete** — Phase 8: immutable usage_ledger_entries + compensating corrections, durable quota reservations (RESERVED→COMMITTED→RELEASED), reconciliation pass, billing webhook inbox wired into the Stripe controller, usage consumer over the outbox (drizzle/0027). Phase 9: retention policies, legal holds (block purge), ordered+resumable purge workflow to tombstones, one-time export downloads, data_access_records stream (drizzle/0028, src/modules/lifecycle/). Phase 10: ASVS mapping, SLOs, runbooks, CI (pgvector migration smoke); live-environment drills (red-team, PITR/restore, rotation) remain open. **All DB-backed exit gates for Phases 3–10 await the single full run** (compose up + migrate + pnpm test:integration / test:isolation).
+- **Neryva MCP:** **100% complete end-to-end** in `../products/neryva_mcp/` (`neryva-mcp-contract/proto`, `gen/ts`, `tests`, `buf lint/breaking/generate`) — do NOT reimplement; Engine consumes generated types via `@neryva/mcp-contract` in ledger Phase 5.
+- **Agent Studio:** **Legacy only** (`src/modules/studio-furniture`, `studio_project_keys` `drizzle/0006`). **New Agent Studio 0% — rebuild from ground up** per `docs/architecture/agent_studio/agent_studio_architecture.md` + `implementation_plan.md` **after** Engine Phases 0–10. Do NOT add new Agent Studio business logic to Engine before Phase 5.
 
 ## Code Style
 
@@ -174,6 +176,6 @@ When a doc references `@docs/architecture/...`, use your `Read` tool on that pat
 
 - Architecture conflict → `docs/architecture/main.md:237` (Engine–Studio boundary) then `docs/architecture/engine/decisions/*.md`.
 - Transaction / RLS doubt → `engine_data_and_lifecycle.md:430` consistency summary + `engine_architecture.md:263` tenancy model.
-- Skill-specific procedure → call `skill({ name: "<skill-name>" })` — see `opencode.json:skills` and `.opencode/skills/*/SKILL.md`.
+- Skill-specific procedure → call `skill({ name: "<skill-name>" })` — see `opencode.json:skills` and `.agents/skills/*/SKILL.md`.
 
 This file is committed to Git. Other contributors and CI rely on it. Keep it under 500 lines; link to detailed specs instead of inlining them.

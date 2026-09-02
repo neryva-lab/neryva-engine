@@ -1,0 +1,8 @@
+dist
+node_modules
+coverage
+drizzle
+var
+pnpm-lock.yaml
+package-lock.json
+.opencode

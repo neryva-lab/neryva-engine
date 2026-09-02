@@ -89,8 +89,8 @@
     {
       "idx": 12,
       "version": "6",
-      "when": 1761232800000,
-      "tag": "0009_console_surface",
+      "when": 1761233800000,
+      "tag": "0019_console_surface",
       "breakpoints": true
     },
     {
@@ -103,7 +103,7 @@
     {
       "idx": 14,
       "version": "6",
-      "when": 1761232900000,
+      "when": 1761234050000,
       "tag": "0014_billing_money",
       "breakpoints": true
     },
@@ -133,6 +133,69 @@
       "version": "6",
       "when": 1761237700000,
       "tag": "0018_account_deletion",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1761240000000,
+      "tag": "0020_assistants",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1761241000000,
+      "tag": "0021_policy_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1761242000000,
+      "tag": "0022_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1761242100000,
+      "tag": "0023_async_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1761243000000,
+      "tag": "0024_mcp_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1761244000000,
+      "tag": "0025_outbox_dispatch",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1761245000000,
+      "tag": "0026_knowledge",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1761246000000,
+      "tag": "0027_billing_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1761246100000,
+      "tag": "0028_lifecycle",
       "breakpoints": true
     }
   ]

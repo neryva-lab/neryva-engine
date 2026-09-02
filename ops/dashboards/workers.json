@@ -1,0 +1,31 @@
+{
+  "title": "Engine Workers — Queues / Uploads (Phase 1.7 skeleton)",
+  "description": "Queue depth, upload orphans, deployment transitions. Per engine_architecture.md:516-531 and ledger 1.7.",
+  "panels": [
+    {
+      "title": "queueDepth by namespace/state",
+      "metric": "neryva_engine_queue_depth",
+      "query": "max(neryva_engine_queue_depth) by (namespace, state)"
+    },
+    {
+      "title": "uploadOrphansTotal",
+      "metric": "neryva_engine_upload_orphans_total",
+      "query": "sum(rate(neryva_engine_upload_orphans_total[5m])) by (reason)"
+    },
+    {
+      "title": "deploymentTransitions",
+      "metric": "neryva_engine_deployment_transitions_total",
+      "query": "sum(rate(neryva_engine_deployment_transitions_total[5m])) by (from, to)"
+    },
+    {
+      "title": "webhookDeliveries",
+      "metric": "neryva_engine_webhook_deliveries_total",
+      "query": "sum(rate(neryva_engine_webhook_deliveries_total[5m])) by (outcome)"
+    },
+    {
+      "title": "meteringIngestRows",
+      "metric": "neryva_engine_metering_ingest_rows_total",
+      "query": "sum(rate(neryva_engine_metering_ingest_rows_total[5m])) by (outcome)"
+    }
+  ]
+}

@@ -106,7 +106,7 @@ Single NestJS/Fastify monolith `src/main.ts` + `src/app.module.ts:1`. All module
 | **2** | Identity / organization / authorization hardening | Production tenancy closure & CSR controls | 1 | 85% | `authorization_policies` (optional) |
 | **3** | Organizations, assistants, policies & publication | Immutable assistant versions pinned to runs | 2 | 15%* | `assistants`, `assistant_versions`, `policy_snapshots` (+ rename legacy `agent-studio`) |
 | **4** | Conversations, messages, runs & canonical events | Durable conversation boundary + Engine run projection | 3 | 0% | `conversations`, `conversation_participants`, `messages`, `runs`, `run_events`, `event_cursors` |
-| **5** | Neryva MCP authority & Studio integration | Engine half of `neryva.mcp.v1` without DB leakage | 4 | 0% engine-side (contract complete in `../products/neryva_mcp`) | `run_leases`, `run_idempotency`, `checkpoints`, `tool_effects`, `approvals`, `memory_proposals` (or mapped into Phase 4 tables) |
+| **5** | Neryva MCP authority & Studio integration | Engine half of `neryva.mcp.v1` without DB leakage | 4 | 0% engine-side (contract complete in `../products/neryva_mcp`) | `run_idempotency`, `checkpoints`, `tool_effects`, `approvals`, `memory_proposals` (or mapped into Phase 4 tables); lease state lives on `runs` (pinned 2026-09-01, no `run_leases` table) |
 | **6** | Outbox / inbox / broker / async workers | Every async boundary durable & replay-safe | 5 (generic introduced at 4) | 0% generic | `outbox_events`, `inbox_events` |
 | **7** | Files, uploads, knowledge & claim-check storage | Secure large-payload + rebuildable ingestion | 6 | 10% (presign only) | `artifacts`, `upload_sessions`, `documents`, `document_versions`, `chunks`, `embeddings` (+ pgvector) |
 | **8** | Billing, quotas, entitlements & reconciliation | Immutable ledger + deterministic quotas | 7 | 60% | `usage_ledger` (or evolve `billing.spend_events`) + `provider_reconciliation_runs` |
@@ -125,19 +125,19 @@ Single NestJS/Fastify monolith `src/main.ts` + `src/app.module.ts:1`. All module
 
 *Objective: turn `engine_architecture.md` + `engine_data_and_lifecycle.md` into enforceable repo rules before any new business table.*
 
-- [ ] **0.1** Cut Engine ADRs (index + records) â€” modular monolith & roles `engine_architecture.md:14-27`, tenant model + RLS `engine_architecture.md:263-285`, REST/OpenAPI contract `engine_architecture.md:322-355`, Neryva MCP authority integration `engine_architecture.md:357-371`, outbox/inbox & transport `engine_architecture.md:373-399`, migration policy `engine_data_and_lifecycle.md:406-420`, claim-check policy `engine_architecture.md:296-306`, identity provider integration `engine_architecture.md:146-147`, billing-ledger authority `engine_architecture.md:401-425`, retention/legal-hold/DR `engine_data_and_lifecycle.md:359-391` â†’ `docs/architecture/engine/decisions/*.md` â†’ review sign-off.
+- [x] **0.1** Cut Engine ADRs (index + records) â€” modular monolith & roles `engine_architecture.md:14-27`, tenant model + RLS `engine_architecture.md:263-285`, REST/OpenAPI contract `engine_architecture.md:322-355`, Neryva MCP authority integration `engine_architecture.md:357-371`, outbox/inbox & transport `engine_architecture.md:373-399`, migration policy `engine_data_and_lifecycle.md:406-420`, claim-check policy `engine_architecture.md:296-306`, identity provider integration `engine_architecture.md:146-147`, billing-ledger authority `engine_architecture.md:401-425`, retention/legal-hold/DR `engine_data_and_lifecycle.md:359-391` â†’ `docs/architecture/engine/decisions/*.md` â†’ review sign-off.
 
-- [ ] **0.2** Publish STRIDE threat model covering `engine_implementation_plan.md:41-55` â€” browser/channel, public API, service identities (`agent-studio-runtime`/`engine-worker`/`billing-reconciler`), MCP capability tokens, PostgreSQL+RLS, object storage+signed URLs, queues/outbox/replay, provider/billing, support access â†’ `docs/architecture/engine/threat-model.md` + owners per high-risk control.
+- [x] **0.2** Publish STRIDE threat model covering `engine_implementation_plan.md:41-55` â€” browser/channel, public API, service identities (`agent-studio-runtime`/`engine-worker`/`billing-reconciler`), MCP capability tokens, PostgreSQL+RLS, object storage+signed URLs, queues/outbox/replay, provider/billing, support access â†’ `docs/architecture/engine/threat-model.md` + owners per high-risk control.
 
-- [ ] **0.3** Data classification registry â€” public/internal/confidential/restricted customer content/credentials/security audit â†’ `docs/architecture/engine/data-classification.md`; every table column labeled by next migration review.
+- [x] **0.3** Data classification registry â€” public/internal/confidential/restricted customer content/credentials/security audit â†’ `docs/architecture/engine/data-classification.md`; every table column labeled by next migration review.
 
-- [ ] **0.4** Toolchain baseline â€” pin Node LTS + TypeScript `strict` + pnpm + formatter/linter/typecheck/test/coverage commands + lockfile policy â†’ `package.json:9-16`, `tsconfig.json`, `eslint`, `vitest` â†’ `pnpm typecheck && pnpm lint` green.
+- [x] **0.4** Toolchain baseline â€” pin Node LTS + TypeScript `strict` + pnpm + formatter/linter/typecheck/test/coverage commands + lockfile policy â†’ `package.json:9-16`, `tsconfig.json`, `eslint`, `vitest` â†’ `pnpm typecheck && pnpm lint` green.
 
-- [ ] **0.5** Configuration schema hardening â€” typed immutable config loaded once at startup `src/common/config/env.ts:173` (`parseEnv(loadFromProcess())`) â†’ add fail-closed checks for missing secrets / invalid URLs / unsafe prod defaults / unsupported protocol versions `engine_implementation_plan.md:72` â†’ boot test.
+- [x] **0.5** Configuration schema hardening â€” typed immutable config loaded once at startup `src/common/config/env.ts:173` (`parseEnv(loadFromProcess())`) â†’ add fail-closed checks for missing secrets / invalid URLs / unsafe prod defaults / unsupported protocol versions `engine_implementation_plan.md:72` â†’ boot test.
 
-- [ ] **0.6** Observability guardrails â€” redaction denylist + trace correlation (`request_id`/`trace_id`/`organization_id`/`run_id`) `engine_architecture.md:462-489` â†’ `src/common/observability/logger.ts`, `src/tracing.ts:17`, `src/common/observability/metrics.ts:1` â†’ no prompt/token/credential in logs/traces.
+- [x] **0.6** Observability guardrails â€” redaction denylist + trace correlation (`request_id`/`trace_id`/`organization_id`/`run_id`) `engine_architecture.md:462-489` â†’ `src/common/observability/logger.ts`, `src/tracing.ts:17`, `src/common/observability/metrics.ts:1` â†’ no prompt/token/credential in logs/traces.
 
-- [ ] **0.7** Development stack â€” PostgreSQL + MinIO/R2 + Redis/Valkey + optional NATS/Temporal `engine_implementation_plan.md:65` â†’ `ops/compose` or `ops/docker-compose.yml` â†’ `pnpm dev` brings full stack.
+- [x] **0.7** Development stack â€” PostgreSQL + MinIO/R2 + Redis/Valkey + optional NATS/Temporal `engine_implementation_plan.md:65` â†’ `ops/compose` or `ops/docker-compose.yml` â†’ `pnpm dev` brings full stack.
 
 #### Exit gates â€” Phase 0
 
@@ -153,19 +153,19 @@ Single NestJS/Fastify monolith `src/main.ts` + `src/app.module.ts:1`. All module
 
 *Objective: shared kernel every module uses without becoming an abstraction maze `engine_implementation_plan.md:74-118`.*
 
-- [ ] **1.1** Harden Fastify bootstrap `src/main.ts:26` â€” request ID + trace propagation + auth pre-handler + route schema registration + response serialization + error mapping + rate-limit hook + graceful shutdown + `GET /health/live` + `GET /health/ready` aggregating module checks `engine_architecture.md:115-130`.
+- [x] **1.1** Harden Fastify bootstrap `src/main.ts:26` â€” request ID + trace propagation + auth pre-handler + route schema registration + response serialization + error mapping + rate-limit hook + graceful shutdown + `GET /health/live` + `GET /health/ready` aggregating module checks `engine_architecture.md:115-130`.
 
-- [ ] **1.2** Harden `DbService` `src/common/infra/db/db.service.ts:1` â€” bounded pool (`DATABASE_POOL_MAX` `env.ts:28`), statement/idle-in-transaction timeouts, transaction helper with isolation/lock options, migration runner as **single release job** (`drizzle.config.ts:12` out + `ops/migrate.sh`), separation of read-only/worker credentials where useful `engine_architecture.md:92-94`.
+- [x] **1.2** Harden `DbService` `src/common/infra/db/db.service.ts:1` â€” bounded pool (`DATABASE_POOL_MAX` `env.ts:28`), statement/idle-in-transaction timeouts, transaction helper with isolation/lock options, migration runner as **single release job** (`drizzle.config.ts:12` out + `ops/migrate.sh`), separation of read-only/worker credentials where useful `engine_architecture.md:92-94`.
 
-- [ ] **1.3** Codify SQL conventions `engine_implementation_plan.md:99-106` â€” UUIDv7 for new tables, UTC `timestamptz`, `created_at`/`updated_at`+ lifecycle timestamps, FK + check constraints, partial/covering indexes, no JSON blob for auth-critical fields â†’ `drizzle/*.sql` review checklist.
+- [x] **1.3** Codify SQL conventions `engine_implementation_plan.md:99-106` â€” UUIDv7 for new tables, UTC `timestamptz`, `created_at`/`updated_at`+ lifecycle timestamps, FK + check constraints, partial/covering indexes, no JSON blob for auth-critical fields â†’ `drizzle/*.sql` review checklist.
 
-- [ ] **1.4** Expand RLS test helpers `src/common/infra/db/db.service.ts:54` (`withOrg`/`withBypass`) + isolation harness â€” direct analogue of `drizzle/0002_org_furniture.sql:68` `USING`/`WITH CHECK` `current_setting('app.current_tenant')` â†’ harness asserts tenant, owner, `BYPASSRLS` roles separately `engine_data_and_lifecycle.md:392-404`.
+- [x] **1.4** Expand RLS test helpers `src/common/infra/db/db.service.ts:54` (`withOrg`/`withBypass`) + isolation harness â€” direct analogue of `drizzle/0002_org_furniture.sql:68` `USING`/`WITH CHECK` `current_setting('app.current_tenant')` â†’ harness asserts tenant, owner, `BYPASSRLS` roles separately `engine_data_and_lifecycle.md:392-404`.
 
-- [ ] **1.5** Structured error taxonomy `src/common/http/api-error.ts`, `src/common/http/all-exceptions.filter.ts:1` â€” stable `code`, public message, HTTP status, retryability, internal cause; never serializes DB rows directly `engine_implementation_plan.md:117`.
+- [x] **1.5** Structured error taxonomy `src/common/http/api-error.ts`, `src/common/http/all-exceptions.filter.ts:1` â€” stable `code`, public message, HTTP status, retryability, internal cause; never serializes DB rows directly `engine_implementation_plan.md:117`.
 
-- [ ] **1.6** Time/clock/Randomness port for deterministic tests `engine_implementation_plan.md:109` (`common/infra/clock.ts`).
+- [x] **1.6** Time/clock/Randomness port for deterministic tests `engine_implementation_plan.md:109` (`common/infra/clock.ts`).
 
-- [ ] **1.7** Metrics & dashboards skeleton â€” `src/common/observability/metrics.ts:1` extension (`outbox_lag`, `dead_letter`, `queue_depth`, `lock_wait`, `slow_query`, `upload_orphan`) + `ops/dashboards/*.json` `engine_implementation_plan.md:518-531`.
+- [x] **1.7** Metrics & dashboards skeleton â€” `src/common/observability/metrics.ts:1` extension (`outbox_lag`, `dead_letter`, `queue_depth`, `lock_wait`, `slow_query`, `upload_orphan`) + `ops/dashboards/*.json` `engine_implementation_plan.md:518-531`.
 
 #### Exit gates â€” Phase 1
 
@@ -192,20 +192,20 @@ These are DONE â€” gates already hold:
 
 #### 2B â€” Remaining hardening
 
-- [ ] **2.5** Membership revocation immediacy â€” assert new requests are rejected per documented consistency policy `engine_implementation_plan.md:168`; revisit Redis deny-list TTL vs DB read for `satellites/revocations` feed `src/modules/satellites/revocation-log.service.ts`.
+- [x] **2.5** Membership revocation immediacy â€” assert new requests are rejected per documented consistency policy `engine_implementation_plan.md:168`; revisit Redis deny-list TTL vs DB read for `satellites/revocations` feed `src/modules/satellites/revocation-log.service.ts`.
 
-- [ ] **2.6** Cross-tenant authorization fuzz â€” every route Ã— two orgs Ã— multiple roles/principals `engine_implementation_plan.md:170` â†’ `tests/isolation/*.test.ts`.
+- [x] **2.6** Cross-tenant authorization fuzz â€” every route Ã— two orgs Ã— multiple roles/principals `engine_implementation_plan.md:170` â†’ `tests/isolation/*.test.ts`.
 
-- [ ] **2.7** SAML via IdP â€” confirm delegation (no Engine SAML implementation) `engine_architecture.md:146` â†’ `IdentityModule` SSO callback + key rotation tests.
+- [x] **2.7** SAML via IdP â€” confirm delegation (no Engine SAML implementation) `engine_architecture.md:146` â†’ `IdentityModule` SSO callback + key rotation tests.
 
-- [ ] **2.8** `authorization_policies` table (optional, deferred if RBAC+RLS suffices) â€” immutable policy versions, decision records `engine_data_and_lifecycle.md:89-113` â†’ only if relationship complexity justifies `engine_architecture.md:568`.
+- [x] **2.8** `authorization_policies` table (optional, deferred if RBAC+RLS suffices) â€” immutable policy versions, decision records `engine_data_and_lifecycle.md:89-113` â†’ only if relationship complexity justifies `engine_architecture.md:568`.
 
 #### Exit gates â€” Phase 2
 
-- [ ] Revocation / disable / expiry rejected immediately for new requests.
-- [ ] Cross-tenant fuzz passes for every existing route, worker, cache key, and object prefix.
-- [ ] SSO callback failure / logout / key-rotation / account-linking tests pass.
-- [ ] Support/impersonation is an explicit audited action (`staff_impersonations` `0011`) and cannot masquerade via customer token.
+- [x] Revocation / disable / expiry rejected immediately for new requests.
+- [x] Cross-tenant fuzz passes for every existing route, worker, cache key, and object prefix.
+- [x] SSO callback failure / logout / key-rotation / account-linking tests pass.
+- [x] Support/impersonation is an explicit audited action (`staff_impersonations` `0011`) and cannot masquerade via customer token.
 
 ---
 
@@ -214,6 +214,8 @@ These are DONE â€” gates already hold:
 *Objective: immutable organization configuration consumable by Studio without mutating live runs `engine_implementation_plan.md:176-221`.*
 
 - [ ] **3.1** Design `assistants` domain â€” `assistants (id, organization_id, name, active_version_id FK, created_at/updated_at)` + `assistant_versions (id, assistant_id, version int, schema_version, model_policy jsonb, context_policy jsonb, tool_policy jsonb, guardrail_policy jsonb, status enum DRAFT->VALIDATING->VALID->PUBLISHED->RETIRED, published_at, rollback_of FK, hash)` `engine_data_and_lifecycle.md:89-113` â†’ `src/modules/assistants/*` (new module).
+
+  **Pinned decision (2026-09-01) - `policy_snapshots`:** one immutable snapshot row is materialized **in the same TX as publish** (and rollback-publish), 1:1 with the published `assistant_versions` row. `policy_snapshots (id, organization_id, assistant_version_id UNIQUE FK, snapshot_version int, model_policy jsonb, context_policy jsonb, tool_policy jsonb, guardrail_policy jsonb, knowledge_policy jsonb null, hash varchar(64), created_at)`; `hash` = canonical-sorted-JSON sha256 of the policy set, equal to the version's `hash`. Runs (Phase 4.4) pin `assistant_version_id` + `policy_snapshot_id` at acceptance; snapshots are never mutated and never deleted except via lifecycle purge (Phase 9). A publish/rollback whose payload equals the assistant's **current active version** hash is a no-op and is rejected as a conflict (restoring a non-active published payload via rollback is legitimate).
 
 - [ ] **3.2** Publish invariants â€” draft mutation never touches published version; publish is atomic pointer change after validation; rollback points to prior immutable version `engine_data_and_lifecycle.md:103-111` â€” advisory lock (`SELECT pg_advisory_xact_lock`) patterned after `config-publish` `src/modules/config-publish/config-publish.service.ts:1`.
 
@@ -240,6 +242,8 @@ These are DONE â€” gates already hold:
 ### Phase 4 â€” Conversations, messages, runs & canonical events
 
 *Objective: durable conversation boundary + Engine run projection `engine_implementation_plan.md:223-266` + `engine_data_and_lifecycle.md:116-206`. This is the largest net-new domain â€” **0% today**.*
+
+> **Pinned decisions (2026-09-01):** (1) `idempotency_records` (DB authority tier, task 6.7) is **pulled forward into Phase 4** — the start-message transaction (4.7) claims the record in the same TX, because the Phase 4 duplicate-submission gate cannot pass on a Redis-only tier. (2) `outbox_events`/`inbox_events` tables land with Phase 4 (generic dispatcher role still Phase 6). (3) `conversations.assistant_id` is NOT NULL — runs pin the assistant's active published version + `policy_snapshot_id` at acceptance. (4) `event_cursors` table is deferred to Phase 5 (WatchRunEvents defines server-side cursor needs); Phase 4 cursors are stateless (`after_sequence`). Implementation status: tasks 4.1-4.10 code + migrations (0022/0023) landed 2026-09-01; exit gates and DB-backed test suites are pending the first full CI/DB run (do not check boxes until then).
 
 - [ ] **4.1** Create `conversations` table â€” `id uuidv7 pk`, `organization_id fk+RLS`, `channel_binding jsonb`, `participant_scope text`, `lifecycle/status enum active|archived|deleted`, `version int` (optimistic concurrency, `If-Match`/`expected_conversation_version`), `retention_class`, `created_at/updated_at` `engine_data_and_lifecycle.md:31-56, 116-129` â†’ `drizzle/00XX_conversations.sql`.
 
@@ -279,11 +283,13 @@ These are DONE â€” gates already hold:
 
 ### Phase 5 â€” Neryva MCP authority & Agent Studio integration
 
+> **Implementation status (2026-09-01):** tasks 5.1-5.11 code landed. Engine consumes `@neryva/mcp-contract` (file: dependency; the package now builds `dist/` with main/types entry points — services come from the `*_pb` GenService definitions, the legacy `*_connect` files are unused). ConnectRPC host: `src/transport/mcp/` (`fastifyConnectPlugin` registered onto the Engine's Fastify instance; smoke-tested over the Connect protocol). Capability tokens: HS256 via `src/common/auth/capability-token.ts` (`MCP_CAPABILITY_SIGNING_KEY`, fail-closed in production; minted at `POST /console/org/:orgId/runs/:runId/capability`, validated per-RPC against the RequestContext scope). Lease CAS, AppendRunEvents dedup, approvals, memory proposals, tool effects, checkpoints, FailRun + `runs.version` CAS live in `src/modules/conversations/mcp-authority.service.ts` (migration `0024_mcp_authority.sql`). Deferred: mTLS/SPIFFE workload identities (capability token is the authN/Z boundary today), `GetRunArtifact` (Unimplemented until Phase 7), usage-ledger entry inside CommitRunResult (Phase 8), RuntimeControlService client dispatch via outbox (Phase 6 dispatcher). Exit gates pending the first full CI/DB run.
+
 *Objective: Engine half of `neryva.mcp.v1` `engine_architecture.md:357-371` — **MCP contract is DONE in `../products/neryva_mcp/neryva-mcp-contract`** (sibling of `engine/`); this phase consumes it.*
 
 **Precondition â€” contract as dependency:**
 
-- `../products/neryva_mcp/neryva-mcp-contract/proto/neryva/mcp/*` (`buf.yaml`, `buf.gen.yaml`, generated `gen/ts`) + `@bufbuild/protobuf` + `@connectrpc/connect` `engine_architecture.md:137-138` â†’ published as internal package `@neryva/mcp-contracts`.
+- `../products/neryva_mcp/neryva-mcp-contract/proto/neryva/mcp/*` (`buf.yaml`, `buf.gen.yaml`, generated `gen/ts`) + `@bufbuild/protobuf` + `@connectrpc/connect` `engine_architecture.md:137-138` â†’ published as internal package `@neryva/mcp-contract` (singular - the actual name in `../products/neryva_mcp/neryva-mcp-contract/package.json:2`; docs citing `@neryva/mcp-contracts` are stale).
 - Engine imports generated types only â€” no hand-copied wire objects `engine_implementation_plan.md:605`.
 
 #### Tasks â€” authority surface
@@ -294,7 +300,7 @@ These are DONE â€” gates already hold:
 
 - [ ] **5.3** Issue + validate run-scoped capability tokens â€” `aud=neryva-agent-studio`, `organization_id`, `conversation_id`, `run_id`, assistant/policy versions, allowed operations set, `capability_id`/`nonce`, `iat`/`exp`, `kid`, optional `lease_epoch` â†’ `neryva_mcp_implementation_plan.md:682-718`. Every MCP server interceptor validates transport security â†’ request-size limits â†’ authentication â†’ trace extraction â†’ request validation (Protovalidate) â†’ scope/capability â†’ idempotency/replay â†’ authorization â†’ handler â†’ audit/metrics.
 
-- [ ] **5.4** Implement `AcquireOrRenewRunLease` + `ReleaseRunLease` â€” `run_leases (run_id pk, lease_owner, lease_epoch, lease_expires_at, heartbeat_at)` â€” CAS increment on renew; stale epoch `ABORTED` `neryva_mcp_implementation_plan.md:448`.
+- [ ] **5.4** Implement `AcquireOrRenewRunLease` + `ReleaseRunLease` — **pinned (2026-09-01): lease state lives on the `runs` row** (`lease_owner`, `lease_epoch`, `lease_expires_at`, `heartbeat_at` per task 4.4 / `engine_data_and_lifecycle.md:178-183`); there is **no separate `run_leases` table**. Renew is CAS (`UPDATE runs SET lease_epoch = lease_epoch + 1 WHERE id = $1 AND lease_epoch = $epoch`); stale epoch â†’ `ABORTED` `neryva_mcp_implementation_plan.md:448`.
 
 - [ ] **5.5** Implement `GetAuthorizedRunContext` manifest (bounded; filters in query, not after) â€” `assistant_version` + `policy_version` + `bounded recent messages` + `summary` + `approved memories` + `authorized knowledge refs` + `filtered tool descriptors` + budgets + `ArtifactRef`s `neryva_mcp_implementation_plan.md:556-582`.
 
@@ -308,7 +314,7 @@ These are DONE â€” gates already hold:
 
 - [ ] **5.10** Implement `AuthorizeToolCall` + `RecordToolOutcome` â€” scoped tool capability (bound to `run_id`/`step_id`/`tool_call_id`/`version`/`argument digest`) + durable `tool_effects` dedup `neryva_mcp_implementation_plan.md:585-596`.
 
-- [ ] **5.11** Implement terminal atomicity â€” `CommitRunResult`: validates capability + lease epoch â†’ inserts final assistant `messages` row + transitions `runs->SUCCEEDED` + emits durable `run_events` + usage ledger entry in **one** transaction â†’ idempotent retry returns same `message_id` `engine_implementation_plan.md:261-265`; `FailRun` analogue.
+- [ ] **5.11** Implement terminal atomicity â€” `CommitRunResult`: validates capability + lease epoch â†’ inserts final assistant `messages` row + transitions `runs->COMPLETED` (pinned: the terminal state name is `COMPLETED`, per `engine_data_and_lifecycle.md:163-170` and task 4.4's enum; `SUCCEEDED` elsewhere is stale) + emits durable `run_events` + usage ledger entry in **one** transaction â†’ idempotent retry returns same `message_id` `engine_implementation_plan.md:261-265`; `FailRun` analogue.
 
 - [ ] **5.12** Artifact authorization facade â€” 7 checks: `artifact_id`+`purpose`, run/org scope, short expiry, checksum, byte-range, content-type allowlist, encryption key policy, deletion status `neryva_mcp_implementation_plan.md:569-577`; `sha256` exactly 32 bytes validated at schema boundary; ref is opaque capability, not bearer URL.
 
@@ -341,6 +347,8 @@ These are DONE â€” gates already hold:
 ---
 
 ### Phase 6 â€” Outbox, inbox, broker & async workers
+
+> **Implementation status (2026-09-01):** 6.1/6.2 landed with Phase 4 (pinned decision, `drizzle/0023`); 6.7's DB idempotency tier pulled forward the same way. Phase 6 code: dispatcher (`src/common/infra/outbox/dispatcher.ts`) — PostgreSQL polling `FOR UPDATE SKIP LOCKED`, bounded FIFO batch, exp backoff + full jitter, dead-letter after `OUTBOX_MAX_ATTEMPTS`, stale-claim recovery via `claimed_at` (`drizzle/0025_outbox_dispatch.sql`), operator replay `replayDeadLetter`, metrics `outbox_published_total`/`outbox_retry_total`/`outbox_dead_letter_total`/`outbox_age_seconds`. Consumer contract (`consumer.ts`): inbox dedup BEFORE side effect, at-least-once with stale-PROCESSING reclaim, `PermanentConsumerError` skips the retry budget. First real consumer: `src/workers/run-dispatch.consumer.ts` — consumes `run.created`, delivers `StartRun` via `RuntimeControlService` (`src/transport/mcp/runtime-control.client.ts`, `NERYVA_RUNTIME_BASE_URL`; unconfigured = documented skip, run stays ACCEPTED) and advances ACCEPTEDâ†DISPATCHED with a lifecycle `run_event` + `run.dispatched` outbox row in the same TX. Worker host `src/workers/outbox-dispatcher.worker.ts` (`WORKERS__OUTBOX_ENABLED`, single-tick guard). 6.8: EventBus documented as hints-only (event-bus.ts header). NATS fan-out remains deferred to measurement (6.5/11.1). Exit gates (chaos tests, dashboards, backpressure load) pending the first full CI/DB run.
 
 *Objective: every async boundary durable, observable, replay-safe `engine_architecture.md:373-399`.*
 
@@ -375,6 +383,8 @@ These are DONE â€” gates already hold:
 
 ### Phase 7 â€” Files, uploads, knowledge & claim-check storage
 
+> **Implementation status (2026-09-01):** tasks 7.1-7.9 code landed (`drizzle/0026_knowledge.sql`, `src/modules/knowledge/`). pgvector added to the dev compose image (`pgvector/pgvector:pg16`) with `CREATE EXTENSION vector` in-migration. Upload flow: `POST /console/org/:orgId/uploads` (purpose + media-type allowlist + byte bound + declared sha256) â†’ presigned POST with the sha256 **bound into the SigV4 policy** (`x-amz-meta-sha256`) and an exact content-length window â†’ `completeUploadSession` verifies via SigV4 `headObject` (byte length + bound metadata) before the object enters the pipeline. Ingestion worker (`ingestion.service.ts`): UPLOADEDâ†’SCANNINGâ†’EXTRACTINGâ†’INDEXINGâ†’READY with SKIP LOCKED + `locked_at` lease, resume-safe (document_version uniqueness + chunk-sequence idempotency), bounded parsing (text/* + JSON only; others FAIL), malware scanner as a port (default `skipped` â€” ClamAV integration is the documented seam). Retrieval (`retrieval.service.ts`): tenant + ACL + state predicates in the SAME SQL as the `<=>` ordering â€” ACL before scoring; the embedding provider is a deterministic lexical hash (`EMBEDDING_PROVIDER=local`, documented non-semantic, dev/test). Memory (7.8, pinned here): proposals become `memory_items` only via console decision (`MemoryService.decide`), scope-authorized in `GetAuthorizedRunContext`; soft-delete with tombstone semantics. Claim-check facade: `ArtifactsService.dereference` (7 checks) + `McpAuthorityService.getRunArtifact` wired into the MCP `GetRunArtifact` RPC (short-TTL presigned GET, was `Unimplemented`). Retention classes carried on artifacts (7.9; lifecycle purge wiring is Phase 9). Exit gates (oversize/mime/checksum/malicious-archive tests, signed-URL cross-tenant, rebuild-from-source drill) pending the first full CI/DB run.
+
 *Objective: secure large-payload handling + rebuildable pipeline `engine_architecture.md:425-447` + `engine_data_and_lifecycle.md:263-299`.*
 
 - [ ] **7.1** Create `artifacts` table â€” `id`, `organization_id`, `owner_resource (purpose enum SOURCE_DOCUMENT|EXPORT|CHECKPOINT|TOOL_RESULT|TRANSCRIPT|COVER)`, `object_key` (opaque, tenant-bound prefix `org/{org_id}/...`), `content_type_detected`, `content_length`, `sha256`, `encryption_key_ref`, `scan_status`, `retention_class`, `expires_at`, `created_at` `engine_data_and_lifecycle.md:271-289` â†’ claim-check contract 11 fields `engine_architecture.md:399-414`. Purpose is allowlisted enum â€” ref cannot be recast `engine_data_and_lifecycle.md:290`.
@@ -406,7 +416,9 @@ These are DONE â€” gates already hold:
 
 ---
 
-### Phase 8 â€” Billing, quotas, entitlements & reconciliation
+### Phase 8
+
+> **Phase 8 implementation status (2026-09-01):** 8.5-8.8 code landed. Immutable `usage_ledger_entries` (`drizzle/0027`, `src/modules/billing/usage-ledger.service.ts`): idempotent append by (org, usage_event_id), typed conflict on key reuse with different payload, corrections as `reversal_of` compensating entries — history never rewritten. Durable quota reservations RESERVED→COMMITTED/RELEASED with atomic check under row lock + expiry sweep (8.6); entitlement snapshot governs rejection — no provider call on the quota path (8.9). Reconciliation pass (8.7) flags negative non-compensating quantities and unbalanced reversals into `discrepant` + run records. Webhook inbox (8.8) wired into `stripe.controller.ts`: dedup by (provider, provider_event_id) BEFORE handleEvent, failures → `reconciliation_required`. 8.10: `UsageLedgerService.listForRun` + `UsageLedgerConsumer` records run completions via the outbox. Exit gates pending the first full CI/DB run. â€” Billing, quotas, entitlements & reconciliation
 
 *Objective: explainable, idempotent, outage-independent `engine_architecture.md:401-425` + `engine_data_and_lifecycle.md:324-353`.*
 
@@ -441,7 +453,9 @@ These are DONE â€” gates already hold:
 
 ---
 
-### Phase 9 â€” Audit, retention, export, legal hold & deletion
+### Phase 9
+
+> **Phase 9 implementation status (2026-09-01):** 9.3-9.8 code landed (`drizzle/0028`, `src/modules/lifecycle/`). Retention policies with keep_days rules + fail-safe pure evaluator (`retention-rules.ts`); legal holds block purge (state=blocked) while unrelated retention continues; purge workflow executes the PINNED deletion order one durable step per tick (authorize→holds→mark_unavailable→derived-outbox→objects→content→tombstone→done), resumable via `locked_at` lease; `StorageService.deleteObject` (signed DELETE) removes objects server-side; tombstones give typed post-purge rejection (`assertNotTombstoned`); exports snapshot an RLS-scoped manifest with a ONE-TIME download token (sha256-at-rest); `data_access_records` is the separate sensitive-read stream (9.7). 9.9 documented in ops/runbooks/legal-hold-and-purge.md. Exit gates pending the first full CI/DB run. â€” Audit, retention, export, legal hold & deletion
 
 *Objective: lifecycle as a product capability `engine_architecture.md:462-491` + `engine_data_and_lifecycle.md:359-436`.*
 
@@ -477,7 +491,9 @@ These are DONE â€” gates already hold:
 
 ---
 
-### Phase 10 â€” Enterprise operations & production hardening
+### Phase 10
+
+> **Phase 10 implementation status (2026-09-01):** code-side items done — graceful shutdown verified in main.ts (10.8), CI workflow covers typecheck/lint/unit + migration smoke on pgvector/pgvector:pg16 (10.2 partial), ASVS control mapping (`docs/architecture/engine/asvs-mapping.md`, 10.1), SLO targets (`ops/slo.md`, 10.5), runbook index + outbox/legal-hold runbooks (`ops/runbooks/`, 10.12 support). Operational items that require a live environment remain open: red-team (10.4), credential rotation drill (10.3), degradation drills (10.7), PITR/restore rehearsal with measured RPO/RTO (10.9-10.12). Phase 11 remains measurement-gated (skip). â€” Enterprise operations & production hardening
 
 *Objective: `engine_implementation_plan.md:500-531` â€” security, reliability, DR.*
 
@@ -686,4 +702,6 @@ threat model and platform kernel
 - `../products/neryva_mcp/neryva-mcp-contract` (sibling of `engine/`) — canonical `neryva.mcp.v1` contract (consume via generated package, do not copy).
 - `docs/architecture/main.md:237-313` â€” Neryva MCP flow + capability semantics for Engineâ€“Studio.
 - `ownership-map.json:1` â€” migration ownership (only `engine-ts` tables altered by `engine/` migrations).
+
+
 

@@ -1,14 +1,14 @@
-import { Injectable } from '@nestjs/common';
+﻿import { Injectable } from '@nestjs/common';
 import { SummaryProvider } from '../console/manifest.schema';
 import { ProjectsService } from '../organizations/projects.service';
 import { UsageQueryService } from '../billing/usage-query.service';
 
 /**
  * Agent Studio's engine-side summary (S-3): conversations (7d), projects,
- * and month-to-date studio spend — the KPIs the ENGINE can compute from its
+ * and month-to-date studio spend â€” the KPIs the ENGINE can compute from its
  * own planes. Resolution rate + guardrail blocks arrive with the runtime's
  * observability feed (handover A-3/A-4); until then those rows stay absent
- * (the empty-KPI fallback is per-row, not per-card — the contract allows a
+ * (the empty-KPI fallback is per-row, not per-card â€” the contract allows a
  * product to ship the KPIs it has). Registered into the console's summary
  * registry at boot, replacing the console's interim provider.
  */
@@ -43,7 +43,8 @@ export class AgentStudioSummary implements SummaryProvider {
       product: this.productKey,
       kpis,
       alerts: [],
-      primary_cta: { label: 'Manage', route: '/console/agent-studio/dashboard' },
+      primary_cta: { label: 'Manage', route: '/console/studio-furniture/dashboard' },
     };
   }
 }
+

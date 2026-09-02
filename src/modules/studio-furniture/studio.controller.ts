@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, UseGuards } from '@nestjs/common';
+﻿import { Body, Controller, Get, Headers, Param, Post, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { env } from '../../common/config/env';
@@ -18,14 +18,14 @@ import { StudioKeysService } from './keys.service';
 import { planFor } from './plans';
 
 /**
- * The studio product console APIs (S-2…S-4): the surfaces the web app's
+ * The studio product console APIs (S-2â€¦S-4): the surfaces the web app's
  * `/studio` area calls. Org context resolves from X-Neryva-Org (the org
  * picker header) via the guards. Every route is L1 + membership; product
  * routes additionally require the entitlement (403 entitlement_required /
  * 402 past_due per the access-model). Trial start is a purchase-adjacent
  * act: owner/billing + a fresh MFA proof.
  */
-@Controller('console/agent-studio')
+@Controller('console/studio-furniture')
 @AuthLayer('l1')
 @UseGuards(OrgRolesGuard, EntitlementGuard)
 export class StudioController {
@@ -47,7 +47,7 @@ export class StudioController {
     return orgId;
   }
 
-  /** The manifest's declared summary route (S-3) — same payload the card renders. */
+  /** The manifest's declared summary route (S-3) â€” same payload the card renders. */
   @Get('summary')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
   @RequireEntitlement('agent_studio')
@@ -61,7 +61,7 @@ export class StudioController {
     };
   }
 
-  /** Start a trial (S-2): none → trial on the default plan, limits flow into quotas. */
+  /** Start a trial (S-2): none â†’ trial on the default plan, limits flow into quotas. */
   @Post('trial')
   @Roles('owner', 'billing')
   @UseGuards(StepUpGuard)
@@ -168,7 +168,7 @@ export class StudioController {
   /**
    * Deep links to runtime-served studio surfaces (S-4): evaluations and
    * policies homestead in the satellite until/unless they move into the
-   * engine — the manifest's satellite route prefixes are the single source;
+   * engine â€” the manifest's satellite route prefixes are the single source;
    * links resolve against the engine edge (the proxy routes /v1 + /surfaces
    * to the satellite).
    */
@@ -192,3 +192,4 @@ export class StudioController {
     };
   }
 }
+

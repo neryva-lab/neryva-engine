@@ -21,18 +21,32 @@ export const ERROR_CODES = {
   CONFLICT: 'conflict',
   INTERNAL: 'internal_error',
   SERVICE_UNAVAILABLE: 'service_unavailable',
+  SERIALIZATION_FAILURE: 'serialization_failure',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
 
-export class ApiError extends HttpException {
-  readonly code: ErrorCode;
-  readonly details?: unknown;
+export type Retryability = 'retry' | 'no-retry' | 'retry-after';
 
-  constructor(status: HttpStatus, code: ErrorCode, message: string, details?: unknown) {
+export class ApiError extends HttpException {
+  declare readonly code: ErrorCode;
+  declare readonly details: unknown | undefined;
+  readonly retryability: Retryability;
+  readonly internalCause: unknown | undefined;
+
+  constructor(
+    status: HttpStatus,
+    code: ErrorCode,
+    message: string,
+    details?: unknown,
+    opts?: { retryability?: Retryability; cause?: unknown },
+  ) {
     super({ code, message, details }, status);
-    this.code = code;
-    this.details = details;
+    // Bypass HttpException's `cause` constructor param (Nest 11) by assigning via defineProperty
+    Object.defineProperty(this, 'code', { value: code, enumerable: true });
+    Object.defineProperty(this, 'details', { value: details, enumerable: true });
+    this.retryability = opts?.retryability ?? (status >= 500 ? 'retry' : 'no-retry');
+    this.internalCause = opts?.cause;
   }
 
   static unauthenticated(message = 'Authentication required'): ApiError {
@@ -86,7 +100,14 @@ export class ApiError extends HttpException {
   }
 
   static conflict(message: string, details?: unknown): ApiError {
-    return new ApiError(HttpStatus.CONFLICT, ERROR_CODES.CONFLICT, message, details);
+    return new ApiError(HttpStatus.CONFLICT, ERROR_CODES.CONFLICT, message, details, { retryability: 'no-retry' });
+  }
+
+  static serializationFailure(cause?: unknown): ApiError {
+    return new ApiError(HttpStatus.CONFLICT, ERROR_CODES.SERIALIZATION_FAILURE, 'serialization failure, retry', undefined, {
+      retryability: 'retry',
+      cause,
+    });
   }
 
   /** A backing subsystem (e.g. object storage) is not configured/reachable. */

@@ -1,4 +1,4 @@
-import { Injectable, Module, OnModuleInit } from '@nestjs/common';
+﻿import { Injectable, Module, OnModuleInit } from '@nestjs/common';
 import { HealthRegistry } from '../../common/health/health.controller';
 import { DbService } from '../../common/infra/db/db.service';
 import { SummaryProviderRegistry } from '../console/summary-provider.registry';
@@ -12,7 +12,7 @@ import { StudioKeysService } from './keys.service';
 /**
  * Boot hook: the product registers its REAL summary provider over the
  * console's interim built-in (module init order guarantees the product
- * registers after the console — NestJS initializes dependencies first).
+ * registers after the console â€” NestJS initializes dependencies first).
  * This is the product-registration contract in miniature: the product
  * arrives, registers, and the shell never changed.
  */
@@ -29,10 +29,10 @@ export class AgentStudioBoot implements OnModuleInit {
 }
 
 /**
- * The Agent Studio product furniture (ledger agent-studio S-1…S-4): the
+ * The Agent Studio product furniture (ledger studio-furniture S-1â€¦S-4): the
  * studio product registration inside the engine. The RUNTIME (sessions,
  * threads, gateway, guardrails) stays in the agent-runtime satellite per
- * ADR-006 — this module is thin product furniture: entitlement, summary,
+ * ADR-006 â€” this module is thin product furniture: entitlement, summary,
  * org-level views, key bindings, metering tag.
  *
  * Registered when MODULES__AGENT_STUDIO_ENABLED (requires console + billing
@@ -46,6 +46,7 @@ export class AgentStudioBoot implements OnModuleInit {
 })
 export class AgentStudioModule {
   constructor(db: DbService, healthRegistry: HealthRegistry) {
-    healthRegistry.register('agent-studio', () => db.check());
+    healthRegistry.register('studio-furniture', () => db.check());
   }
 }
+

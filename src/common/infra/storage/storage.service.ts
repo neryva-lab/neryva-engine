@@ -45,6 +45,7 @@ export class StorageService {
     contentType: string;
     sizeRange?: { min: number; max: number };
     expiresIn?: number;
+    metadata?: Record<string, string>;
   }): { url: string; fields: Record<string, string>; expiresIn: number } {
     this.requireAvailable();
     const expiresIn = clamp(input.expiresIn ?? 300, 60, 3600);
@@ -57,6 +58,12 @@ export class StorageService {
     ];
     if (input.sizeRange) {
       conditions.push(['content-length-range', String(input.sizeRange.min), String(input.sizeRange.max)]);
+    }
+    const metadataFields: Record<string, string> = {};
+    for (const [name, value] of Object.entries(input.metadata ?? {})) {
+      const header = `x-amz-meta-${name.toLowerCase()}`;
+      conditions.push({ [header]: value });
+      metadataFields[header] = value;
     }
     const policy = Buffer.from(
       JSON.stringify({
@@ -74,6 +81,7 @@ export class StorageService {
       fields: {
         key: input.key,
         'Content-Type': input.contentType,
+        ...metadataFields,
         policy,
         'x-amz-algorithm': 'AWS4-HMAC-SHA256',
         'x-amz-credential': `${env.S3_ACCESS_KEY_ID}/${scope}`,
@@ -135,6 +143,72 @@ export class StorageService {
       throw new Error('public object URLs require S3_PUBLIC_BASE_URL (CDN or public bucket base)');
     }
     return `${env.S3_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key.split('/').map(encodeURIComponent).join('/')}`;
+  }
+
+  /**
+   * Tenant-bound key enforcement (invariant 3): every knowledge object key
+   * must live under the caller's org prefix. Never trust a client-built key.
+   */
+  assertTenantKey(key: string, orgId: string): void {
+    if (!key.startsWith(`org/${orgId}/`)) {
+      throw new Error(`object key escapes tenant prefix (expected org/${orgId}/...)`);
+    }
+  }
+
+  /**
+   * HEAD an object (SigV4-signed) — used by the knowledge pipeline to verify
+   * an upload's byte length + bound metadata (sha256) before ingestion.
+   */
+  async headObject(key: string): Promise<{ contentLength: number; metadata: Record<string, string> } | null> {
+    this.requireAvailable();
+    const { amzDate, scope, signingKey } = this.signingMaterial();
+    const url = new URL(this.objectUrl(key));
+    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+    const canonicalHeaders = `host:${url.host}\nx-amz-content-sha256:UNSIGNED-PAYLOAD\nx-amz-date:${amzDate}\n`;
+    const canonicalRequest = ['HEAD', url.pathname, '', canonicalHeaders, signedHeaders, 'UNSIGNED-PAYLOAD'].join('\n');
+    const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, createHash('sha256').update(canonicalRequest).digest('hex')].join('\n');
+    const signature = createHmac('sha256', signingKey).update(stringToSign, 'utf8').digest('hex');
+    const auth = `AWS4-HMAC-SHA256 Credential=${env.S3_ACCESS_KEY_ID}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+    const response = await fetch(url, { method: 'HEAD', headers: { Authorization: auth, 'x-amz-date': amzDate, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw new Error(`object HEAD failed with status ${response.status}`);
+    }
+    const metadata: Record<string, string> = {};
+    response.headers.forEach((value, name) => {
+      if (name.startsWith('x-amz-meta-')) {
+        metadata[name.slice('x-amz-meta-'.length)] = value;
+      }
+    });
+    return { contentLength: Number(response.headers.get('content-length') ?? 0), metadata };
+  }
+
+  /**
+   * Server-side signed DELETE (Phase 9 purge): SigV4 DELETE so the purge
+   * worker removes objects without an S3 SDK and without routing deletes
+   * through a client-held presigned URL.
+   */
+  async deleteObject(key: string): Promise<boolean> {
+    this.requireAvailable();
+    const { amzDate, scope, signingKey } = this.signingMaterial();
+    const url = new URL(this.objectUrl(key));
+    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+    const canonicalHeaders = `host:${url.host}\nx-amz-content-sha256:UNSIGNED-PAYLOAD\nx-amz-date:${amzDate}\n`;
+    const canonicalRequest = ['DELETE', url.pathname, '', canonicalHeaders, signedHeaders, 'UNSIGNED-PAYLOAD'].join('\n');
+    const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, createHash('sha256').update(canonicalRequest).digest('hex')].join('\n');
+    const signature = createHmac('sha256', signingKey).update(stringToSign, 'utf8').digest('hex');
+    const auth = `AWS4-HMAC-SHA256 Credential=${env.S3_ACCESS_KEY_ID}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    const response = await fetch(url, { method: 'DELETE', headers: { Authorization: auth, 'x-amz-date': amzDate, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
+    if (response.status === 404) {
+      return false;
+    }
+    if (!response.ok && response.status !== 204) {
+      throw new Error(`object DELETE failed with status ${response.status}`);
+    }
+    return true;
   }
 
   // ── internals ────────────────────────────────────────────────────────────

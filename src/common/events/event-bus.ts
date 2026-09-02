@@ -7,6 +7,13 @@ import { Injectable, Logger } from '@nestjs/common';
  * never breaks the others, and errors are logged with the event name.
  *
  * Not a message queue: durable/async work belongs to BullMQ namespaces.
+ *
+ * Phase 6.8 seam (ledger): the EventBus is NOT a business delivery path.
+ * Every durable business fact gains an `outbox_events` row in the same
+ * transaction that writes the fact, and async delivery goes through the
+ * outbox dispatcher + inbox dedup (src/common/infra/outbox/*). The EventBus
+ * remains only for best-effort in-process hints (cache invalidation,
+ * projection nudges) where losing a signal is acceptable.
  */
 type Handler<T> = (event: T) => void | Promise<void>;
 

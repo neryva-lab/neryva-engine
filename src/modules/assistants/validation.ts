@@ -1,6 +1,21 @@
 import { z } from 'zod';
 
+/** Provider-neutral generation parameters (contract v1.1 ModelParams). */
+export const modelParamsSchema = z
+  .object({
+    temperature: z.number().min(0).max(2).optional(),
+    max_output_tokens: z.number().int().min(1).max(200_000).optional(),
+    top_p: z.number().gt(0).max(1).optional(),
+    reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
+  })
+  .strict();
+
 export const assistantPayloadSchema = z.object({
+  // Schema v2: the system prompt. Optional at the type level so legacy v1
+  // payloads still validate; the publish path rejects v2 drafts without one
+  // (a published assistant without instructions cannot execute).
+  instructions: z.string().min(1).max(32_768).optional(),
+  model_params: modelParamsSchema.optional(),
   model_policy: z.object({
     allowed_models: z.array(z.string().min(1)).min(1).max(20),
     fallback_enabled: z.boolean().optional().default(false),
@@ -18,6 +33,8 @@ export const assistantPayloadSchema = z.object({
           name: z.string().min(1).max(64),
           access: z.enum(['read', 'write']),
           approval: z.enum(['required', 'optional']).optional().default('optional'),
+          /** Pin to a tool_catalog entry: publish rejects a mutated/absent schema. */
+          schema_hash: z.string().length(64).optional(),
         }),
       )
       .max(50)
@@ -37,6 +54,7 @@ export const assistantPayloadSchema = z.object({
 });
 
 export type AssistantPayload = z.infer<typeof assistantPayloadSchema>;
+export type ModelParams = z.infer<typeof modelParamsSchema>;
 
 /** Shared redaction before persistence — secrets must never land in payload. */
 const SECRET_PATTERNS = [/api[_-]?key/i, /secret/i, /password/i, /token/i, /bearer/i];
@@ -62,6 +80,16 @@ export function validateAssistantPayload(payload: unknown): { ok: true; normaliz
     return { ok: false, issues: result.error.flatten() };
   }
   // Capability registry check (model allowlist) is wired in the publish path where org entitlements are available.
-  // For Phase 3.3, we validate structurally here; Phase 3.5 wires catalog checks.
   return { ok: true, normalized: result.data };
+}
+
+/**
+ * Publish-time gate for schema v2: a published assistant must carry
+ * instructions — the ContextManifest feeds them to the model verbatim, and a
+ * run without a system prompt cannot execute deterministically.
+ */
+export function assertPublishable(payload: AssistantPayload): void {
+  if (typeof payload.instructions !== 'string' || payload.instructions.trim().length === 0) {
+    throw new Error('schema v2 assistants require non-empty instructions to publish');
+  }
 }

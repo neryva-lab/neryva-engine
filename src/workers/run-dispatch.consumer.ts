@@ -58,7 +58,10 @@ export class RunDispatchConsumer implements OutboxConsumer {
       conversationId,
       runId,
       assistantVersionId,
-      allowedOps: ['lease', 'append_events', 'commit', 'observe', 'tool'],
+      // Full run-authority op set — a dispatch token missing an op (e.g.
+      // 'context' or 'checkpoint') fails the RPC mid-run with no way for
+      // Studio to re-mint (no L1 credentials on the runtime).
+      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe'],
       subject: 'agent-studio-runtime',
     });
 
@@ -106,14 +109,18 @@ export class RunDispatchConsumer implements OutboxConsumer {
       assertRunTransition(run.state, 'DISPATCHED');
       const insertedEvent = await tx
         .insert(runEvents)
-        .values({
-          id: uuidv7(),
-          runId: run.id,
-          organizationId: orgId,
-          eventType: String(EventType.RUN_LIFECYCLE),
-          payload: { case: 'lifecycle', value: { fromState: 'ACCEPTED', toState: 'DISPATCHED', workflowId } },
-          producerIdentity: 'engine:run-dispatch',
-        })
+        .values((() => {
+          const rowId = uuidv7();
+          return {
+            id: rowId,
+            eventId: rowId,
+            runId: run.id,
+            organizationId: orgId,
+            eventType: String(EventType.RUN_LIFECYCLE),
+            payload: { case: 'lifecycle', value: { fromState: 'ACCEPTED', toState: 'DISPATCHED', workflowId } },
+            producerIdentity: 'engine:run-dispatch',
+          };
+        })())
         .returning({ engineSequence: runEvents.engineSequence });
       await tx
         .update(runs)

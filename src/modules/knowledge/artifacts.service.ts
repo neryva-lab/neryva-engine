@@ -18,12 +18,26 @@ import { ARTIFACT_PURPOSES } from './schema';
  * Dereferencing an artifact is a FRESH authorization pass (the 7 checks);
  * an ArtifactRef is a capability, not a bearer URL.
  */
-const MEDIA_TYPE_ALLOWLIST = ['text/plain', 'text/markdown', 'text/csv', 'application/json'];
+const MEDIA_TYPE_ALLOWLIST = [
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+  // Harness attachment media (chat images / PDFs).
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'application/pdf',
+];
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'text/plain': 'txt',
   'text/markdown': 'md',
   'text/csv': 'csv',
   'application/json': 'json',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'application/pdf': 'pdf',
 };
 
 @Injectable()

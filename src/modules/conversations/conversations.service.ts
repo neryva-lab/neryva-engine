@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gt, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
+import { Observable } from 'rxjs';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
@@ -14,13 +15,26 @@ import {
   messages,
   runEvents,
   runs,
+  messageFeedback,
   Conversation,
+  MessageFeedback,
   Message,
   Run,
   RunEvent,
   MAX_MESSAGE_TEXT_LENGTH,
 } from './schema';
+
+/** Wire enum (numeric string) → semantic SSE event names. */
+const SSE_EVENT_NAMES: Record<string, string> = {
+  '2': 'delta', // EVENT_TYPE_ASSISTANT_CHUNK — token-stream channel
+  '5': 'retrieval', // EVENT_TYPE_RETRIEVAL
+  '6': 'approval', // EVENT_TYPE_APPROVAL
+  '11': 'terminal', // EVENT_TYPE_TERMINAL
+};
+
 import { assertRunTransition, isRunState, isTerminalRun } from './state-machine';
+import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
+import { usageLedgerEntries } from '../billing/usage-ledger.schema';
 
 /**
  * Conversation plane service — Phase 4 (imp/ledger.md 4.7-4.10).
@@ -45,6 +59,7 @@ export class ConversationsService {
   constructor(
     private readonly db: DbService,
     private readonly audit: AuditService,
+    private readonly purge: RetentionPurgeService,
   ) {}
 
   // ── Conversation lifecycle ───────────────────────────────────────────────
@@ -99,6 +114,7 @@ export class ConversationsService {
   async getConversation(orgId: string, conversationId: string): Promise<Conversation | null> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
+    await this.purge.assertNotTombstoned('conversation', conversationId);
     const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1));
     return rows[0] ?? null;
   }
@@ -305,8 +321,14 @@ export class ConversationsService {
   async getRun(orgId: string, runId: string): Promise<Run | null> {
     assertUuid(orgId, 'orgId');
     assertUuid(runId, 'runId');
+    await this.purge.assertNotTombstoned('run', runId);
     const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(runs).where(eq(runs.id, runId)).limit(1));
-    return rows[0] ?? null;
+    const run = rows[0] ?? null;
+    if (run) {
+      // A purged conversation rejects every reference to its runs (typed 410).
+      await this.purge.assertNotTombstoned('conversation', run.conversationId);
+    }
+    return run;
   }
 
   async listRuns(orgId: string, conversationId: string, opts?: { limit?: number }): Promise<Run[]> {
@@ -325,9 +347,20 @@ export class ConversationsService {
   /**
    * Terminal atomic commit (4.8): assistant message + run COMPLETED +
    * terminal run_event + outbox row in ONE transaction. Idempotent: a retry
-   * on a COMPLETED run replays the stored result_message_id.
+   * on a COMPLETED run replays the stored result_message_id. `expectedVersion`
+   * is the MCP expected_version CAS, evaluated under the row lock (never a
+   * pre-flight read); `leaseEpoch` fences a deposed lease holder.
    */
-  async commitRunResult(input: { orgId: string; runId: string; content: Record<string, unknown>; actor: string }): Promise<{ message_id: string; run_id: string; replay: boolean }> {
+  async commitRunResult(input: {
+    orgId: string;
+    runId: string;
+    content: Record<string, unknown>;
+    actor: string;
+    expectedVersion?: number;
+    leaseEpoch?: number;
+    /** Contract v1.1 UsageEntry — recorded in the SAME TX as the terminal commit. */
+    usage?: { provider: string; model: string; promptTokens: number; completionTokens: number; totalTokens: number };
+  }): Promise<{ message_id: string; run_id: string; replay: boolean }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.runId, 'runId');
     validateMessageContent(input.content);
@@ -344,10 +377,27 @@ export class ConversationsService {
         }
         return { message_id: run.resultMessageId, run_id: run.id, replay: true };
       }
+      if (input.leaseEpoch !== undefined && input.leaseEpoch !== run.leaseEpoch) {
+        throw ApiError.conflict('stale lease epoch: run was re-leased or the lease expired', {
+          token_epoch: input.leaseEpoch,
+          run_epoch: run.leaseEpoch,
+        });
+      }
+      if (input.expectedVersion !== undefined && input.expectedVersion !== run.version) {
+        throw ApiError.conflict('stale run version', { expected: input.expectedVersion, actual: run.version });
+      }
       if (!isRunState(run.state)) {
         throw ApiError.internal();
       }
       assertRunTransition(run.state, 'COMPLETED');
+
+      // The conversation row lock makes the MAX(sequence)+1 allocation
+      // airtight against ANY second writer (the one-active-turn index keeps
+      // this contention near zero; the lock makes it correct, not lucky).
+      const conv = await tx.select().from(conversations).where(eq(conversations.id, run.conversationId)).for('update').limit(1);
+      if (conv.length === 0) {
+        throw ApiError.notFound('conversation');
+      }
 
       const sequence = await nextMessageSequence(tx, run.conversationId);
       const messageId = uuidv7();
@@ -362,14 +412,18 @@ export class ConversationsService {
 
       const insertedEvent = await tx
         .insert(runEvents)
-        .values({
-          id: uuidv7(),
-          runId: run.id,
-          organizationId: input.orgId,
-          eventType: 'run.completed',
-          payload: { message_id: messageId, terminal_reason: 'completed' },
-          producerIdentity: 'engine:conversations',
-        })
+        .values((() => {
+          const rowId = uuidv7();
+          return {
+            id: rowId,
+            eventId: rowId,
+            runId: run.id,
+            organizationId: input.orgId,
+            eventType: 'run.completed',
+            payload: { message_id: messageId, terminal_reason: 'completed' },
+            producerIdentity: 'engine:conversations',
+          };
+        })())
         .returning({ engineSequence: runEvents.engineSequence });
 
       await tx
@@ -384,6 +438,38 @@ export class ConversationsService {
         })
         .where(eq(runs.id, run.id));
 
+      // The final assistant message is a conversation mutation — bump the
+      // optimistic-concurrency version alongside it.
+      await tx
+        .update(conversations)
+        .set({ version: conv[0].version + 1, updatedAt: new Date().toISOString() })
+        .where(eq(conversations.id, run.conversationId));
+
+      // Contract v1.1: usage rides the terminal commit — append-only ledger
+      // entry in the SAME transaction. A replayed commit short-circuits above
+      // (COMPLETED) so the entry can never be written twice.
+      if (input.usage && input.usage.totalTokens > 0) {
+        await tx.insert(usageLedgerEntries).values({
+          id: uuidv7(),
+          organizationId: input.orgId,
+          usageEventId: `commit:${run.id}`,
+          sourceType: 'run',
+          sourceId: run.id,
+          runId: run.id,
+          messageId,
+          usageKind: 'model_tokens',
+          unit: 'tokens',
+          quantity: String(input.usage.totalTokens),
+          provider: input.usage.provider.slice(0, 64),
+          model: input.usage.model.slice(0, 128),
+          idempotencyKey: `commit-usage:${run.id}`,
+          metadata: {
+            prompt_tokens: input.usage.promptTokens,
+            completion_tokens: input.usage.completionTokens,
+          },
+        });
+      }
+
       await recordOutboxEvent(tx, {
         aggregateType: 'run',
         aggregateId: run.id,
@@ -394,6 +480,94 @@ export class ConversationsService {
       });
 
       return { message_id: messageId, run_id: run.id, replay: false };
+    });
+  }
+
+  /** Set/update the human-facing conversation title (drizzle/0033). */
+  async setTitle(input: { orgId: string; conversationId: string; title: string; actor: string }): Promise<Conversation> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.conversationId, 'conversationId');
+    const title = input.title.trim().slice(0, 256);
+    if (!title) {
+      throw ApiError.validation({ title: 'must not be empty' });
+    }
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .update(conversations)
+        .set({ title, updatedAt: new Date().toISOString() })
+        .where(and(eq(conversations.id, input.conversationId), eq(conversations.organizationId, input.orgId)))
+        .returning();
+      if (rows.length === 0) {
+        throw ApiError.notFound('conversation');
+      }
+      return rows[0];
+    });
+  }
+
+  /**
+   * Record/update per-message feedback (drizzle/0034). Latest review wins per
+   * (message, account); every write emits an outbox event for the eval
+   * pipeline — the stream, not the table, is the integration surface.
+   */
+  async recordFeedback(input: {
+    orgId: string;
+    conversationId: string;
+    messageId: string;
+    accountId: string;
+    rating: 'up' | 'down';
+    reason?: string;
+    comment?: string;
+  }): Promise<MessageFeedback> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.conversationId, 'conversationId');
+    assertUuid(input.messageId, 'messageId');
+    assertUuid(input.accountId, 'accountId');
+    if (input.comment && input.comment.length > 2048) {
+      throw ApiError.validation({ comment: 'max 2048 chars' });
+    }
+    if (input.reason && input.reason.length > 64) {
+      throw ApiError.validation({ reason: 'max 64 chars' });
+    }
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const msg = await tx
+        .select({ id: messages.id, conversationId: messages.conversationId })
+        .from(messages)
+        .where(and(eq(messages.id, input.messageId), eq(messages.organizationId, input.orgId)))
+        .limit(1);
+      if (msg.length === 0 || msg[0].conversationId !== input.conversationId) {
+        throw ApiError.notFound('message');
+      }
+      const rows = await tx
+        .insert(messageFeedback)
+        .values({
+          id: uuidv7(),
+          organizationId: input.orgId,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          accountId: input.accountId,
+          rating: input.rating,
+          reason: input.reason ?? null,
+          comment: input.comment ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [messageFeedback.messageId, messageFeedback.accountId],
+          set: {
+            rating: input.rating,
+            reason: input.reason ?? null,
+            comment: input.comment ?? null,
+            updatedAt: new Date().toISOString(),
+          },
+        })
+        .returning();
+      await recordOutboxEvent(tx, {
+        aggregateType: 'message',
+        aggregateId: input.messageId,
+        organizationId: input.orgId,
+        eventType: 'message.feedback.recorded',
+        partitionKey: input.conversationId,
+        payload: { message_id: input.messageId, conversation_id: input.conversationId, account_id: input.accountId, rating: input.rating },
+      });
+      return rows[0];
     });
   }
 
@@ -416,14 +590,18 @@ export class ConversationsService {
 
       const insertedEvent = await tx
         .insert(runEvents)
-        .values({
-          id: uuidv7(),
-          runId: run.id,
-          organizationId: input.orgId,
-          eventType: 'run.canceled',
-          payload: { reason: input.reason ?? 'canceled_by_principal' },
-          producerIdentity: 'engine:conversations',
-        })
+        .values((() => {
+          const rowId = uuidv7();
+          return {
+            id: rowId,
+            eventId: rowId,
+            runId: run.id,
+            organizationId: input.orgId,
+            eventType: 'run.canceled',
+            payload: { reason: input.reason ?? 'canceled_by_principal' },
+            producerIdentity: 'engine:conversations',
+          };
+        })())
         .returning({ engineSequence: runEvents.engineSequence });
 
       const updated = await tx
@@ -477,6 +655,88 @@ export class ConversationsService {
     const nextCursor = rows.length === limit ? rows[rows.length - 1].engineSequence : null;
     return { events: rows, next_cursor: nextCursor };
   }
+
+  /**
+   * SSE event stream (ledger 4.10): replays run_events strictly after
+   * `lastEventId` (the SSE Last-Event-ID, an engine_sequence) and follows the
+   * run until terminal or the duration cap. Replay is identical for a given
+   * cursor — events are immutable and engine_sequence is the authoritative
+   * order — so reconnects never gap or duplicate.
+   */
+  streamRunEvents(orgId: string, runId: string, lastEventId = 0): Observable<SseMessage> {
+    assertUuid(orgId, 'orgId');
+    assertUuid(runId, 'runId');
+    const pollMs = 1_000;
+    const maxDurationMs = 5 * 60_000;
+    const batchLimit = 200;
+
+    return new Observable<SseMessage>((subscriber) => {
+      let cursor = Number.isFinite(lastEventId) && lastEventId >= 0 ? Math.floor(lastEventId) : 0;
+      let closed = false;
+      const startedAt = Date.now();
+
+      const finish = (): void => {
+        if (!closed) {
+          closed = true;
+          clearInterval(timer);
+          subscriber.complete();
+        }
+      };
+      const timer = setInterval(() => {
+        if (closed) {
+          return;
+        }
+        if (Date.now() - startedAt > maxDurationMs) {
+          // Duration cap: the client reconnects with the last Event-ID — the
+          // replay contract makes that seamless.
+          finish();
+          return;
+        }
+        void this.db.withOrg(orgId, async (tx) => {
+          const runRows = await tx.select().from(runs).where(eq(runs.id, runId)).limit(1);
+          if (runRows.length === 0) {
+            subscriber.next({ event: 'error', data: 'not_found' });
+            finish();
+            return;
+          }
+          const run = runRows[0];
+          const rows = await tx
+            .select()
+            .from(runEvents)
+            .where(and(eq(runEvents.runId, runId), gt(runEvents.engineSequence, cursor)))
+            .orderBy(asc(runEvents.engineSequence))
+            .limit(batchLimit);
+          for (const e of rows) {
+            cursor = e.engineSequence;
+            // Numeric wire enum (wireEventTypeToStore) → stable stream names;
+            // assistant chunks stream as `delta` so consumers get a
+            // token-stream channel from the same durable replay cursor.
+            const eventName = SSE_EVENT_NAMES[e.eventType] ?? e.eventType;
+            subscriber.next({ id: String(e.engineSequence), event: eventName, data: e.payload ?? {} });
+          }
+          if (isRunState(run.state) && isTerminalRun(run.state) && rows.length < batchLimit) {
+            // Terminal state observed and the tail has been flushed.
+            finish();
+          }
+        }).catch(() => {
+          // Transient DB error: keep the stream open — the next tick retries.
+        });
+      }, pollMs);
+
+      return () => {
+        closed = true;
+        clearInterval(timer);
+      };
+    });
+  }
+}
+
+/** SSE frame (Nest @Sse message shape). */
+export interface SseMessage {
+  id?: string;
+  event?: string;
+  data: unknown;
+  retry?: number;
 }
 
 async function nextMessageSequence(tx: NodePgDatabase, conversationId: string): Promise<number> {

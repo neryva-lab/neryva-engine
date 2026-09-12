@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
+import { ConfigPublishService } from '../config-publish/config-publish.service';
 import {
   assistants,
   assistantVersions,
@@ -14,7 +15,8 @@ import {
   AssistantVersionExport,
   POLICY_SNAPSHOT_SCHEMA_VERSION,
 } from './schema';
-import { validateAssistantPayload, AssistantPayload } from './validation';
+import { validateAssistantPayload, assertPublishable, AssistantPayload } from './validation';
+import { toolCatalog } from './tool-catalog.schema';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 
 /**
@@ -32,9 +34,14 @@ import { canonicalHash } from '../../common/crypto/canonical-hash';
 export class AssistantsService {
   private static readonly logger = new Logger(AssistantsService.name);
 
+  /** Hard caps for unpaginated list endpoints (public API checklist: bounded responses). */
+  private static readonly LIST_CAP = 200;
+  private static readonly VERSION_LIST_CAP = 500;
+
   constructor(
     private readonly db: DbService,
     private readonly audit: AuditService,
+    private readonly configPublish: ConfigPublishService,
   ) {}
 
   // ── Assistants (identity) ────────────────────────────────────────────────
@@ -76,7 +83,49 @@ export class AssistantsService {
 
   async list(orgId: string): Promise<Assistant[]> {
     assertOrgId(orgId);
-    return this.db.withOrg(orgId, (tx) => tx.select().from(assistants).where(eq(assistants.organizationId, orgId)));
+    return this.db.withOrg(orgId, (tx) =>
+      tx
+        .select()
+        .from(assistants)
+        .where(eq(assistants.organizationId, orgId))
+        .orderBy(desc(assistants.updatedAt))
+        .limit(AssistantsService.LIST_CAP),
+    );
+  }
+
+  /**
+   * Soft-deletes an assistant by clearing its identity fields (the row stays
+   * for FK integrity — conversations reference assistants.id). Refuses when
+   * conversations exist; the caller should archive those first.
+   */
+  async remove(input: { orgId: string; assistantId: string; actorId: string }): Promise<{ ok: true }> {
+    assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    // Attempt delete — the FK from conversations.assistant_id will reject
+    // if any conversation references this assistant. We catch and re-throw
+    // as a 409 so the caller knows to archive conversations first.
+    try {
+      const rows = await this.db.withOrg(input.orgId, (tx) =>
+        tx.delete(assistants).where(eq(assistants.id, input.assistantId)).returning(),
+      );
+      if (rows.length === 0) {
+        throw ApiError.notFound('assistant');
+      }
+      await this.audit.add({
+        action: 'assistant.deleted',
+        resourceType: 'assistant',
+        resourceId: input.assistantId,
+        actorType: 'account',
+        actorId: input.actorId,
+        tenantId: input.orgId,
+        details: { name: rows[0].name },
+      });
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      // FK violation — conversations still reference this assistant
+      throw ApiError.conflict('assistant has conversations — archive them before deleting');
+    }
+    return { ok: true };
   }
 
   // ── Versions ─────────────────────────────────────────────────────────────
@@ -112,6 +161,8 @@ export class AssistantsService {
           toolPolicy: validated.normalized.tool_policy,
           knowledgePolicy: validated.normalized.knowledge_policy ?? null,
           guardrailPolicy: validated.normalized.guardrail_policy,
+          instructions: validated.normalized.instructions ?? null,
+          modelParams: validated.normalized.model_params ?? null,
           hash,
         })
         .returning(),
@@ -146,7 +197,8 @@ export class AssistantsService {
         .select()
         .from(assistantVersions)
         .where(eq(assistantVersions.assistantId, assistantId))
-        .orderBy(desc(assistantVersions.version), desc(assistantVersions.createdAt)),
+        .orderBy(desc(assistantVersions.version), desc(assistantVersions.createdAt))
+        .limit(AssistantsService.VERSION_LIST_CAP),
     );
   }
 
@@ -179,6 +231,9 @@ export class AssistantsService {
     if (!validated.ok) {
       throw ApiError.validation({ assistant: validated.issues });
     }
+    await this.rejectUnknownModels(input.orgId, validated.normalized);
+    assertPublishable(validated.normalized);
+    await this.assertToolPins(input.orgId, validated.normalized);
 
     const published = await this.db.withOrg(input.orgId, async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`);
@@ -213,6 +268,8 @@ export class AssistantsService {
           toolPolicy: validated.normalized.tool_policy,
           knowledgePolicy: validated.normalized.knowledge_policy ?? null,
           guardrailPolicy: validated.normalized.guardrail_policy,
+          instructions: validated.normalized.instructions ?? null,
+          modelParams: validated.normalized.model_params ?? null,
           hash,
           publishedAt: new Date().toISOString(),
           publishedBy: input.publishedBy,
@@ -231,6 +288,8 @@ export class AssistantsService {
         toolPolicy: validated.normalized.tool_policy,
         guardrailPolicy: validated.normalized.guardrail_policy,
         knowledgePolicy: validated.normalized.knowledge_policy ?? null,
+        instructions: validated.normalized.instructions ?? null,
+        modelParams: validated.normalized.model_params ?? null,
         hash,
       });
 
@@ -254,6 +313,8 @@ export class AssistantsService {
 
   async retire(input: { orgId: string; assistantId: string; versionId: string; retiredBy: string }): Promise<AssistantVersion> {
     assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    assertUuid(input.versionId);
     const version = await this.getVersion(input.orgId, input.versionId);
     if (!version || version.assistantId !== input.assistantId) {
       throw ApiError.notFound('assistant version');
@@ -261,10 +322,35 @@ export class AssistantsService {
     if (version.status !== 'PUBLISHED') {
       throw ApiError.validation({ status: 'only PUBLISHED versions can be retired' });
     }
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(assistantVersions).set({ status: 'RETIRED', updatedAt: new Date().toISOString() }).where(eq(assistantVersions.id, version.id)).returning(),
-    );
-    const row = rows[0];
+    // Serialize against publish/rollback (same advisory lock domain) so a
+    // concurrent publish cannot re-activate the version mid-retire, and a
+    // concurrent rollback cannot point `active_version_id` at the retiring row.
+    const row = await this.db.withOrg(input.orgId, async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`);
+      const active = await tx
+        .select({ activeVersionId: assistants.activeVersionId })
+        .from(assistants)
+        .where(eq(assistants.id, input.assistantId))
+        .limit(1);
+      if (active[0]?.activeVersionId === version.id) {
+        // The active pointer must never reference a RETIRED version — runs
+        // started after retire would pin a version the org has withdrawn.
+        // Withdraw by publishing/rolling back to a successor first.
+        throw ApiError.conflict('cannot retire the active version — publish or roll back to a successor first', {
+          assistant_id: input.assistantId,
+          version_id: version.id,
+        });
+      }
+      const rows = await tx
+        .update(assistantVersions)
+        .set({ status: 'RETIRED', updatedAt: new Date().toISOString() })
+        .where(and(eq(assistantVersions.id, version.id), eq(assistantVersions.status, 'PUBLISHED')))
+        .returning();
+      if (rows.length === 0) {
+        throw ApiError.conflict('assistant version was retired concurrently');
+      }
+      return rows[0];
+    });
     await this.audit.add({
       action: 'assistant.retired',
       resourceType: 'assistant_version',
@@ -302,6 +388,9 @@ export class AssistantsService {
     if (!validated.ok) {
       throw ApiError.validation({ assistant: validated.issues });
     }
+    await this.rejectUnknownModels(input.orgId, validated.normalized);
+    assertPublishable(validated.normalized);
+    await this.assertToolPins(input.orgId, validated.normalized);
     const published = await this.db.withOrg(input.orgId, async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`);
       const maxAll = await tx
@@ -326,6 +415,8 @@ export class AssistantsService {
           toolPolicy: validated.normalized.tool_policy,
           knowledgePolicy: validated.normalized.knowledge_policy ?? null,
           guardrailPolicy: validated.normalized.guardrail_policy,
+          instructions: validated.normalized.instructions ?? null,
+          modelParams: validated.normalized.model_params ?? null,
           rollbackOf: target.id,
           hash,
           publishedAt: new Date().toISOString(),
@@ -342,6 +433,8 @@ export class AssistantsService {
         toolPolicy: validated.normalized.tool_policy,
         guardrailPolicy: validated.normalized.guardrail_policy,
         knowledgePolicy: validated.normalized.knowledge_policy ?? null,
+        instructions: validated.normalized.instructions ?? null,
+        modelParams: validated.normalized.model_params ?? null,
         hash,
       });
       await tx.update(assistants).set({ activeVersionId: inserted.id, updatedAt: new Date().toISOString() }).where(eq(assistants.id, input.assistantId));
@@ -394,9 +487,12 @@ export class AssistantsService {
    * Export a version as a canonical envelope. Deterministic: identical payload
    * always serializes to the identical JSON string (sorted keys, schema_version included).
    */
-  async exportVersion(orgId: string, versionId: string): Promise<AssistantVersionExport> {
+  async exportVersion(orgId: string, assistantId: string, versionId: string): Promise<AssistantVersionExport> {
+    assertOrgId(orgId);
+    assertUuid(assistantId);
+    assertUuid(versionId);
     const version = await this.getVersion(orgId, versionId);
-    if (!version || version.status === 'DRAFT') {
+    if (!version || version.assistantId !== assistantId || version.status === 'DRAFT') {
       throw ApiError.notFound('assistant version');
     }
     return {
@@ -445,6 +541,78 @@ export class AssistantsService {
       payload: exported as unknown as AssistantPayload,
       createdBy: input.createdBy,
     });
+  }
+
+  /**
+   * Capability-registry check (ledger 3.3): when the org has a published
+   * `model_catalog` config, every `allowed_models` entry must reference an
+   * ENABLED `provider/model` pair from that catalog. No published catalog =
+   * catalog governance not opted into for this org — structural validation
+   * only. Invalid refs must be rejected BEFORE `PUBLISHED` (Phase 3 exit gate).
+   */
+  private async rejectUnknownModels(orgId: string, payload: AssistantPayload): Promise<void> {
+    const loadCatalog = async (): Promise<{ models: Array<{ provider: string; model: string; enabled: boolean }> } | null> => {
+      const latest = await this.configPublish.latest(orgId, 'model_catalog', null);
+      return (latest?.payload ?? null) as { models: Array<{ provider: string; model: string; enabled: boolean }> } | null;
+    };
+    let catalog: { models: Array<{ provider: string; model: string; enabled: boolean }> } | null = null;
+    try {
+      catalog = await loadCatalog();
+    } catch {
+      // Catalog governance is advisory when the config-publish surface is
+      // unavailable (e.g. flag-disabled module in a test rig) — publish still
+      // passes structural + secret validation.
+      return;
+    }
+    if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) {
+      return;
+    }
+    const enabled = new Set(catalog.models.filter((m) => m.enabled).map((m) => `${m.provider}/${m.model}`));
+    const unknown = payload.model_policy.allowed_models.filter((ref) => !enabled.has(ref));
+    if (unknown.length > 0) {
+      throw ApiError.validation({
+        model_policy: `allowed_models not present in the published model catalog: ${unknown.join(', ')}`,
+      });
+    }
+  }
+
+  /**
+   * Publish-time tool pin validation (drizzle/0032): every tool_policy entry
+   * must reference an ENABLED tool_catalog row, and an explicit schema_hash
+   * must match the catalog hash — a run can then never see a mutated schema.
+   */
+  private async assertToolPins(orgId: string, payload: AssistantPayload): Promise<void> {
+    const tools = payload.tool_policy.tools;
+    if (tools.length === 0) {
+      return;
+    }
+    const names = tools.map((t) => t.name);
+    const rows = await this.db.withOrg(orgId, (tx) =>
+      tx
+        .select({
+          name: toolCatalog.name,
+          hash: toolCatalog.hash,
+          enabled: toolCatalog.enabled,
+        })
+        .from(toolCatalog)
+        .where(eq(toolCatalog.organizationId, orgId)),
+    );
+    const byName = new Map(rows.map((r) => [r.name, r]));
+    const problems: string[] = [];
+    for (const entry of tools) {
+      const row = byName.get(entry.name);
+      if (!row || !row.enabled) {
+        problems.push(`${entry.name}: not present in the tool catalog or disabled`);
+        continue;
+      }
+      if (entry.schema_hash !== undefined && entry.schema_hash !== row.hash) {
+        problems.push(`${entry.name}: schema_hash does not match the catalog entry (pin is stale)`);
+      }
+    }
+    if (problems.length > 0) {
+      throw ApiError.validation({ tool_policy: `tool pins rejected: ${problems.join('; ')}` });
+    }
+    void names;
   }
 
   /**

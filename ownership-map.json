@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "ADR-005 D3 — the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
+  "comment": "ADR-005 D3 \u2014 the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
   "tables": {
     "accounts": {
       "owner": "engine-ts",
@@ -85,7 +85,7 @@
     "billing.spend_events": {
       "owner": "engine-ts",
       "since": "eng-0004",
-      "note": "the engine metering plane's OWN table (schema billing) — distinct from the Python-owned public.spend_events until handover A-3; satellites ingest here idempotently by (source, event_id)."
+      "note": "the engine metering plane's OWN table (schema billing) \u2014 distinct from the Python-owned public.spend_events until handover A-3; satellites ingest here idempotently by (source, event_id)."
     },
     "billing.billing_invoices": {
       "owner": "engine-ts",
@@ -118,7 +118,7 @@
     "studio_project_keys": {
       "owner": "engine-ts",
       "since": "eng-0006",
-      "note": "key rows stay Python-owned (api_keys); the project BINDING is engine-owned — one authority per fact; key-row write authority transfers at handover A-1."
+      "note": "key rows stay Python-owned (api_keys); the project BINDING is engine-owned \u2014 one authority per fact; key-row write authority transfers at handover A-1."
     },
     "satellites": {
       "owner": "engine-ts",
@@ -128,12 +128,12 @@
     "published_configs": {
       "owner": "engine-ts",
       "since": "eng-0007",
-      "note": "engine-published policy/guardrail/quota/model-catalog documents per (org x scope x product) — handover A-4's store; RLS org-scoped; append-only versions (notes + rollback lineage since eng-0016; retention-pruned to the newest CONFIG_VERSION_RETENTION per key)."
+      "note": "engine-published policy/guardrail/quota/model-catalog documents per (org x scope x product) \u2014 handover A-4's store; RLS org-scoped; append-only versions (notes + rollback lineage since eng-0016; retention-pruned to the newest CONFIG_VERSION_RETENTION per key)."
     },
     "config_drafts": {
       "owner": "engine-ts",
       "since": "eng-0016",
-      "note": "the mutable draft layer over published_configs (one per org x scope x product) — validates on save, stores its verdict, publishes snapshot into an immutable version; RLS org-scoped."
+      "note": "the mutable draft layer over published_configs (one per org x scope x product) \u2014 validates on save, stores its verdict, publishes snapshot into an immutable version; RLS org-scoped."
     },
     "config_notifications": {
       "owner": "engine-ts",
@@ -142,7 +142,7 @@
     },
     "tenants": {
       "owner": "python",
-      "shared": "engine INSERTs new orgs (personal-org autocreation); UPDATEs features jsonb (staff flags, deletion markers — documented seam); Python remains the DDL authority. DDL transfer at agent-runtime handover A-1."
+      "shared": "engine INSERTs new orgs (personal-org autocreation); UPDATEs features jsonb (staff flags, deletion markers \u2014 documented seam); Python remains the DDL authority. DDL transfer at agent-runtime handover A-1."
     },
     "api_keys": {
       "owner": "python",
@@ -150,7 +150,7 @@
     },
     "audit_events": {
       "owner": "python",
-      "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 §10.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)."
+      "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 \u00a710.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)."
     },
     "spend_events": {
       "owner": "python",
@@ -199,7 +199,7 @@
     "org_deletions": {
       "owner": "engine-ts",
       "since": "eng-0012",
-      "note": "staged deletion lifecycle: request → grace → purge; purge also marks the Python-owned tenants row deleted via its features jsonb (documented seam)."
+      "note": "staged deletion lifecycle: request \u2192 grace \u2192 purge; purge also marks the Python-owned tenants row deleted via its features jsonb (documented seam)."
     },
     "console_announcements": {
       "owner": "engine-ts",
@@ -252,7 +252,7 @@
     "email_suppressions": {
       "owner": "engine-ts",
       "since": "eng-0013",
-      "note": "hard bounces/complaints/unsubscribes — the email service refuses suppressed addresses."
+      "note": "hard bounces/complaints/unsubscribes \u2014 the email service refuses suppressed addresses."
     },
     "assistants": {
       "owner": "engine-ts",
@@ -423,6 +423,46 @@
       "owner": "engine-ts",
       "since": "eng-0028",
       "note": "sensitive-read stream (exports, support access, impersonation) separate from audit_events; append-only."
+    },
+    "channel_accounts": {
+      "owner": "engine-ts",
+      "since": "eng-0030",
+      "note": "channel plane: platform connections (messenger/whatsapp/telegram/web widget); envelope-sealed credentials; RLS org-scoped."
+    },
+    "channel_identities": {
+      "owner": "engine-ts",
+      "since": "eng-0030",
+      "note": "channel plane: platform user identity per account (psid/wa_id/chat_id/visitor); 24h messaging window state; RLS org-scoped."
+    },
+    "channel_sessions": {
+      "owner": "engine-ts",
+      "since": "eng-0030",
+      "note": "channel plane: website widget sessions; token stored as sha256 only; single conversation binding; RLS org-scoped."
+    },
+    "channel_message_links": {
+      "owner": "engine-ts",
+      "since": "eng-0030",
+      "note": "channel plane: inbound dedup + outbound delivery tracking per platform message id; RLS org-scoped."
+    },
+    "channel_events": {
+      "owner": "engine-ts",
+      "since": "eng-0030",
+      "note": "channel plane: durable webhook ingest inbox; unique (channel_account_id, external_event_id) dedup BEFORE side effects; RLS org-scoped."
+    },
+    "tool_catalog": {
+      "owner": "engine-ts",
+      "since": "eng-0032",
+      "note": "harness: org-scoped versioned tool definitions with JSON Schemas + effect/approval classes + MCP-aligned annotations; assistant versions pin by schema hash at publish; RLS org-scoped."
+    },
+    "conversation_summaries": {
+      "owner": "engine-ts",
+      "since": "eng-0033",
+      "note": "harness: immutable per-conversation compaction summaries (Studio-produced via MCP SaveConversationSummary); manifest serves newest covering the compiled window; RLS org-scoped."
+    },
+    "message_feedback": {
+      "owner": "engine-ts",
+      "since": "eng-0034",
+      "note": "harness: per-message user feedback (up/down + reason) feeding the eval pipeline via outbox; RLS org-scoped."
     }
   },
   "rules": [

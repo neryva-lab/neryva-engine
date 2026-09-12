@@ -30,7 +30,11 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({
-      trustProxy: true,
+      // Only trust X-Forwarded-* behind a controlled proxy (TRUST_PROXY=true,
+      // the deployment default). Directly internet-facing deployments must set
+      // TRUST_PROXY=false so clients cannot spoof the IP used for rate limits
+      // and audit trails.
+      trustProxy: env.TRUST_PROXY,
       // Fastify's native request logging: JSON lines carrying the SAME
       // request id the error envelope and audit trail use (the rule lives
       // in one place — genReqId mirrors request-id.middleware).
@@ -114,8 +118,14 @@ async function bootstrap(): Promise<void> {
     throw new Error(`route↔manifest bijection failed at boot — ${detail}`);
   }
 
-  // Flush in-flight spans on SIGTERM (tracing shutdown must observe the
-  // app's close, so it runs as an explicit signal hook here).
+  // Flush in-flight spans on shutdown — AFTER the server closed, so spans
+  // created while connections drain are captured too. The Fastify onClose
+  // hook fires from app.close() (Nest's SIGTERM/SIGINT shutdown hooks);
+  // the explicit process listeners are the belt-and-braces path for a
+  // shutdown that never reaches app.close(). shutdownTracing is idempotent.
+  app.getHttpAdapter().getInstance().addHook('onClose', async () => {
+    await shutdownTracing();
+  });
   process.once('SIGTERM', () => {
     void shutdownTracing();
   });

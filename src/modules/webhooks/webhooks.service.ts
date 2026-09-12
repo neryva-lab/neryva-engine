@@ -22,7 +22,7 @@ import { checkWebhookUrl } from './webhook-url.guard';
  *   deployment.completed/failed/rolled_back · org.ownership_transferred
  *   org.role_changed · org.deletion_requested · config.published
  */
-const PUBLIC_EVENTS = new Set([
+export const PUBLIC_EVENTS = new Set([
   'entitlement.transitioned',
   'billing.cost_anomaly',
   'deployment.completed',
@@ -33,6 +33,11 @@ const PUBLIC_EVENTS = new Set([
   'org.deletion_requested',
   'config.published',
 ]);
+
+/** The subscribable event vocabulary — exposed via GET events for the console. */
+export function webhookEventCatalog(): Array<{ type: string }> {
+  return [...PUBLIC_EVENTS].sort().map((type) => ({ type }));
+}
 
 export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 6 * 3_600_000] as const;
 export const MAX_ATTEMPTS = 5;

@@ -76,7 +76,13 @@ export class UsageLedgerService {
       }
       if (input.idempotencyKey && existing[0].idempotencyKey === input.idempotencyKey) {
         const payloadDelta = Math.abs(Number(existing[0].quantity) - normalizedQuantity);
-        if (payloadDelta > 1e-9 || existing[0].usageKind !== input.usageKind) {
+        const payloadMatches =
+          payloadDelta <= 1e-9 &&
+          existing[0].usageKind === input.usageKind &&
+          existing[0].unit === input.unit &&
+          (existing[0].runId ?? null) === (input.runId ?? null) &&
+          (existing[0].messageId ?? null) === (input.messageId ?? null);
+        if (!payloadMatches) {
           throw ApiError.conflict('idempotency key reuse with different usage payload', { usage_event_id: input.usageEventId });
         }
       }
@@ -171,15 +177,16 @@ export class UsageLedgerService {
    * no billing-provider call sits on this path (8.9, outage-deterministic).
    */
   async reserve(input: { orgId: string; dimension: string; quantity: number; currentUsage: number; limit: number | null; runId?: string; reference?: string; ttlSeconds?: number }): Promise<QuotaReservation> {
-    if (input.limit === null) {
-      // Unlimited at this level — record the reservation for accounting only.
-    }
     return this.db.withOrg(input.orgId, async (tx) => {
+      // Serialize concurrent reserves per (org, dimension) with a transaction-
+      // scoped advisory lock. (The previous `sum(...) FOR UPDATE` was invalid
+      // SQL — PostgreSQL forbids FOR UPDATE with aggregates — so every
+      // reservation attempt would have failed at the wire.)
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`quota:${input.orgId}:${input.dimension}`}))`);
       const activeRows = await tx.execute(sql`
         select coalesce(sum(quantity), 0) as reserved from quota_reservations
         where organization_id = ${input.orgId}::uuid and dimension = ${input.dimension}
           and state = 'RESERVED' and expires_at > now()
-        for update
       `);
       const reserved = Number((activeRows.rows[0] as { reserved: string })?.reserved ?? 0);
       if (input.limit !== null && input.currentUsage + reserved + input.quantity > input.limit) {

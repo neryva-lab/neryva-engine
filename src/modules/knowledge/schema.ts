@@ -27,7 +27,17 @@ const vector = customType<{ data: number[]; driverData: string }>({
 export const EMBEDDING_DIMENSIONS = 1536;
 export const EMBEDDING_MODEL = 'local-lexical-v1';
 
-export const ARTIFACT_PURPOSES = ['SOURCE_DOCUMENT', 'EXPORT', 'CHECKPOINT', 'TOOL_RESULT', 'TRANSCRIPT', 'COVER'] as const;
+export const ARTIFACT_PURPOSES = [
+  'SOURCE_DOCUMENT',
+  'EXPORT',
+  'CHECKPOINT',
+  'TOOL_RESULT',
+  'TRANSCRIPT',
+  'COVER',
+  // Harness attachment purposes (drizzle/0035).
+  'MESSAGE_ATTACHMENT',
+  'GENERATED_MEDIA',
+] as const;
 export type ArtifactPurpose = (typeof ARTIFACT_PURPOSES)[number];
 
 export const artifacts = pgTable(

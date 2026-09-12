@@ -6,6 +6,8 @@ import { Module } from '@nestjs/common';
 import { ConversationsModule } from '../../modules/conversations/conversations.module';
 import { ConversationsService } from '../../modules/conversations/conversations.service';
 import { McpAuthorityService } from '../../modules/conversations/mcp-authority.service';
+import { KnowledgeModule } from '../../modules/knowledge/knowledge.module';
+import { UsageLedgerService } from '../../modules/billing/usage-ledger.service';
 import { registerMcpRoutes } from './routes';
 
 /**
@@ -36,8 +38,11 @@ export class McpTransportService implements OnModuleInit {
 }
 
 @Module({
-  imports: [ConversationsModule],
-  providers: [McpAuthorityService, McpTransportService],
+  // KnowledgeModule provides the ACL-before-scoring RetrievalService used by
+  // GetAuthorizedRunContext / SearchKnowledge. UsageLedgerService depends only
+  // on DbService, so it is provided here directly (no BillingModule cycle).
+  imports: [ConversationsModule, KnowledgeModule],
+  providers: [McpAuthorityService, McpTransportService, UsageLedgerService],
   exports: [McpAuthorityService],
 })
 export class McpModule {}

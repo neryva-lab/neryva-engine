@@ -31,18 +31,30 @@ export interface OutboxConsumer {
  */
 export class PermanentConsumerError extends Error {}
 
-/** How long a PROCESSING inbox claim may block redelivery before staleness. */
-const INBOX_STALE_MS = 5 * 60_000;
+/** Default staleness for a PROCESSING claim left by a crashed worker. */
+export const INBOX_STALE_MS = 5 * 60_000;
 
-export type InboxClaim = 'claimed' | 'skip';
+/**
+ * - `claimed` — this worker owns the claim and MUST run the side effect.
+ * - `skip`    — durably PROCESSED already; safe to continue.
+ * - `busy`    — a fresh PROCESSING claim from another (possibly crashed)
+ *               worker; the side effect is NOT known to have run. The
+ *               dispatcher must NOT publish past it — requeue instead.
+ */
+export type InboxClaim = 'claimed' | 'skip' | 'busy';
 
 /**
  * Claim (consumer_name, event_id) for processing. A RECEIVED/FAILED row is
- * reclaimable; a fresh PROCESSING row blocks (another worker may hold it);
+ * reclaimable; a fresh PROCESSING row is `busy` (another worker may hold it);
  * a stale PROCESSING row (crashed worker past the staleness window) is
  * reclaimable. PROCESSED rows skip forever.
  */
-export async function claimInbox(db: DbService, consumerName: string, eventId: string): Promise<InboxClaim> {
+export async function claimInbox(
+  db: DbService,
+  consumerName: string,
+  eventId: string,
+  staleMs: number = INBOX_STALE_MS,
+): Promise<InboxClaim> {
   return db.withBypass(async (tx) => {
     const inserted = await tx
       .insert(inboxEvents)
@@ -59,16 +71,18 @@ export async function claimInbox(db: DbService, consumerName: string, eventId: s
       .limit(1);
     const row = rows[0];
     if (!row) {
-      // PK conflict reported but row invisible (bypass/scope race) — fail closed.
-      return 'skip';
+      // PK conflict reported but the row is invisible: bypass/scope race or
+      // concurrent delete. Fail CLOSED — treating this as processed would
+      // drop a never-delivered event.
+      throw new Error(`inbox claim lost for (${consumerName}, ${eventId}) — row vanished between conflict and select`);
     }
     if (row.status === 'PROCESSED') {
       return 'skip';
     }
     const claimedAt = Date.parse(row.lastReceivedAt);
-    const stale = Number.isNaN(claimedAt) || Date.now() - claimedAt > INBOX_STALE_MS;
+    const stale = Number.isNaN(claimedAt) || Date.now() - claimedAt > staleMs;
     if (row.status === 'PROCESSING' && !stale) {
-      return 'skip';
+      return 'busy';
     }
     await tx
       .update(inboxEvents)

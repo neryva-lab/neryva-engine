@@ -58,6 +58,9 @@ export const ModuleFlags = {
   get knowledge(): boolean {
     return env.MODULES__KNOWLEDGE_ENABLED;
   },
+  get channels(): boolean {
+    return env.MODULES__CHANNELS_ENABLED;
+  },
   get workers(): boolean {
     return env.WORKERS__OUTBOX_ENABLED;
   },
@@ -128,5 +131,10 @@ export function validateFlagMatrix(): void {
   // The MCP authority surface serves runs; identity issues the workload identities.
   if (ModuleFlags.mcp && !(ModuleFlags.conversations && ModuleFlags.identity)) {
     throw new Error('MODULES__MCP_ENABLED requires MODULES__CONVERSATIONS_ENABLED and MODULES__IDENTITY_ENABLED (authority over runs + workload identities)');
+  }
+  // Channels normalize inbound webhooks into the conversation start-message
+  // transaction and resolve conversations by channel binding.
+  if (ModuleFlags.channels && !ModuleFlags.conversations) {
+    throw new Error('MODULES__CHANNELS_ENABLED requires MODULES__CONVERSATIONS_ENABLED (channel messages enter via acceptMessage)');
   }
 }

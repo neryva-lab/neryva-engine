@@ -20,6 +20,8 @@ export const conversations = pgTable(
     participantScope: varchar('participant_scope', { length: 32 }).notNull().default('org'),
     /** active | archived | deleted */
     status: varchar('status', { length: 32 }).notNull().default('active'),
+    /** Human-facing title (auto-titling lands with authoring UI; drizzle/0033). */
+    title: varchar('title', { length: 256 }),
     /** Optimistic concurrency — expose as ETag / expected_conversation_version. */
     version: integer('version').notNull().default(1),
     retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
@@ -116,12 +118,18 @@ export const runs = pgTable(
 export const runEvents = pgTable(
   'run_events',
   {
-    /** Producer event_id — globally unique, making AppendRunEvents retries idempotent. */
+    /** Engine-generated row id (uuidv7) — never the dedup key. */
     id: uuid('id').primaryKey(),
     runId: uuid('run_id')
       .notNull()
       .references(() => runs.id, { onDelete: 'cascade' }),
     organizationId: uuid('organization_id').notNull(),
+    /**
+     * Producer event identity — unique per (run_id, event_id) per the
+     * neryva.mcp.v1 event.proto contract (drizzle/0029). Any string 1..64,
+     * not necessarily a uuid.
+     */
+    eventId: varchar('event_id', { length: 64 }).notNull(),
     eventType: varchar('event_type', { length: 64 }).notNull(),
     schemaVersion: integer('schema_version').notNull().default(1),
     /** DB-assigned (bigserial); authoritative per-run ordering — never trust producer sequences. */
@@ -137,6 +145,7 @@ export const runEvents = pgTable(
   },
   (t) => [
     uniqueIndex('uq_run_events_run_engine_sequence').on(t.runId, t.engineSequence),
+    uniqueIndex('uq_run_events_run_event_id').on(t.runId, t.eventId),
     index('ix_run_events_org_run_seq').on(t.organizationId, t.runId, t.engineSequence),
   ],
 );
@@ -146,6 +155,68 @@ export type ConversationParticipant = typeof conversationParticipants.$inferSele
 export type Message = typeof messages.$inferSelect;
 export type Run = typeof runs.$inferSelect;
 export type RunEvent = typeof runEvents.$inferSelect;
+
+/**
+ * Conversation compaction summaries (drizzle/0033, ai_harness_plan.md H0.4).
+ * Studio produces summaries with its own model credentials and persists them
+ * via the MCP `SaveConversationSummary` RPC; the run manifest serves the
+ * newest summary covering the compiled window. Rows are immutable — a new
+ * summary supersedes by higher `source_sequence`, never by mutation.
+ */
+export const conversationSummaries = pgTable(
+  'conversation_summaries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id').notNull(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    /** Highest messages.sequence covered by this summary. */
+    sourceSequence: integer('source_sequence').notNull(),
+    summary: varchar('summary', { length: 8192 }).notNull(),
+    tokenCount: integer('token_count').notNull().default(0),
+    modelId: varchar('model_id', { length: 128 }),
+    createdBy: varchar('created_by', { length: 128 }).notNull().default('agent-studio-runtime'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_conversation_summaries_scope').on(t.conversationId, t.sourceSequence),
+    index('ix_conversation_summaries_org_conv').on(t.organizationId, t.conversationId, t.sourceSequence),
+  ],
+);
+
+/**
+ * Per-message user feedback (drizzle/0034, ai_harness_plan.md H1.1) — the
+ * quality signal feeding the eval pipeline through the outbox. One row per
+ * (message, account); the latest review wins via upsert.
+ */
+export const messageFeedback = pgTable(
+  'message_feedback',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id').notNull(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    accountId: uuid('account_id').notNull(),
+    /** up | down */
+    rating: varchar('rating', { length: 8 }).notNull(),
+    reason: varchar('reason', { length: 64 }),
+    comment: varchar('comment', { length: 2048 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_message_feedback_message_account').on(t.messageId, t.accountId),
+    index('ix_message_feedback_org_created').on(t.organizationId, t.createdAt),
+  ],
+);
+
+export type ConversationSummary = typeof conversationSummaries.$inferSelect;
+export type MessageFeedback = typeof messageFeedback.$inferSelect;
 
 export const MESSAGE_ROLES = ['user', 'assistant', 'tool', 'system'] as const;
 export const CONVERSATION_STATUSES = ['active', 'archived', 'deleted'] as const;

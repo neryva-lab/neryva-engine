@@ -11,6 +11,7 @@ import { McpModule } from './transport/mcp/mcp.module';
 import { WorkersModule } from './workers/workers.module';
 import { KnowledgeModule } from './modules/knowledge/knowledge.module';
 import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
+import { ChannelsModule } from './modules/channels/channels.module';
 import { ConsoleModule } from './modules/console/console.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -49,6 +50,7 @@ const imports = [
   ...(ModuleFlags.mcp ? [McpModule] : []),
   ...(ModuleFlags.knowledge ? [KnowledgeModule] : []),
   ...(ModuleFlags.conversations ? [LifecycleModule] : []),
+  ...(ModuleFlags.channels ? [ChannelsModule] : []),
   WorkersModule,
   ...(ModuleFlags.deployment ? [DeploymentModule] : []),
   ...(ModuleFlags.webhooks ? [WebhooksModule] : []),

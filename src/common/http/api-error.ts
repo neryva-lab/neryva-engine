@@ -19,6 +19,7 @@ export const ERROR_CODES = {
   IDEMPOTENCY_IN_FLIGHT: 'idempotency_in_flight',
   IDEMPOTENCY_CONFLICT: 'idempotency_conflict',
   CONFLICT: 'conflict',
+  RESOURCE_PURGED: 'resource_purged',
   INTERNAL: 'internal_error',
   SERVICE_UNAVAILABLE: 'service_unavailable',
   SERIALIZATION_FAILURE: 'serialization_failure',

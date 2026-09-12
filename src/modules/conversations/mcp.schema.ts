@@ -1,4 +1,4 @@
-import { customType, index, integer, jsonb, numeric, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { customType, index, integer, jsonb, numeric, pgTable, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 import { runs } from './schema';
 
 /** PostgreSQL bytea — digests are 32 raw bytes, never hex strings. */
@@ -28,7 +28,11 @@ export const runIdempotency = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
   },
-  (t) => [index('ix_run_idempotency_run').on(t.runId, t.expiresAt)],
+  (t) => [
+    index('ix_run_idempotency_run').on(t.runId, t.expiresAt),
+    // uq_run_idempotency_scope (drizzle/0024) — the dedup authority.
+    uniqueIndex('uq_run_idempotency_scope').on(t.organizationId, t.callerScope, t.idempotencyKey),
+  ],
 );
 
 export const approvals = pgTable(
@@ -51,7 +55,11 @@ export const approvals = pgTable(
     decisionId: varchar('decision_id', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
-  (t) => [index('ix_approvals_run_state').on(t.runId, t.state)],
+  (t) => [
+    index('ix_approvals_run_state').on(t.runId, t.state),
+    // uq_approvals_org_ref (drizzle/0024) — approval_ref replay semantics.
+    uniqueIndex('uq_approvals_org_ref').on(t.organizationId, t.approvalRef),
+  ],
 );
 
 export const toolEffects = pgTable(
@@ -73,7 +81,11 @@ export const toolEffects = pgTable(
     authorizedAt: timestamp('authorized_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     recordedAt: timestamp('recorded_at', { withTimezone: true, mode: 'string' }),
   },
-  (t) => [index('ix_tool_effects_run').on(t.runId, t.authorizedAt)],
+  (t) => [
+    index('ix_tool_effects_run').on(t.runId, t.authorizedAt),
+    // uq_tool_effects_call (drizzle/0024) — durable tool-effect dedup.
+    uniqueIndex('uq_tool_effects_call').on(t.organizationId, t.toolCallId),
+  ],
 );
 
 export const checkpoints = pgTable(
@@ -92,7 +104,11 @@ export const checkpoints = pgTable(
     producer: varchar('producer', { length: 128 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
-  (t) => [index('ix_checkpoints_run').on(t.runId, t.createdAt)],
+  (t) => [
+    index('ix_checkpoints_run').on(t.runId, t.createdAt),
+    // uq_checkpoints_run_version (drizzle/0024) — checkpoint replay semantics.
+    uniqueIndex('uq_checkpoints_run_version').on(t.runId, t.checkpointRef, t.checkpointVersion),
+  ],
 );
 
 export const memoryProposals = pgTable(
@@ -114,7 +130,11 @@ export const memoryProposals = pgTable(
     decision: varchar('decision', { length: 32 }).notNull().default('PENDING'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
-  (t) => [index('ix_memory_proposals_run').on(t.runId, t.decision)],
+  (t) => [
+    index('ix_memory_proposals_run').on(t.runId, t.decision),
+    // uq_memory_proposals_org_ref (drizzle/0024) — proposal_ref replay semantics.
+    uniqueIndex('uq_memory_proposals_org_ref').on(t.organizationId, t.proposalRef),
+  ],
 );
 
 export type RunIdempotency = typeof runIdempotency.$inferSelect;

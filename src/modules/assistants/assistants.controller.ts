@@ -1,8 +1,9 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { Idempotent } from '../../common/http/idempotency';
+import { ApiError } from '../../common/http/api-error';
 import { AssistantsService } from './assistants.service';
 import { CreateAssistantDto, CreateVersionDto, ImportVersionDto, RollbackDto } from './dto';
 
@@ -34,9 +35,20 @@ export class AssistantsController {
   async get(@Param('orgId') orgId: string, @Param('assistantId') assistantId: string) {
     const row = await this.assistants.get(orgId, assistantId);
     if (!row) {
-      return { error: 'not found' };
+      throw ApiError.notFound('assistant');
     }
     return { assistant: row };
+  }
+
+  @Delete(':assistantId')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  async remove(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ ok: true }> {
+    return this.assistants.remove({ orgId, assistantId, actorId: principal.id });
   }
 
   @Post(':assistantId/versions')
@@ -94,6 +106,20 @@ export class AssistantsController {
     return { version: row };
   }
 
+  @Post(':assistantId/versions/:versionId/retire')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async retire(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Param('versionId') versionId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const row = await this.assistants.retire({ orgId, assistantId, versionId, retiredBy: principal.id });
+    return { version: row };
+  }
+
   @Get(':assistantId/versions/:versionId/export')
   @Roles('owner', 'admin', 'developer', 'reader', 'billing')
   @UseGuards(OrgRolesGuard)
@@ -102,7 +128,7 @@ export class AssistantsController {
     @Param('assistantId') assistantId: string,
     @Param('versionId') versionId: string,
   ) {
-    const envelope = await this.assistants.exportVersion(orgId, versionId);
+    const envelope = await this.assistants.exportVersion(orgId, assistantId, versionId);
     return { export: envelope };
   }
 
@@ -135,7 +161,7 @@ export class AssistantsController {
   ) {
     const snapshot = await this.assistants.getSnapshotForVersion(orgId, assistantId, versionId);
     if (!snapshot) {
-      return { error: 'not found' };
+      throw ApiError.notFound('policy snapshot');
     }
     return { snapshot };
   }

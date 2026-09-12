@@ -1,6 +1,7 @@
 import { jsonb, pgTable, primaryKey, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, lt } from 'drizzle-orm';
+import { DbService } from '../infra/db/db.service';
 import { ApiError } from './api-error';
 
 /**
@@ -70,7 +71,12 @@ export async function claimIdempotency(tx: NodePgDatabase, scope: IdempotencySco
   }
 
   const existing = await tx
-    .select({ requestHash: idempotencyRecords.requestHash, status: idempotencyRecords.status, resourceRef: idempotencyRecords.resourceRef })
+    .select({
+      requestHash: idempotencyRecords.requestHash,
+      status: idempotencyRecords.status,
+      resourceRef: idempotencyRecords.resourceRef,
+      expiresAt: idempotencyRecords.expiresAt,
+    })
     .from(idempotencyRecords)
     .where(
       and(
@@ -91,10 +97,16 @@ export async function claimIdempotency(tx: NodePgDatabase, scope: IdempotencySco
     throw new ApiError(409, 'idempotency_conflict', 'Idempotency-Key was already used with a different request body');
   }
   if (row.status === 'SUCCEEDED') {
+    // Replays are served for the full record lifetime — an expired SUCCEEDED
+    // row is reclaimed by the sweep, never by a retrying caller.
     return { kind: 'replay', response: row.resourceRef ?? null };
   }
-  if (row.status === 'FAILED_RETRYABLE') {
+  const expired = Date.parse(row.expiresAt) < Date.now();
+  if (row.status === 'FAILED_RETRYABLE' || (row.status === 'IN_PROGRESS' && expired)) {
     // Re-claim for this attempt: same hash, restart the in-progress window.
+    // An IN_PROGRESS row past its expiry means its owning transaction was
+    // lost (crash before commit of the completing update) — the key must
+    // become executable again instead of 409-ing forever.
     await tx
       .update(idempotencyRecords)
       .set({ status: 'IN_PROGRESS', expiresAt })
@@ -142,4 +154,19 @@ export async function failIdempotency(tx: NodePgDatabase, scope: IdempotencyScop
         eq(idempotencyRecords.idempotencyKey, scope.idempotencyKey),
       ),
     );
+}
+
+/**
+ * Bounded-growth sweep: delete records whose replay window has passed.
+ * Called from the worker host on a slow tick; safe to run concurrently
+ * (deletes are keyed by expires_at only). Returns the number purged.
+ */
+export async function purgeExpiredIdempotencyRecords(db: DbService): Promise<number> {
+  return db.withBypass(async (tx) => {
+    const deleted = await tx
+      .delete(idempotencyRecords)
+      .where(lt(idempotencyRecords.expiresAt, new Date().toISOString()))
+      .returning({ key: idempotencyRecords.idempotencyKey });
+    return deleted.length;
+  });
 }

@@ -26,6 +26,7 @@ export default {
     './src/common/http/idempotency-records.ts',
     './src/modules/conversations/mcp.schema.ts',
     './src/modules/knowledge/schema.ts',
+    './src/modules/channels/schema.ts',
     './src/modules/billing/usage-ledger.schema.ts',
     './src/modules/lifecycle/lifecycle.schema.ts',
     './src/modules/satellites/satellite.schema.ts',

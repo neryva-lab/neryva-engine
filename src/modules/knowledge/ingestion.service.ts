@@ -6,7 +6,7 @@ import { StorageService } from '../../common/infra/storage/storage.service';
 import { env } from '../../common/config/env';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { artifacts, chunks, documentVersions, documents, embeddings, uploadSessions, UploadSession, EMBEDDING_MODEL } from './schema';
+import { artifacts, chunks, documentVersions, documents, embeddings, retrievalAcl, uploadSessions, UploadSession, EMBEDDING_MODEL } from './schema';
 import { chunkText } from './text';
 import { EmbeddingService } from './embedding.service';
 
@@ -264,6 +264,27 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     await this.db.withBypass(async (tx) => {
       await tx.update(uploadSessions).set({ state: 'READY', updatedAt: new Date().toISOString() }).where(eq(uploadSessions.id, session.id));
       await tx.update(documents).set({ state: 'ready', updatedAt: new Date().toISOString() }).where(eq(documents.sourceArtifactId, session.artifactId));
+      // Default ACL: documents are organization-visible at ingest
+      // (retrieval.service's contract). Without this row the retrieval join
+      // excludes the document entirely — it would be indexed but unreachable.
+      const docRows = await tx
+        .select({ id: documents.id })
+        .from(documents)
+        .where(eq(documents.sourceArtifactId, session.artifactId))
+        .limit(1);
+      if (docRows[0]) {
+        await tx
+          .insert(retrievalAcl)
+          .values({
+            id: uuidv7(),
+            organizationId: session.organizationId,
+            resourceType: 'document',
+            resourceId: docRows[0].id,
+            visibility: 'organization',
+            scopeAccountId: null,
+          })
+          .onConflictDoNothing();
+      }
     });
     KnowledgeIngestionWorker.logger.log(`upload session ${session.id} ingested (READY)`);
   }

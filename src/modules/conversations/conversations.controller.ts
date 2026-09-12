@@ -1,8 +1,9 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Patch, Post, Query, Sse, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { Idempotent } from '../../common/http/idempotency';
+import { ApiError } from '../../common/http/api-error';
 import { ConversationsService } from './conversations.service';
 import { McpAuthorityService } from './mcp-authority.service';
 import { AcceptMessageDto, CancelRunDto, CommitResultDto, CreateConversationDto, UpdateConversationStatusDto } from './dto';
@@ -49,7 +50,7 @@ export class ConversationsController {
   async get(@Param('orgId') orgId: string, @Param('conversationId') conversationId: string) {
     const row = await this.conversations.getConversation(orgId, conversationId);
     if (!row) {
-      return { error: 'not found' };
+      throw ApiError.notFound('conversation');
     }
     return { conversation: row };
   }
@@ -101,6 +102,49 @@ export class ConversationsController {
     const rows = await this.conversations.listRuns(orgId, conversationId, { limit: limit ? Number(limit) : undefined });
     return { runs: rows };
   }
+
+  @Patch(':conversationId/title')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async setTitle(
+    @Param('orgId') orgId: string,
+    @Param('conversationId') conversationId: string,
+    @Body() dto: { title?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    if (typeof dto.title !== 'string') {
+      throw ApiError.validation({ title: 'must be a string' });
+    }
+    const row = await this.conversations.setTitle({ orgId, conversationId, title: dto.title, actor: principal.id });
+    return { conversation: row };
+  }
+
+  @Post(':conversationId/messages/:messageId/feedback')
+  @Roles('owner', 'admin', 'developer', 'reader', 'billing')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async recordFeedback(
+    @Param('orgId') orgId: string,
+    @Param('conversationId') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: { rating?: unknown; reason?: unknown; comment?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    if (dto.rating !== 'up' && dto.rating !== 'down') {
+      throw ApiError.validation({ rating: "must be 'up' or 'down'" });
+    }
+    const row = await this.conversations.recordFeedback({
+      orgId,
+      conversationId,
+      messageId,
+      accountId: principal.id,
+      rating: dto.rating,
+      reason: typeof dto.reason === 'string' ? dto.reason : undefined,
+      comment: typeof dto.comment === 'string' ? dto.comment : undefined,
+    });
+    return { feedback: row };
+  }
 }
 
 /**
@@ -123,7 +167,7 @@ export class RunsController {
   async get(@Param('orgId') orgId: string, @Param('runId') runId: string) {
     const row = await this.conversations.getRun(orgId, runId);
     if (!row) {
-      return { error: 'not found' };
+      throw ApiError.notFound('run');
     }
     return { run: row };
   }
@@ -137,6 +181,23 @@ export class RunsController {
       limit: limit ? Number(limit) : undefined,
     });
     return page;
+  }
+
+  /**
+   * SSE event stream (ledger 4.10 — the doc's `events:stream` action suffix is
+   * served as `events/stream`, the unambiguous Fastify path form). Replay uses
+   * the SSE `Last-Event-ID` header, an authoritative engine_sequence; a
+   * reconnect replays the identical tail.
+   */
+  @Sse(':runId/events/stream')
+  @Roles('owner', 'admin', 'developer', 'reader', 'billing')
+  @UseGuards(OrgRolesGuard)
+  streamEvents(
+    @Param('orgId') orgId: string,
+    @Param('runId') runId: string,
+    @Headers('last-event-id') lastEventId?: string,
+  ) {
+    return this.conversations.streamRunEvents(orgId, runId, lastEventId ? Number(lastEventId) : 0);
   }
 
   @Post(':runId/result')

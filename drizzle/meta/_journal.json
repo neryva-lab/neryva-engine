@@ -197,6 +197,55 @@
       "when": 1761246100000,
       "tag": "0028_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1761246200000,
+      "tag": "0029_run_event_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1761246300000,
+      "tag": "0030_channels",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1761246300001,
+      "tag": "0031_assistant_instructions",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1761246300002,
+      "tag": "0032_tool_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1761246300003,
+      "tag": "0033_conversation_summaries",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1761246300004,
+      "tag": "0034_message_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1761246300005,
+      "tag": "0035_artifact_message_purpose",
+      "breakpoints": true
     }
   ]
 }

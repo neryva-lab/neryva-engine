@@ -23,6 +23,8 @@ export interface KnowledgeHit {
   text: string;
   sourceRange: { byteStart: number; byteEnd: number };
   score: number;
+  /** Document display title when available — citation support. */
+  title?: string | null;
 }
 
 @Injectable()
@@ -52,7 +54,7 @@ export class RetrievalService {
       const accountId = input.accountId ?? null;
       const rows = await tx.execute(sql`
         select c.id as chunk_id, c.sequence, c.text, c.source_range,
-               dv.id as document_version_id, d.id as document_id,
+               dv.id as document_version_id, d.id as document_id, d.title as title,
                1 - (e.embedding <=> ${vectorLiteral}::vector) as score
         from embeddings e
         join chunks c on c.id = e.chunk_id
@@ -67,6 +69,7 @@ export class RetrievalService {
           and d.state = 'ready'
           and a.state = 'active'
           and (a.scan_status in ('clean', 'skipped'))
+          and (a.expires_at is null or a.expires_at > now())
           and (acl.visibility = 'organization' or (acl.visibility = 'private' and acl.scope_account_id = ${accountId}::uuid))
         order by e.embedding <=> ${vectorLiteral}::vector
         limit ${limit}
@@ -79,6 +82,7 @@ export class RetrievalService {
         text: String(r.text),
         sourceRange: r.source_range as { byteStart: number; byteEnd: number },
         score: Number(r.score),
+        title: r.title == null ? null : String(r.title),
       }));
     });
   }

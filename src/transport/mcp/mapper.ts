@@ -42,7 +42,9 @@ export function toTimestamp(iso: string | null): { seconds: bigint; nanos: numbe
   if (!iso) return undefined;
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return undefined;
-  return { seconds: BigInt(Math.floor(ms / 1000)), nanos: (ms % 1000) * 1_000_000 };
+  const secs = Math.floor(ms / 1000);
+  // Floor-split keeps nanos non-negative for pre-1970 instants.
+  return { seconds: BigInt(secs), nanos: (ms - secs * 1000) * 1_000_000 };
 }
 
 export function toWireRun(run: {

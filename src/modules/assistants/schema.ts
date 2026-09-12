@@ -1,4 +1,4 @@
-import { index, integer, jsonb, pgTable, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 
 /**
  * Assistants — the stable identity for an organization-branded assistant.
@@ -60,6 +60,10 @@ export const assistantVersions = pgTable(
     toolPolicy: jsonb('tool_policy').notNull(),
     knowledgePolicy: jsonb('knowledge_policy'),
     guardrailPolicy: jsonb('guardrail_policy').notNull(),
+    /** Schema v2: org-authored system prompt (≤ 32 KiB, chk_assistant_instructions_len). */
+    instructions: text('instructions'),
+    /** Schema v2: provider-neutral generation params (temperature, max_output_tokens, top_p, reasoning_effort). */
+    modelParams: jsonb('model_params'),
     /** When set, this version restores payload from that version's id. */
     rollbackOf: uuid('rollback_of'),
     /** Stable digest of the canonical JSON (sorted keys) for duplicate detection + export parity. */
@@ -104,6 +108,9 @@ export const policySnapshots = pgTable(
     toolPolicy: jsonb('tool_policy').notNull(),
     guardrailPolicy: jsonb('guardrail_policy').notNull(),
     knowledgePolicy: jsonb('knowledge_policy'),
+    /** Schema v2: mirrors assistant_versions.instructions — snapshot is the run-time pin. */
+    instructions: text('instructions'),
+    modelParams: jsonb('model_params'),
     /** Canonical hash of the policy set — equals the source version's `hash`. */
     hash: varchar('hash', { length: 64 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -119,12 +126,18 @@ export type PolicySnapshot = typeof policySnapshots.$inferSelect;
 export const ASSISTANT_STATUSES = ['DRAFT', 'VALIDATING', 'VALID', 'PUBLISHED', 'RETIRED', 'ROLLED_BACK'] as const;
 export type AssistantStatus = (typeof ASSISTANT_STATUSES)[number];
 
-export const ASSISTANT_SCHEMA_VERSION = 1;
+export const ASSISTANT_SCHEMA_VERSION = 2;
 export const POLICY_SNAPSHOT_SCHEMA_VERSION = 1;
 
-/** Deterministic export envelope — import recomputes `hash` over the policy fields. */
+/**
+ * v1.1 harness additions. `instructions` is required at publish time for
+ * schema_version >= 2 (a published assistant without a system prompt cannot
+ * execute); legacy v1 rows remain valid and publishable until re-saved.
+ */
 export interface AssistantVersionExport {
   schema_version: number;
+  instructions?: string | null;
+  model_params?: unknown;
   model_policy: unknown;
   context_policy: unknown;
   tool_policy: unknown;

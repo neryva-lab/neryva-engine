@@ -1,0 +1,35 @@
+import { Module } from '@nestjs/common';
+import { ChannelsService } from './channels.service';
+import { ChannelsController } from './channels.controller';
+import { ChannelsWebhookController } from './webhooks.controller';
+import { WidgetController } from './widget.controller';
+import { WidgetService } from './widget.service';
+import { ChannelIngestConsumer, ChannelIngestService } from './ingest.service';
+import { ChannelOutboundService } from './outbound.service';
+import { WhatsAppSender, MessengerSender, TelegramSender, WebSender } from './senders';
+import { ConversationsModule } from '../conversations/conversations.module';
+import { OrganizationsModule } from '../organizations/organizations.module';
+
+/**
+ * Channel plane (Phase C — docs/architecture/engine/channel_integrations_plan.md).
+ * Console CRUD + public webhook plane + public widget plane + the two outbox
+ * consumers (ingest, outbound). The worker host registers the consumers —
+ * see WorkersModule.
+ */
+@Module({
+  imports: [ConversationsModule, OrganizationsModule],
+  controllers: [ChannelsController, ChannelsWebhookController, WidgetController],
+  providers: [
+    ChannelsService,
+    ChannelIngestService,
+    ChannelIngestConsumer,
+    ChannelOutboundService,
+    WhatsAppSender,
+    MessengerSender,
+    TelegramSender,
+    WebSender,
+    WidgetService,
+  ],
+  exports: [ChannelsService, ChannelIngestConsumer, ChannelOutboundService],
+})
+export class ChannelsModule {}

@@ -50,6 +50,19 @@ const envSchema = z.object({
   WORKERS__OUTBOX_ENABLED: boolean(true),
   MODULES__MCP_ENABLED: boolean(false),
   MODULES__KNOWLEDGE_ENABLED: boolean(false),
+  MODULES__CHANNELS_ENABLED: boolean(false),
+
+  // Channel plane (Phase C — channel_integrations_plan.md). Hard caps keep
+  // the public webhook/widget surfaces bounded; per-account rate limits live
+  // in Redis, not env.
+  CHANNELS__MAX_ACCOUNTS_PER_ORG: positiveInt(25, 500),
+  /** Widget session TTL (seconds) — sliding on activity, hard cap 24h. */
+  CHANNELS__WEB_SESSION_TTL_SECONDS: positiveInt(3600, 86_400),
+  /** Per-session inbound message cap per rolling hour (abuse control). */
+  CHANNELS__WEB_SESSION_HOURLY_MESSAGES: positiveInt(10, 1_000),
+  /** Bounded raw webhook envelope stored for replay/diagnostics (bytes) —
+   *  must fit real platform batch envelopes (Meta can batch several changes). */
+  CHANNELS__WEBHOOK_MAX_EVENT_BYTES: positiveInt(65_536, 262_144),
 
   /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
   BILLING_ANOMALY_CRON: z.string().default('15 3 * * *'),
@@ -175,6 +188,13 @@ const envSchema = z.object({
 
   /** Observability identity for traces and logs. */
   SERVICE_NAME: z.string().min(1).default('neryva-engine'),
+  /**
+   * Trust X-Forwarded-* headers (client IP resolution for rate limits and
+   * audit trails). TRUE when the engine sits behind a trusted proxy/LB —
+   * the default — and FALSE when the listener is directly internet-facing,
+   * where a spoofable X-Forwarded-For would bypass IP-scoped controls.
+   */
+  TRUST_PROXY: boolean(true),
   /** OpenTelemetry traces: off unless explicitly enabled (requires endpoint). */
   OTEL_TRACING_ENABLED: boolean(false),
   /** OTLP/HTTP traces endpoint, e.g. http://localhost:4318/v1/traces. */

@@ -1,8 +1,12 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { OutboxDispatcher } from '../common/infra/outbox/dispatcher';
 import { DbService } from '../common/infra/db/db.service';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
 import { UsageLedgerConsumer } from './usage-ledger.consumer';
+import { purgeExpiredIdempotencyRecords } from '../common/http/idempotency-records';
+import type { OutboxConsumer } from '../common/infra/outbox/consumer';
+import type { ChannelIngestConsumer } from '../modules/channels/ingest.service';
+import type { ChannelOutboundService } from '../modules/channels/outbound.service';
 import { env } from '../common/config/env';
 
 /**
@@ -18,15 +22,26 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
   private static readonly logger = new Logger(OutboxDispatcherWorker.name);
   private timer?: NodeJS.Timeout;
   private ticking = false;
+  private tickCount = 0;
 
   private readonly dispatcher: OutboxDispatcher;
 
   constructor(
-    db: DbService,
+    private readonly db: DbService,
     runDispatch: RunDispatchConsumer,
     usageLedger: UsageLedgerConsumer,
+    // Channel-plane consumers join the dispatcher only when MODULES__CHANNELS_ENABLED.
+    @Optional() channelIngest?: ChannelIngestConsumer,
+    @Optional() channelOutbound?: ChannelOutboundService,
   ) {
-    this.dispatcher = new OutboxDispatcher(db, [runDispatch, usageLedger], {
+    const consumers: OutboxConsumer[] = [runDispatch, usageLedger];
+    if (channelIngest) {
+      consumers.push(channelIngest);
+    }
+    if (channelOutbound) {
+      consumers.push(channelOutbound);
+    }
+    this.dispatcher = new OutboxDispatcher(db, consumers, {
       batchSize: env.OUTBOX_BATCH_SIZE,
       maxAttempts: env.OUTBOX_MAX_ATTEMPTS,
     });
@@ -53,8 +68,18 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
       const result = await this.dispatcher.tick();
       if (result.claimed > 0) {
         OutboxDispatcherWorker.logger.log(
-          `dispatch tick: claimed=${result.claimed} published=${result.published} retried=${result.retried} dead-lettered=${result.deadLettered}`,
+          `dispatch tick: claimed=${result.claimed} published=${result.published} retried=${result.retried} dead-lettered=${result.deadLettered} requeued=${result.requeued}`,
         );
+      }
+      // Bounded-growth sweep for the DB idempotency tier (~once a minute):
+      // expired records stop serving replays and their keys become reclaimable.
+      this.tickCount += 1;
+      const sweepEvery = Math.max(1, Math.ceil(60_000 / Math.max(1, env.OUTBOX_DISPATCH_INTERVAL_MS)));
+      if (this.tickCount % sweepEvery === 0) {
+        const purged = await purgeExpiredIdempotencyRecords(this.db);
+        if (purged > 0) {
+          OutboxDispatcherWorker.logger.log(`idempotency sweep: purged ${purged} expired records`);
+        }
       }
     } catch (err) {
       OutboxDispatcherWorker.logger.error(`dispatch tick failed: ${(err as Error).message}`);

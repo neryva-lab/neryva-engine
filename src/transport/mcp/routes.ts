@@ -1,4 +1,5 @@
 import { ConnectRouter, HandlerContext, Code, ConnectError } from '@connectrpc/connect';
+import { createHash } from 'node:crypto';
 import { toJson, type DescMessage } from '@bufbuild/protobuf';
 import { create } from '@bufbuild/protobuf';
 import {
@@ -29,6 +30,8 @@ import {
   type CommitRunResultRequest,
   type FailRunRequest,
   type GetAuthorizedRunContextRequest,
+  type SearchKnowledgeRequest,
+  type SaveConversationSummaryRequest,
   type CreateApprovalRequest,
   type SubmitMemoryProposalRequest,
   type AuthorizeToolCallRequest,
@@ -107,12 +110,42 @@ function capabilityToken(context: HandlerContext): string | undefined {
   return header.replace(/^Bearer\s+/i, '') || undefined;
 }
 
-function assertCapability(context: HandlerContext, op: CapabilityOp, scope: { organizationId: string; conversationId?: string; runId?: string }): void {
+function assertCapability(
+  context: HandlerContext,
+  op: CapabilityOp,
+  scope: { organizationId: string; conversationId?: string; runId?: string },
+  capabilityId?: string,
+): ReturnType<typeof assertCapabilityFor> {
   try {
-    assertCapabilityFor(capabilityToken(context), op, scope);
+    const claims = assertCapabilityFor(capabilityToken(context), op, scope);
+    // common.proto RequestContext.capability_id binds the request to the
+    // presented token (kid/nonce binding) — a mismatch is a scope-confusion
+    // attempt, never a repair (ledger 5.3 interceptor chain).
+    if (capabilityId && claims.capability_id !== capabilityId) {
+      throw new Error('request context capability_id does not match the presented capability token');
+    }
+    return claims;
   } catch (err) {
     throw new ConnectError((err as Error).message, Code.PermissionDenied);
   }
+}
+
+/**
+ * proto3 implicit presence: an OMITTED uint64 arrives as 0n. The contract
+ * treats expected_version = 0 as "no CAS" (matches the AppendRunEvents
+ * convention); coercing it to a numeric 0 would fail every CAS.
+ */
+function optionalUint64(v: bigint | undefined): number | undefined {
+  return v !== undefined && v > 0n ? Number(v) : undefined;
+}
+
+function assertDigest32(digest: Uint8Array | undefined, what: string): Buffer {
+  const buf = Buffer.from(digest ?? new Uint8Array());
+  // common.proto: "Exactly 32 bytes; validated at schema boundary."
+  if (buf.length !== 32) {
+    throw new ConnectError(`${what} must be exactly 32 bytes`, Code.InvalidArgument);
+  }
+  return buf;
 }
 
 function tsToDate(ts: { seconds: bigint; nanos?: number } | undefined): Date {
@@ -138,7 +171,7 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     // 5.4 — lease fencing with CAS on lease_epoch (lease state lives on the runs row).
     acquireOrRenewRunLease: connectHandler(async (req: AcquireOrRenewRunLeaseRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'lease', c);
+      assertCapability(context, 'lease', c, c.capabilityId);
       const renewUntil = req.renewUntil ? tsToDate(req.renewUntil) : new Date(Date.now() + 60_000);
       const result = await authority.acquireOrRenewRunLease({
         orgId: c.organizationId,
@@ -153,22 +186,23 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
 
     releaseRunLease: connectHandler(async (req: ReleaseRunLeaseRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'lease', c);
+      assertCapability(context, 'lease', c, c.capabilityId);
       const run = await authority.releaseRunLease({ orgId: c.organizationId, runId: c.runId, leaseEpoch: Number(req.leaseEpoch ?? 0n) });
       return { run: toWireRun(run) };
     }),
 
     getRun: connectHandler(async (req: GetRunRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'observe', c);
+      assertCapability(context, 'observe', c, c.capabilityId);
       const run = await authority.getRun(c.organizationId, c.runId);
       return { run: toWireRun(run) };
     }),
 
     // 5.11 — terminal atomicity: delegates to the Phase 4 atomic commit.
+    // expected_version CAS + lease-epoch fencing run INSIDE the commit TX.
     commitRunResult: connectHandler(async (req: CommitRunResultRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'commit', c);
+      const claims = assertCapability(context, 'commit', c, c.capabilityId);
       if (req.resultArtifact) {
         throw new ConnectError('result_artifact claim-check lands with Phase 7 artifacts', Code.Unimplemented);
       }
@@ -176,21 +210,37 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
       if (!text) {
         throw new ConnectError('result_text is required', Code.InvalidArgument);
       }
-      await authority.assertExpectedVersion(c.organizationId, c.runId, req.expectedVersion !== undefined ? Number(req.expectedVersion) : undefined);
-      const result = await conversations.commitRunResult({ orgId: c.organizationId, runId: c.runId, content: { text }, actor: 'agent-studio-runtime' });
+      const result = await conversations.commitRunResult({
+        orgId: c.organizationId,
+        runId: c.runId,
+        content: { text },
+        actor: 'agent-studio-runtime',
+        expectedVersion: optionalUint64(req.expectedVersion),
+        leaseEpoch: claims.lease_epoch,
+        usage: req.usage
+          ? {
+              provider: req.usage.provider || 'unknown',
+              model: req.usage.model || 'unknown',
+              promptTokens: Number(req.usage.promptTokens ?? 0n),
+              completionTokens: Number(req.usage.completionTokens ?? 0n),
+              totalTokens: Number(req.usage.totalTokens ?? 0n),
+            }
+          : undefined,
+      });
       const run = await authority.getRun(c.organizationId, c.runId);
       return { run: toWireRun(run), messageId: result.message_id };
     }),
 
     failRun: connectHandler(async (req: FailRunRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'commit', c);
+      const claims = assertCapability(context, 'commit', c, c.capabilityId);
       const run = await authority.failRun({
         orgId: c.organizationId,
         runId: c.runId,
         errorCode: req.errorCode || 'studio_error',
         errorMessage: (req.errorMessage ?? '').slice(0, 1024),
-        expectedVersion: req.expectedVersion !== undefined ? Number(req.expectedVersion) : undefined,
+        expectedVersion: optionalUint64(req.expectedVersion),
+        leaseEpoch: claims.lease_epoch,
       });
       return { run: toWireRun(run) };
     }),
@@ -198,18 +248,10 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     // 5.6 — bounded batch, (run_id, event_id) dedup, engine_sequence authoritative.
     appendRunEvents: connectHandler(async (req: { ctx?: RequestContext; events?: Array<Record<string, unknown>> }, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'append_events', c);
+      const claims = assertCapability(context, 'append_events', c, c.capabilityId);
       const events = req.events ?? [];
       if (events.length === 0 || events.length > 32) {
         throw new ConnectError('events batch must contain 1..32 events', Code.InvalidArgument);
-      }
-      // Optional per-event CAS against the run version.
-      const run = await authority.getRun(c.organizationId, c.runId);
-      for (const ev of events) {
-        const expected = ev.expectedRunVersion;
-        if (typeof expected === 'bigint' && expected > 0n && Number(expected) !== run.version) {
-          throw new ConnectError('stale run version for event batch', Code.Aborted);
-        }
       }
       const mapped = events.map((ev) => {
         const body = ev.body as { case: string; value: unknown } | undefined;
@@ -218,7 +260,7 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
           throw new ConnectError(`event ${String(ev.eventId)} has no known body`, Code.InvalidArgument);
         }
         return {
-          eventId: String(ev.eventId),
+          eventId: String(ev.eventId ?? ''),
           eventType: wireEventTypeToStore(ev.type as EventType),
           schemaVersion: Number(ev.schemaVersion) || 1,
           producerSequence: ev.producerSequence !== undefined ? Number(ev.producerSequence) : undefined,
@@ -230,10 +272,24 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
         runId: c.runId,
         producerIdentity: `agent-studio:${c.actorId}`,
         events: mapped,
+        // Batch CAS + request-level idempotency are evaluated inside the
+        // authority transaction (the old pre-flight read was a TOCTOU gap).
+        expectedRunVersion: events.reduce<number | undefined>((acc, ev) => {
+          const expected = ev.expectedRunVersion;
+          return typeof expected === 'bigint' && expected > 0n ? Number(expected) : acc;
+        }, undefined),
+        idempotency: {
+          callerScope: `agent-studio:${c.actorId}`,
+          idempotencyKey: c.idempotencyKey,
+          requestHash: createHash('sha256')
+            .update(JSON.stringify({ run: c.runId, events: mapped.map((m) => [m.eventId, m.eventType, m.schemaVersion]) }))
+            .digest('hex'),
+        },
+        leaseEpoch: claims.lease_epoch,
       });
-      const byId = new Map(result.accepted.map((a) => [a.eventId, a.engineSequence]));
+      const byId = new Map(result.accepted.map((a) => [a.eventId, a]));
       const accepted = events.map((ev) =>
-        toWireRunEventFromRequest(ev, c.runId, `agent-studio:${c.actorId}`, byId.get(String(ev.eventId)) ?? 0),
+        toWireRunEventFromRequest(ev, c.runId, `agent-studio:${c.actorId}`, byId.get(String(ev.eventId))?.engineSequence ?? 0),
       );
       return { accepted, duplicateCount: result.duplicateCount };
     }),
@@ -241,18 +297,60 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     // 5.5 — bounded manifest, filters applied in query, never after.
     getAuthorizedRunContext: connectHandler(async (req: GetAuthorizedRunContextRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'context', c);
+      assertCapability(context, 'context', c, c.capabilityId);
       void req.requestedPurposes; // knowledge purposes filter activates with Phase 7 retrieval
       const manifest = await authority.getAuthorizedRunContext({ orgId: c.organizationId, runId: c.runId });
-      // PlainMessage-compatible; knowledge/memory/artifact fields are typed
-      // placeholders until Phase 7 populates them.
+      // PlainMessage-compatible — the authority service returns the exact wire shape.
       return { manifest: manifest as never };
+    }),
+
+    // v1.1 — agentic mid-run retrieval, same ACL-before-scoring path.
+    searchKnowledge: connectHandler(async (req: SearchKnowledgeRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'search_knowledge', c, c.capabilityId);
+      const results = await authority.searchKnowledge({
+        orgId: c.organizationId,
+        runId: c.runId,
+        query: req.query || '',
+        maxResults: Number(req.maxResults ?? 5),
+      });
+      return {
+        results: results.map((r) => ({
+          documentId: r.documentId,
+          chunkId: r.chunkId,
+          snippet: r.snippet,
+          title: r.title,
+          score: r.score,
+          sourceRangeStart: r.sourceRangeStart,
+          sourceRangeEnd: r.sourceRangeEnd,
+        })),
+      };
+    }),
+
+    // v1.1 — Studio-produced conversation compaction persisted as truth.
+    saveConversationSummary: connectHandler(async (req: SaveConversationSummaryRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'context', c, c.capabilityId);
+      if (!req.summary) {
+        throw new ConnectError('summary is required', Code.InvalidArgument);
+      }
+      const result = await authority.saveConversationSummary({
+        orgId: c.organizationId,
+        conversationId: c.conversationId,
+        sourceSequence: Number(req.sourceSequence ?? 0n),
+        summary: req.summary,
+        tokenCount: Number(req.tokenCount ?? 0),
+        modelId: req.modelId || undefined,
+        callerScope: `agent-studio:${c.actorId}`,
+        idempotencyKey: `summary:${c.conversationId}:${Number(req.sourceSequence ?? 0n)}`,
+      });
+      return { summaryId: result.summaryId, wasDuplicate: result.duplicate };
     }),
 
     // 5.7 — approvals persist WAITING_APPROVAL and emit an outbox event.
     createApprovalRequest: connectHandler(async (req: CreateApprovalRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'approval', c);
+      assertCapability(context, 'approval', c, c.capabilityId);
       const approval = req.approval;
       if (!approval?.approvalId || !approval.summary) {
         throw new ConnectError('approval.approval_id and approval.summary are required', Code.InvalidArgument);
@@ -285,7 +383,7 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     // 5.9 — proposals are stored as proposals, never durable memory.
     submitMemoryProposal: connectHandler(async (req: SubmitMemoryProposalRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'memory_proposal', c);
+      assertCapability(context, 'memory_proposal', c, c.capabilityId);
       const result = await authority.submitMemoryProposal({
         orgId: c.organizationId,
         runId: c.runId,
@@ -303,7 +401,7 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     // 5.10 — scoped tool capability bound to run/step/tool_call + digests.
     authorizeToolCall: connectHandler(async (req: AuthorizeToolCallRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'tool', c);
+      assertCapability(context, 'tool', c, c.capabilityId);
       const result = await authority.authorizeToolCall({
         orgId: c.organizationId,
         runId: c.runId,
@@ -311,7 +409,7 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
         toolCallId: req.toolCallId,
         toolName: req.toolName,
         toolVersion: req.toolVersion || undefined,
-        argumentDigest: Buffer.from(req.argumentDigest),
+        argumentDigest: assertDigest32(req.argumentDigest, 'argument_digest'),
       });
       return {
         allowed: result.allowed,
@@ -323,11 +421,11 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
 
     recordToolOutcome: connectHandler(async (req: RecordToolOutcomeRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'tool', c);
+      assertCapability(context, 'tool', c, c.capabilityId);
       const result = await authority.recordToolOutcome({
         orgId: c.organizationId,
         toolCallId: req.toolCallId,
-        resultDigest: req.resultDigest ? Buffer.from(req.resultDigest) : undefined,
+        resultDigest: req.resultDigest ? assertDigest32(req.resultDigest, 'result_digest') : undefined,
         status: req.status,
       });
       return { accepted: result.accepted, wasDuplicate: result.wasDuplicate };
@@ -336,14 +434,14 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     // 5.8 — checkpoint claim-check pointer; bytes stay in object storage.
     saveCheckpointRef: connectHandler(async (req: SaveCheckpointRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'checkpoint', c);
+      assertCapability(context, 'checkpoint', c, c.capabilityId);
       const result = await authority.saveCheckpointRef({
         orgId: c.organizationId,
         runId: c.runId,
         checkpointRef: req.checkpointId,
         checkpointVersion: Number(req.checkpointVersion ?? 1n),
         artifactId: req.artifactRef?.artifactId || undefined,
-        digest: Buffer.from(req.digest),
+        digest: assertDigest32(req.digest, 'digest'),
         producer: `agent-studio:${c.actorId}`,
       });
       return { accepted: result.accepted, checkpointId: req.checkpointId };
@@ -353,14 +451,14 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
   router.service(RunObservationService, {
     getRun: connectHandler(async (req: GetRunRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'observe', c);
+      assertCapability(context, 'observe', c, c.capabilityId);
       const run = await authority.getRun(c.organizationId, c.runId);
       return { run: toWireRun(run) };
     }),
 
     listRunEvents: connectHandler(async (req: ListRunEventsRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'observe', c);
+      assertCapability(context, 'observe', c, c.capabilityId);
       const limit = req.page?.pageSize || 50;
       const rows = await authority.listRunEvents(c.organizationId, c.runId, {
         afterSequence: req.afterSequence !== undefined ? Number(req.afterSequence) : 0,
@@ -375,13 +473,17 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
     }),
 
     // Server-streaming replay: events after the cursor, then tail until the
-    // run is terminal (bounded by MCP_WATCH_MAX_DURATION_SECONDS).
+    // run is terminal (bounded by MCP_WATCH_MAX_DURATION_SECONDS). The
+    // abort signal ends the loop so a disconnected client stops polling.
     watchRunEvents: async function* (req: WatchRunEventsRequest, context: HandlerContext): AsyncGenerator<{ event: ReturnType<typeof toWireRunEvent> }> {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'observe', c);
+      assertCapability(context, 'observe', c, c.capabilityId);
       const deadline = Date.now() + env.MCP_WATCH_MAX_DURATION_SECONDS * 1000;
       let cursor = req.afterSequence !== undefined ? Number(req.afterSequence) : 0;
       while (Date.now() < deadline) {
+        if (context.signal?.aborted) {
+          return;
+        }
         const rows = await authority.listRunEvents(c.organizationId, c.runId, { afterSequence: cursor, limit: 50 });
         for (const row of rows) {
           cursor = row.engineSequence;
@@ -397,21 +499,24 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
       }
     },
 
-    // 5.12 + 7.9 — artifact facade: 7 fresh checks, short-TTL presigned GET.
+    // 5.12 + 7.9 — artifact facade: 7 fresh checks + run-scope binding,
+    // short-TTL presigned GET. The ref's uri/key-id/expiry fields are always
+    // populated — protovalidate requires min_len 1 on uri and
+    // encryption_key_id, and a present expires_at.
     getRunArtifact: connectHandler(async (req: GetRunArtifactRequest, context: HandlerContext) => {
       const c = readCtx(req.ctx);
-      assertCapability(context, 'observe', c);
-      const result = await authority.getRunArtifact({ orgId: c.organizationId, artifactId: req.artifactId });
+      assertCapability(context, 'observe', c, c.capabilityId);
+      const result = await authority.getRunArtifact({ orgId: c.organizationId, runId: c.runId, artifactId: req.artifactId });
       return {
         artifact: {
           artifactId: result.ref.artifactId,
-          uri: '',
+          uri: result.ref.uri,
           mediaType: result.ref.mediaType,
           byteLength: BigInt(result.ref.byteLength),
           sha256: new Uint8Array(result.ref.sha256),
-          encryptionKeyId: '',
+          encryptionKeyId: result.ref.encryptionKeyId,
           purpose: result.ref.purpose,
-          expiresAt: result.ref.expiresAt ? toTimestamp(result.ref.expiresAt.toISOString()) : undefined,
+          expiresAt: toTimestamp(result.ref.expiresAt),
         },
         accessUrl: result.accessUrl,
       };

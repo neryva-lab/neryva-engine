@@ -3,7 +3,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { DbService } from '../../common/infra/db/db.service';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { AuditService } from '../../common/audit/audit.service';
-import { ApiError } from '../../common/http/api-error';
+import { ApiError, ERROR_CODES } from '../../common/http/api-error';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
 import { conversations, messages } from '../conversations/schema';
@@ -49,6 +49,8 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
       throw ApiError.validation({ keep_days: 'must be a positive integer' });
     }
     await this.db.withOrg(input.orgId, async (tx) => {
+      // True upsert — a changed keep_days must take effect, not be silently
+      // swallowed by a DO NOTHING.
       await tx
         .insert(retentionPolicies)
         .values({
@@ -59,7 +61,10 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
           keepUntilRule: { keep_days: input.keepDays },
           createdBy: input.actor,
         })
-        .onConflictDoNothing();
+        .onConflictDoUpdate({
+          target: [retentionPolicies.organizationId, retentionPolicies.resourceType, retentionPolicies.retentionClass],
+          set: { keepUntilRule: { keep_days: input.keepDays } },
+        });
     });
     await this.audit.add({
       action: 'retention.policy_upserted',
@@ -78,7 +83,7 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     return this.db.withOrg(input.orgId, async (tx) => {
       const created = await tx.execute(sql`
         insert into purge_tasks (id, organization_id, scope_type, scope_id, reason)
-        select gen_random_uuid(), a.organization_id, 'conversation', a.id, 'retention_expiry'
+        select gen_random_uuid(), a.organization_id, 'artifact', a.id, 'retention_expiry'
         from artifacts a
         join retention_policies p on p.organization_id = a.organization_id
           and p.resource_type = 'artifact' and p.retention_class = a.retention_class
@@ -233,9 +238,8 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async stepAuthorize(task: PurgeTask): Promise<void> {
-    if (task.scopeType !== 'conversation') {
-      // v1 purge scope: conversations (cascades messages/runs via FK).
-      throw new Error(`unsupported purge scope ${task.scopeType} (v1 supports conversation)`);
+    if (task.scopeType !== 'conversation' && task.scopeType !== 'artifact') {
+      throw new Error(`unsupported purge scope ${task.scopeType} (v1 supports conversation, artifact)`);
     }
     await this.toStep(task, 'check_holds');
   }
@@ -249,7 +253,12 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
           and(
             eq(legalHolds.organizationId, task.organizationId),
             eq(legalHolds.status, 'active'),
-            or(eq(legalHolds.scopeType, 'organization'), and(eq(legalHolds.scopeType, 'conversation'), eq(legalHolds.scopeId, task.scopeId))),
+            // An expired hold no longer blocks — the purge gate is the ACTIVE window.
+            or(isNull(legalHolds.expiresAt), sql`${legalHolds.expiresAt} > now()`),
+            or(
+              eq(legalHolds.scopeType, 'organization'),
+              and(eq(legalHolds.scopeType, task.scopeType), eq(legalHolds.scopeId, task.scopeId)),
+            ),
           ),
         )
         .limit(1),
@@ -261,9 +270,14 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async stepMarkUnavailable(task: PurgeTask): Promise<void> {
-    // Product surface unavailable BEFORE anything is destroyed.
+    // Product surface unavailable BEFORE anything is destroyed. Artifacts use
+    // the DDL-sanctioned 'retiring' state (chk_artifacts_state).
     await this.db.withOrg(task.organizationId, async (tx) => {
-      await tx.update(conversations).set({ status: 'deleted', updatedAt: new Date().toISOString() }).where(eq(conversations.id, task.scopeId));
+      if (task.scopeType === 'conversation') {
+        await tx.update(conversations).set({ status: 'deleted', updatedAt: new Date().toISOString() }).where(eq(conversations.id, task.scopeId));
+      } else {
+        await tx.update(artifacts).set({ state: 'retiring', updatedAt: new Date().toISOString() }).where(eq(artifacts.id, task.scopeId));
+      }
     });
     await this.toStep(task, 'emit_derived_deletion');
   }
@@ -273,37 +287,49 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     // durable-delivery guarantee as every other fact.
     await this.db.withOrg(task.organizationId, async (tx) => {
       await recordOutboxEvent(tx, {
-        aggregateType: 'conversation',
+        aggregateType: task.scopeType,
         aggregateId: task.scopeId,
         organizationId: task.organizationId,
-        eventType: 'conversation.purged',
+        eventType: task.scopeType === 'conversation' ? 'conversation.purged' : 'artifact.purged',
         partitionKey: task.scopeId,
-        payload: { conversation_id: task.scopeId, reason: task.reason },
+        payload: { scope_type: task.scopeType, scope_id: task.scopeId, reason: task.reason },
       });
     });
     await this.toStep(task, 'purge_objects');
   }
 
+  private static readonly OBJECT_BATCH = 100;
+
   private async stepPurgeObjects(task: PurgeTask): Promise<void> {
-    // Artifacts attached to this conversation's runs (checkpoints, transcripts).
     const rows = await this.db.withOrg(task.organizationId, async (tx) => {
-      const artifactRows = await tx.execute(sql`
-        select distinct a.id, a.object_key from artifacts a
-        join runs r on r.policy_snapshot_id is not null and r.conversation_id = ${task.scopeId}::uuid
-        join assistant_versions av on av.id = r.assistant_version_id
-        where a.organization_id = ${task.organizationId}::uuid
-        limit 100
-      `);
-      void artifactRows;
-      // v1: conversation purge deletes artifacts whose purpose is bound to the
-      // conversation (transcripts/tool results) — source documents follow
-      // retention, not conversation deletion.
-      const direct = await tx
+      if (task.scopeType === 'artifact') {
+        return tx
+          .select({ id: artifacts.id, objectKey: artifacts.objectKey })
+          .from(artifacts)
+          .where(and(eq(artifacts.id, task.scopeId), eq(artifacts.organizationId, task.organizationId), inArray(artifacts.state, ['active', 'retiring'])))
+          .limit(RetentionPurgeService.OBJECT_BATCH);
+      }
+      // Conversation scope: ONLY artifacts bound to THIS conversation via its
+      // runs (run_events / checkpoints / tool outcomes). The former query
+      // selected every org-wide TRANSCRIPT artifact — a cross-conversation
+      // destructive bug.
+      return tx
         .select({ id: artifacts.id, objectKey: artifacts.objectKey })
         .from(artifacts)
-        .where(and(eq(artifacts.organizationId, task.organizationId), eq(artifacts.purpose, 'TRANSCRIPT')))
-        .limit(100);
-      return direct;
+        .where(
+          and(
+            eq(artifacts.organizationId, task.organizationId),
+            inArray(artifacts.state, ['active', 'retiring']),
+            sql`${artifacts.id} in (
+              select re.artifact_id from run_events re join runs r on r.id = re.run_id where r.conversation_id = ${task.scopeId}::uuid
+              union
+              select c.artifact_id from checkpoints c join runs r on r.id = c.run_id where r.conversation_id = ${task.scopeId}::uuid
+              union
+              select te.result_artifact_id from tool_effects te join runs r on r.id = te.run_id where r.conversation_id = ${task.scopeId}::uuid
+            )`,
+          ),
+        )
+        .limit(RetentionPurgeService.OBJECT_BATCH);
     });
     const deleted: string[] = [];
     for (const row of rows) {
@@ -313,19 +339,28 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
         await tx.update(artifacts).set({ state: 'purged', updatedAt: new Date().toISOString() }).where(eq(artifacts.id, row.id));
       });
     }
+    if (rows.length === RetentionPurgeService.OBJECT_BATCH) {
+      // Batch drained — leave the step at purge_objects; the next tick
+      // deletes the next batch (re-entrant, idempotent: purged rows no
+      // longer match the state filter).
+      return;
+    }
     await this.toStep(task, 'purge_content', { objects_purged: deleted.length });
   }
 
   private async stepPurgeContent(task: PurgeTask): Promise<void> {
-    // Relational content per policy: messages purged (transcript data),
-    // runs kept as redacted skeletons for billing/audit explainability.
-    await this.db.withOrg(task.organizationId, async (tx) => {
-      await tx.delete(messages).where(and(eq(messages.conversationId, task.scopeId), eq(messages.organizationId, task.organizationId)));
-      await tx
-        .update(memoryItems)
-        .set({ deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-        .where(and(eq(memoryItems.scopeId, task.scopeId), eq(memoryItems.scopeType, 'conversation')));
-    });
+    if (task.scopeType === 'conversation') {
+      // Relational content per policy: messages purged (transcript data),
+      // runs kept as redacted skeletons for billing/audit explainability.
+      await this.db.withOrg(task.organizationId, async (tx) => {
+        await tx.delete(messages).where(and(eq(messages.conversationId, task.scopeId), eq(messages.organizationId, task.organizationId)));
+        await tx
+          .update(memoryItems)
+          .set({ deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .where(and(eq(memoryItems.scopeId, task.scopeId), eq(memoryItems.scopeType, 'conversation')));
+      });
+    }
+    // artifact scope: no relational content beyond the artifact row itself.
     await this.toStep(task, 'tombstone');
   }
 
@@ -336,7 +371,7 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
         .values({
           id: uuidv7(),
           organizationId: task.organizationId,
-          resourceType: 'conversation',
+          resourceType: task.scopeType,
           resourceId: task.scopeId,
           reason: task.reason,
         })
@@ -345,7 +380,7 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     await this.toStep(task, 'done', { purged_at: new Date().toISOString() });
     await this.audit.add({
       action: 'purge.completed',
-      resourceType: 'conversation',
+      resourceType: task.scopeType,
       resourceId: task.scopeId,
       actorType: 'service',
       actorId: 'lifecycle-worker',
@@ -365,11 +400,14 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
 
   /** Typed 410 when a purged resource is referenced (MCP + console paths). */
   async assertNotTombstoned(resourceType: string, resourceId: string): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resourceId)) {
+      return; // non-uuid ids can never be tombstoned
+    }
     const rows = await this.db.withBypass((tx) =>
       tx.select().from(tombstones).where(and(eq(tombstones.resourceType, resourceType), eq(tombstones.resourceId, resourceId))).limit(1),
     );
     if (rows.length > 0) {
-      throw ApiError.conflict('resource has been purged', { resource_id: resourceId, reason: rows[0].reason });
+      throw new ApiError(410, ERROR_CODES.RESOURCE_PURGED, 'resource has been purged', { resource_id: resourceId, reason: rows[0].reason });
     }
   }
 

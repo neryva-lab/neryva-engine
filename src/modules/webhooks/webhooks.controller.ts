@@ -5,7 +5,7 @@ import { ApiError } from '../../common/http/api-error';
 import { Idempotent } from '../../common/http/idempotency';
 import { RateLimit } from '../../common/http/rate-limit';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
-import { WebhooksService } from './webhooks.service';
+import { WebhooksService, webhookEventCatalog } from './webhooks.service';
 
 /**
  * Webhook management (the console surface behind the studio nav's
@@ -17,6 +17,13 @@ import { WebhooksService } from './webhooks.service';
 @UseGuards(OrgRolesGuard)
 export class WebhooksController {
   constructor(private readonly webhooks: WebhooksService) {}
+
+  /** The subscribable event vocabulary (ledger I-2/E-5). */
+  @Get('events')
+  @Roles('owner', 'admin', 'billing', 'developer', 'reader')
+  eventCatalog() {
+    return { events: webhookEventCatalog() };
+  }
 
   @Get()
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')

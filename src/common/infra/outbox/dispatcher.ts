@@ -50,6 +50,8 @@ export interface DispatchResult {
   published: number;
   retried: number;
   deadLettered: number;
+  /** Requeued because another worker still holds a fresh inbox claim. */
+  requeued: number;
 }
 
 export class OutboxDispatcher {
@@ -77,7 +79,7 @@ export class OutboxDispatcher {
   async tick(): Promise<DispatchResult> {
     const recovered = await this.recoverStaleClaims();
     const claimed = await this.claimBatch();
-    const result: DispatchResult = { claimed: claimed.length, published: 0, retried: 0, deadLettered: 0 };
+    const result: DispatchResult = { claimed: claimed.length, published: 0, retried: 0, deadLettered: 0, requeued: 0 };
 
     for (const event of claimed) {
       const outcome = await this.publishOne(event);
@@ -101,7 +103,10 @@ export class OutboxDispatcher {
             lte(outboxEvents.nextAttemptAt, new Date().toISOString()),
           ),
         )
-        .orderBy(asc(outboxEvents.createdAt))
+        // Deterministic FIFO: createdAt is the ordering key; eventId (uuidv7,
+        // time-sortable) breaks same-µs ties so two replicas interleave claims
+        // without reordering per-partition delivery.
+        .orderBy(asc(outboxEvents.createdAt), asc(outboxEvents.eventId))
         .limit(this.batchSize)
         .for('update', { skipLocked: true });
 
@@ -140,13 +145,21 @@ export class OutboxDispatcher {
   }
 
   /** Fan out to consumers, each deduplicating through the inbox. */
-  private async publishOne(event: OutboxEvent): Promise<'published' | 'retried' | 'deadLettered'> {
+  private async publishOne(event: OutboxEvent): Promise<'published' | 'retried' | 'deadLettered' | 'requeued'> {
     const consumers = this.consumersFor(event.eventType);
     try {
       for (const consumer of consumers) {
-        const claim = await claimInbox(this.db, consumer.name, event.eventId);
+        const claim = await claimInbox(this.db, consumer.name, event.eventId, this.staleClaimMs);
         if (claim === 'skip') {
           continue; // already durably processed for this consumer
+        }
+        if (claim === 'busy') {
+          // A fresh PROCESSING claim from another (possibly crashed) worker:
+          // the side effect is NOT known to have run. Publishing past it would
+          // lose the event — requeue without burning the retry budget; stale
+          // recovery reclaims both the inbox claim and this row.
+          await this.requeueBusy(event.eventId);
+          return 'requeued';
         }
         try {
           await consumer.handle(event);
@@ -201,6 +214,22 @@ export class OutboxDispatcher {
           claimedAt: null,
           lastError: message,
         })
+        .where(eq(outboxEvents.eventId, eventId));
+    });
+  }
+
+  /**
+   * Requeue an event whose consumer inbox claim is held fresh by another
+   * worker. Not a failure: attempt count is untouched, the retry delay is a
+   * short fixed wait (a fraction of the stale-claim lease) so a crashed
+   * holder is picked back up by stale recovery, never dropped.
+   */
+  private async requeueBusy(eventId: string): Promise<void> {
+    const delayMs = Math.max(1_000, Math.floor(this.staleClaimMs / 4));
+    await this.db.withBypass(async (tx) => {
+      await tx
+        .update(outboxEvents)
+        .set({ status: 'RETRY_WAIT', nextAttemptAt: new Date(Date.now() + delayMs).toISOString(), claimedAt: null })
         .where(eq(outboxEvents.eventId, eventId));
     });
   }

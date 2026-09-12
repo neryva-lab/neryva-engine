@@ -18,6 +18,7 @@ export const CAPABILITY_AUDIENCE = 'neryva-agent-studio';
 export const CAPABILITY_OPS = [
   'lease',
   'context',
+  'search_knowledge',
   'append_events',
   'approval',
   'memory_proposal',

@@ -63,6 +63,13 @@ const envSchema = z.object({
   /** Bounded raw webhook envelope stored for replay/diagnostics (bytes) —
    *  must fit real platform batch envelopes (Meta can batch several changes). */
   CHANNELS__WEBHOOK_MAX_EVENT_BYTES: positiveInt(65_536, 262_144),
+  // FL-3.1 — inbound voice-note ASR (POST {audio_base64, media_type} → {text}).
+  // Unset = voice notes are recorded without reply (text messaging unaffected).
+  CHANNELS__VOICE_ASR_URL: z.string().url().optional().default(''),
+  // FL-3.17 — generic HTTP email provider seam for the `email` channel
+  // sender (POST {to, subject, text} with `CHANNELS__EMAIL_API_KEY` bearer).
+  CHANNELS__EMAIL_API_URL: z.string().url().optional().default(''),
+  CHANNELS__EMAIL_API_KEY: z.string().optional().default(''),
 
   /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
   BILLING_ANOMALY_CRON: z.string().default('15 3 * * *'),
@@ -98,6 +105,21 @@ const envSchema = z.object({
   ORG_MAX_MEMBERS: positiveInt(500, 100_000),
   /** Default trial length (days) for console-initiated product trials. */
   ORG_TRIAL_DEFAULT_DAYS: positiveInt(14, 90),
+  /** AUTH-2.2: abuse cap on how many orgs one account may simultaneously own. */
+  ORGS__MAX_OWNED_PER_ACCOUNT: positiveInt(20, 1_000),
+  /**
+   * AUTH-1.1: cold-start seeding for the platform staff axis — comma-separated
+   * emails upserted to super_admin on staff-module boot (audited, idempotent).
+   * Accounts must already exist; missing emails are skipped with a warning.
+   * Keep empty in production unless ops explicitly sets it.
+   */
+  PLATFORM_STAFF_BOOTSTRAP_ACCOUNTS: z.string().optional().default(''),
+  /**
+   * AUTH-4.1: enforce the purchased seat wall at invite redemption. Off only
+   * so integration suites can exercise the over-provision posture without
+   * billing fixtures; billing keeps sole write authority on `seats`.
+   */
+  ENTITLEMENTS__SEAT_ENFORCEMENT: boolean(true),
 
   /** Satellites: heartbeat lease TTL (the live window) — every beat renews it. */
   SATELLITE_HEARTBEAT_TIMEOUT_SECONDS: positiveInt(120, 3600),
@@ -150,6 +172,74 @@ const envSchema = z.object({
   // must wire a real embedding provider before retrieval goes live.
   KNOWLEDGE_MAX_UPLOAD_BYTES: positiveInt(1024, 1_073_741_824),
   EMBEDDING_PROVIDER: z.enum(['local']).default('local'),
+
+  // Harness guardrails (final_ledger.md FL-1.4). HARNESS__MODERATION_PROVIDER
+  // selects the runtime moderation classifier: 'noop' (dev default, allows
+  // everything) or 'openai_compatible' (POST {base_url}/v1/moderations).
+  // A CONFIGURED provider that fails at call time fails CLOSED in production
+  // (verdict block) and stays permissive in development — availability
+  // failures never silently pass content in prod.
+  HARNESS__MODERATION_PROVIDER: z.enum(['noop', 'openai_compatible']).default('noop'),
+  HARNESS__MODERATION_BASE_URL: z.string().url().optional().default(''),
+  HARNESS__MODERATION_API_KEY: z.string().optional().default(''),
+  HARNESS__MODERATION_MODEL: z.string().default('omni-moderation-latest'),
+  HARNESS__MODERATION_TIMEOUT_MS: positiveInt(3000, 30_000),
+  // Auto-escalation hook (FL-1.7c, flag-gated): when an end user leaves N
+  // consecutive negative feedback ratings in one conversation, escalate to a
+  // human agent. Default off - organizations opt in per deployment.
+  HARNESS__AUTO_ESCALATE_ENABLED: boolean(false),
+  HARNESS__AUTO_ESCALATE_NEGATIVE_STREAK: positiveInt(3, 20),
+
+  // FL-2.1 — cross-encoder reranker over fused hybrid candidates. DEFAULT
+  // OFF (noop identity): hybrid retrieval runs FTS+vector+RRF with zero
+  // external dependencies; 'http' wires a /v1/rerank cross-encoder endpoint
+  // and DEGRADES to fused order on failure (a reranker is a quality lever,
+  // never an availability dependency).
+  HARNESS__RERANKER_PROVIDER: z.enum(['noop', 'http']).default('noop'),
+  HARNESS__RERANKER_URL: z.string().url().optional().default(''),
+  HARNESS__RERANKER_API_KEY: z.string().optional().default(''),
+  HARNESS__RERANKER_TIMEOUT_MS: positiveInt(3000, 30_000),
+
+  // FL-2.2 — resumable re-embed worker (batched, atomic per-document swap).
+  WORKERS__REEMBED_ENABLED: boolean(false),
+  WORKERS__REEMBED_BATCH: positiveInt(10, 200),
+  WORKERS__CONNECTORS_ENABLED: boolean(false),
+  WORKERS__CONNECTORS_INTERVAL_MS: positiveInt(300_000, 86_400_000),
+
+  // FL-2.6 — self-hosted extraction workers. Absent = the media family is
+  // unsupported for ingest (loud failure at the pipeline, never garbage).
+  KNOWLEDGE_OCR_URL: z.string().url().optional().default(''),
+  KNOWLEDGE_TRANSCRIBE_URL: z.string().url().optional().default(''),
+
+  // FL-3.5 — hosted web-search endpoint for the builtin tool (POST {query}
+  // -> {results: [{title, url, snippet}]}).
+  HARNESS__WEB_SEARCH_URL: z.string().url().optional().default(''),
+  // FL-3.10 — auto memory extraction proposer (flag-gated; proposes through
+  // the existing memory-proposal pipeline, never durable truth by itself).
+  HARNESS__AUTO_MEMORY_ENABLED: boolean(false),
+
+  // FL-3.7 — query rewriting port (multi-query expansion / HyDE-class).
+  // Unset = identity (one variant, zero cost); failures degrade to the
+  // original query (quality lever, never an availability dependency).
+  HARNESS__QUERY_REWRITE_URL: z.string().url().optional().default(''),
+  HARNESS__QUERY_REWRITE_TIMEOUT_MS: positiveInt(3000, 30_000),
+
+  // FL-3.13 — online LLM-as-judge over sampled completed runs. The judge
+  // endpoint receives bounded input/output texts (server-side seam); verdicts
+  // land in run_judgments. Sampling is deterministic per run id.
+  WORKERS__LLM_JUDGE_ENABLED: boolean(false),
+  HARNESS__LLM_JUDGE_URL: z.string().url().optional().default(''),
+  HARNESS__LLM_JUDGE_SAMPLE_PCT: positiveInt(10, 100),
+  HARNESS__LLM_JUDGE_TIMEOUT_MS: positiveInt(5000, 60_000),
+  HARNESS__LLM_JUDGE_RUBRIC: z.string().max(2048).default('Rate the assistant reply for helpfulness, correctness and tone on a 0-1 scale.'),
+
+  // FL-3.1 — outbound text-to-speech for voice-capable channels (WhatsApp
+  // audio notes). POST {text, voice} -> {audio_base64, media_type}.
+  HARNESS__TTS_URL: z.string().url().optional().default(''),
+  HARNESS__TTS_VOICE: z.string().default('alloy'),
+  // FL-3.2 — hosted image-generation endpoint for the generate_image builtin
+  // (POST {prompt} -> {image_base64, media_type}).
+  HARNESS__IMAGE_GEN_URL: z.string().url().optional().default(''),
 
   // Social login (doc-06 Δ1) — a provider is enabled exactly when its
   // credentials are present. Redirect URI per provider:

@@ -5,6 +5,7 @@ import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents, AccountCreatedEvent } from '../../../common/events/event-bus';
 import { ApiError } from '../../../common/http/api-error';
 import { accountIdentities, accounts } from '../schema';
+import { CredentialsService } from '../credentials.service';
 
 /**
  * The social account-linking policy (doc-06 Δ1 + ADR-001). Order matters —
@@ -38,6 +39,7 @@ export class SocialAccountService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly events: EventBus,
+    private readonly credentials: CredentialsService,
   ) {}
 
   /** Resolve a verified social profile to an account (link or create). */
@@ -157,8 +159,10 @@ export class SocialAccountService {
     const accountRows = await this.db.root.select().from(accounts).where(eq(accounts.id, input.accountId)).limit(1);
     const account = accountRows[0];
     const remaining = await this.db.root.select().from(accountIdentities).where(eq(accountIdentities.accountId, input.accountId));
+    // AUTH-3.2: password presence comes from the factor registry, not the account row.
+    const passwordHash = await this.credentials.getPasswordHash(input.accountId);
     const otherWaysIn =
-      (account?.passwordHash ?? null) !== null ||
+      passwordHash !== null ||
       (account?.emailVerifiedAt ?? null) !== null || // email-code login stays
       remaining.some((r) => r.id !== identity.id);
     if (!otherWaysIn) {

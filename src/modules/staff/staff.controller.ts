@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { sql } from 'drizzle-orm';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal, L2Principal } from '../../common/auth/principal';
@@ -6,6 +7,7 @@ import { ApiError } from '../../common/http/api-error';
 import { RateLimit } from '../../common/http/rate-limit';
 import { AuditService } from '../../common/audit/audit.service';
 import { PlatformStaffGuard, StaffRoles } from '../../common/policy/staff.guard';
+import { RequireStepUp } from '../../common/policy/step-up.guard';
 import { DbService } from '../../common/infra/db/db.service';
 import { legacyTenants } from '../../common/infra/db/legacy-schema';
 import { AccountsService } from '../identity/accounts.service';
@@ -15,6 +17,28 @@ import { UsageQueryService } from '../billing/usage-query.service';
 import { SatelliteRegistryService } from '../satellites/satellite-registry.service';
 import { OrgLifecycleService } from '../organizations/org-lifecycle.service';
 import { StaffImpersonationService } from './staff-impersonation.service';
+import { PLATFORM_STAFF_ROLES, PlatformStaffAdminService, type PlatformStaffRole } from './platform-staff.admin';
+import { PlatformStaffDirectoryService } from '../../common/auth/platform-staff.directory';
+
+export class GrantStaffRoleDto {
+  @IsUUID()
+  account_id!: string;
+
+  @IsIn([...PLATFORM_STAFF_ROLES])
+  role!: PlatformStaffRole;
+
+  /** JIT lever: ISO timestamp; omit for a standing grant (discouraged for super_admin). */
+  @IsOptional()
+  @IsString()
+  expires_at?: string | null;
+}
+
+export class RevokeStaffRoleDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  reason?: string | null;
+}
 
 /**
  * The staff overlay (gap P-3): platform operators' console APIs — org
@@ -37,7 +61,58 @@ export class StaffController {
     private readonly satellites: SatelliteRegistryService,
     private readonly lifecycle: OrgLifecycleService,
     private readonly impersonation: StaffImpersonationService,
+    private readonly staffRoles: PlatformStaffAdminService,
+    private readonly staffDirectory: PlatformStaffDirectoryService,
   ) {}
+
+  // ── staff role management (AUTH-1.4: the staff axis' own admin surface) ────
+
+  /** Grant (or re-grant / change) a platform staff binding. JIT expiry encouraged. */
+  @Post('roles')
+  @StaffRoles('super_admin')
+  @RequireStepUp()
+  @RateLimit({ name: 'staff-role-grant', capacity: 10, refillPerSecond: 0.05, scope: 'principal' })
+  async grantRole(@Body() dto: GrantStaffRoleDto, @CurrentPrincipal() principal: L1Principal | L2Principal): Promise<{ granted: true }> {
+    await this.staffRoles.grant({
+      accountId: dto.account_id,
+      role: dto.role,
+      expiresAt: dto.expires_at ?? null,
+      grantedBy: principal.kind === 'l1' ? principal.id : null, // API keys can never be a granting identity
+    });
+    return { granted: true };
+  }
+
+  @Delete('roles/:accountId')
+  @StaffRoles('super_admin')
+  @RequireStepUp()
+  @RateLimit({ name: 'staff-role-revoke', capacity: 10, refillPerSecond: 0.05, scope: 'principal' })
+  async revokeRole(
+    @Param('accountId') accountId: string,
+    @Body() dto: RevokeStaffRoleDto,
+    @CurrentPrincipal() principal: L1Principal | L2Principal,
+  ): Promise<{ revoked: true }> {
+    await this.staffRoles.revoke({ accountId, reason: dto.reason ?? null, revokedBy: principal.kind === 'l1' ? principal.id : 'bootstrap' });
+    return { revoked: true };
+  }
+
+  @Get('roles')
+  @StaffRoles('super_admin')
+  @RateLimit({ name: 'staff-role-list', capacity: 30, refillPerSecond: 1, scope: 'principal' })
+  async listRoles(): Promise<{ staff: Awaited<ReturnType<PlatformStaffAdminService['list']>> }> {
+    return { staff: await this.staffRoles.list() };
+  }
+
+  /** Every staff role may inspect its own binding (declared before the :param DELETE). */
+  @Get('roles/me')
+  @StaffRoles('super_admin', 'tenant_admin', 'operator', 'auditor')
+  @RateLimit({ name: 'staff-role-me', capacity: 60, refillPerSecond: 2, scope: 'principal' })
+  async myRole(@CurrentPrincipal() principal: L1Principal | L2Principal): Promise<{ role: string | null; expires_at: string | null }> {
+    if (principal.kind === 'l2') {
+      return { role: principal.role, expires_at: null };
+    }
+    const resolution = await this.staffDirectory.resolve(principal.id);
+    return { role: resolution.role, expires_at: resolution.expiresAt };
+  }
 
   // ── platform overview ──────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
-import { IsBoolean, IsInt, IsOptional, IsString, Length, Max, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Length, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { Idempotent } from '../../common/http/idempotency';
@@ -99,6 +99,18 @@ export class StartTrialDto {
   days?: number;
 }
 
+export class CreateOrgDto {
+  @IsString()
+  @Length(1, 128)
+  name!: string;
+
+  /** Optional immutable workspace address; derived from the name when omitted. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/, { message: 'slug must be 3-63 characters: lowercase letters, digits, hyphens' })
+  slug?: string;
+}
+
 /**
  * Org context + profile surfaces (O-4): context resolution for the org
  * picker, the settings page payloads, and invite redemption (which runs
@@ -119,6 +131,25 @@ export class OrgController {
   ) {}
 
   // ── Context resolution (no org scope: the account's own memberships) ────
+
+  /**
+   * AUTH-2.2 (auth_plan.md D3): create a team workspace. Personal orgs remain
+   * the ADR-001 signup default; this is the additive, explicitly-chosen path.
+   * Not a step-up act (workspace creation is routine self-serve on every
+   * major platform) — the abuse controls are the rate limit, idempotency,
+   * and the ORGS__MAX_OWNED_PER_ACCOUNT ownership cap. New orgs start with
+   * no entitlements; the owner proceeds through StartTrial.
+   */
+  @Post()
+  @Idempotent()
+  @RateLimit({ name: 'org-create', capacity: 10, refillPerSecond: 0.1, scope: 'principal' })
+  async createOrg(
+    @Body() dto: CreateOrgDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ): Promise<{ org: { orgId: string; slug: string; name: string; kind: string } }> {
+    const created = await this.orgAccess.createTeamOrg({ accountId: principal.id, name: dto.name, slug: dto.slug ?? null });
+    return { org: { orgId: created.orgId, slug: created.slug, name: dto.name.trim(), kind: 'team' } };
+  }
 
   @Get('contexts')
   async contexts(@CurrentPrincipal() principal: L1Principal): Promise<{ contexts: Array<{ orgId: string; role: string; name: string | null }> }> {

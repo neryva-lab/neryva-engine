@@ -87,3 +87,41 @@ export async function startRunOnStudio(args: StartRunArgs): Promise<{ workflowId
     clearTimeout(timeout);
   }
 }
+
+/** Deadline per proto guidance — cancels are fire-and-forget admission. */
+const CANCEL_RUN_DEADLINE_MS = 5_000;
+
+/**
+ * cancelRunOnStudio — FL-1.3: propagate an Engine cancel to the Studio
+ * runtime so an in-flight provider call aborts instead of running to
+ * completion. Best-effort by design: the Engine run row is already CANCELED
+ * (system of record) when this is called; a missed delivery only means the
+ * Studio process wastes work, never a wrong state. The run-cancel consumer
+ * treats transport failures as retryable.
+ */
+export async function cancelRunOnStudio(args: {
+  organizationId: string;
+  conversationId: string;
+  runId: string;
+  reason: string;
+}): Promise<void> {
+  const client = clientForRuntime();
+  const ctx = create(RequestContextSchema, {
+    requestId: uuidv7(),
+    organizationId: args.organizationId,
+    conversationId: args.conversationId,
+    runId: args.runId,
+    actorId: 'engine-dispatcher',
+    idempotencyKey: `cancel-run:${args.runId}`,
+    protocolVersion: '1.0',
+    capabilityId: 'engine-dispatch',
+  });
+  const deadline = new AbortController();
+  const timeout = setTimeout(() => deadline.abort(), CANCEL_RUN_DEADLINE_MS);
+  timeout.unref();
+  try {
+    await client.cancelRun({ ctx, reason: args.reason }, { signal: deadline.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}

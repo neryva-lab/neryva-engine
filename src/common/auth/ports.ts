@@ -96,3 +96,29 @@ export class NullServiceAccountDirectory implements ServiceAccountDirectoryPort 
     return { valid: false, reason: 'unknown' };
   }
 }
+
+/**
+ * Platform staff directory (staff module implements): the per-request
+ * authority for the staff axis (auth_plan.md D1). The `platform_role` JWT
+ * claim is an optimization; THIS is what PlatformStaffGuard consults, so a
+ * revocation or JIT expiry takes effect on the next request, not at token
+ * expiry. Absent binding (staff module disabled) ⇒ fail closed.
+ */
+export const PLATFORM_STAFF_DIRECTORY_PORT = 'PLATFORM_STAFF_DIRECTORY_PORT';
+
+export interface PlatformStaffResolution {
+  /** Null when the account holds no unrevoked, unexpired staff binding. */
+  role: 'super_admin' | 'tenant_admin' | 'operator' | 'auditor' | null;
+  /** Present when role is non-null: when the JIT grant lapses. */
+  expiresAt: string | null;
+}
+
+export interface PlatformStaffDirectoryPort {
+  resolve(accountId: string): Promise<PlatformStaffResolution>;
+}
+
+export class NullPlatformStaffDirectory implements PlatformStaffDirectoryPort {
+  async resolve(): Promise<PlatformStaffResolution> {
+    return { role: null, expiresAt: null };
+  }
+}

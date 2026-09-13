@@ -13,6 +13,9 @@ export default tseslint.config(
       'var/**',
       '.opencode/**',
       'scripts/**',
+      // FL-1.8 exit-gate scripts run in the CI gate environment (Node >= 20,
+      // operator-provided env), not part of the src typecheck/lint surface.
+      'ops/e2e/**',
     ],
   },
   eslint.configs.recommended,

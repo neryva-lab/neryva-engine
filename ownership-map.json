@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "ADR-005 D3 \u2014 the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
+  "comment": "ADR-005 D3 — the migration-ownership map both engines read. Two systems never own the same table. owner=python-ts-transition marks shared tables the engine touches during the strangler window (documented dual-write seams); owner=engine-ts tables are created and owned by this engine's drizzle migrations.",
   "tables": {
     "accounts": {
       "owner": "engine-ts",
@@ -85,7 +85,7 @@
     "billing.spend_events": {
       "owner": "engine-ts",
       "since": "eng-0004",
-      "note": "the engine metering plane's OWN table (schema billing) \u2014 distinct from the Python-owned public.spend_events until handover A-3; satellites ingest here idempotently by (source, event_id)."
+      "note": "the engine metering plane's OWN table (schema billing) — distinct from the Python-owned public.spend_events until handover A-3; satellites ingest here idempotently by (source, event_id)."
     },
     "billing.billing_invoices": {
       "owner": "engine-ts",
@@ -118,7 +118,7 @@
     "studio_project_keys": {
       "owner": "engine-ts",
       "since": "eng-0006",
-      "note": "key rows stay Python-owned (api_keys); the project BINDING is engine-owned \u2014 one authority per fact; key-row write authority transfers at handover A-1."
+      "note": "key rows stay Python-owned (api_keys); the project BINDING is engine-owned — one authority per fact; key-row write authority transfers at handover A-1."
     },
     "satellites": {
       "owner": "engine-ts",
@@ -128,12 +128,12 @@
     "published_configs": {
       "owner": "engine-ts",
       "since": "eng-0007",
-      "note": "engine-published policy/guardrail/quota/model-catalog documents per (org x scope x product) \u2014 handover A-4's store; RLS org-scoped; append-only versions (notes + rollback lineage since eng-0016; retention-pruned to the newest CONFIG_VERSION_RETENTION per key)."
+      "note": "engine-published policy/guardrail/quota/model-catalog documents per (org x scope x product) — handover A-4's store; RLS org-scoped; append-only versions (notes + rollback lineage since eng-0016; retention-pruned to the newest CONFIG_VERSION_RETENTION per key)."
     },
     "config_drafts": {
       "owner": "engine-ts",
       "since": "eng-0016",
-      "note": "the mutable draft layer over published_configs (one per org x scope x product) \u2014 validates on save, stores its verdict, publishes snapshot into an immutable version; RLS org-scoped."
+      "note": "the mutable draft layer over published_configs (one per org x scope x product) — validates on save, stores its verdict, publishes snapshot into an immutable version; RLS org-scoped."
     },
     "config_notifications": {
       "owner": "engine-ts",
@@ -142,7 +142,7 @@
     },
     "tenants": {
       "owner": "python",
-      "shared": "engine INSERTs new orgs (personal-org autocreation); UPDATEs features jsonb (staff flags, deletion markers \u2014 documented seam); Python remains the DDL authority. DDL transfer at agent-runtime handover A-1."
+      "shared": "engine INSERTs new orgs (personal-org autocreation); UPDATEs features jsonb (staff flags, deletion markers — documented seam); Python remains the DDL authority. DDL transfer at agent-runtime handover A-1."
     },
     "api_keys": {
       "owner": "python",
@@ -150,7 +150,7 @@
     },
     "audit_events": {
       "owner": "python",
-      "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 \u00a710.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)."
+      "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 §10.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)."
     },
     "spend_events": {
       "owner": "python",
@@ -199,7 +199,7 @@
     "org_deletions": {
       "owner": "engine-ts",
       "since": "eng-0012",
-      "note": "staged deletion lifecycle: request \u2192 grace \u2192 purge; purge also marks the Python-owned tenants row deleted via its features jsonb (documented seam)."
+      "note": "staged deletion lifecycle: request → grace → purge; purge also marks the Python-owned tenants row deleted via its features jsonb (documented seam)."
     },
     "console_announcements": {
       "owner": "engine-ts",
@@ -252,7 +252,7 @@
     "email_suppressions": {
       "owner": "engine-ts",
       "since": "eng-0013",
-      "note": "hard bounces/complaints/unsubscribes \u2014 the email service refuses suppressed addresses."
+      "note": "hard bounces/complaints/unsubscribes — the email service refuses suppressed addresses."
     },
     "assistants": {
       "owner": "engine-ts",
@@ -463,6 +463,126 @@
       "owner": "engine-ts",
       "since": "eng-0034",
       "note": "harness: per-message user feedback (up/down + reason) feeding the eval pipeline via outbox; RLS org-scoped."
+    },
+    "assistant_versions.budget_policy": {
+      "owner": "engine-ts",
+      "since": "eng-0036",
+      "note": "harness FL-1.2: per-assistant RunBudgets authority (max_total_tokens, max_cost_micros, wall_clock_seconds, tool/model caps) pinned on the policy snapshot and served via the MCP ContextManifest; expand-only column."
+    },
+    "escalations": {
+      "owner": "engine-ts",
+      "since": "eng-0037",
+      "note": "harness FL-1.7: human handoff queue (WAITING→CLAIMED→RESOLVED) between the assistant and live agents; conversation status gains 'escalated' to pause the auto-responder; human replies flow through the ONE acceptMessage entry as 'service' participants; RLS org-scoped."
+    },
+    "chunks.fts": {
+      "owner": "engine-ts",
+      "since": "eng-0038",
+      "note": "FL-2.1: STORED tsvector generated column + GIN over chunk text — lexical leg of hybrid retrieval (FTS + pgvector in parallel, RRF fusion); derived/rebuildable."
+    },
+    "documents.embedding_model": {
+      "owner": "engine-ts",
+      "since": "eng-0038",
+      "note": "FL-2.2/2.3: embedding model the document's active vectors were computed with; drives the resumable re-embed worker and per-org model swaps."
+    },
+    "memory_items.embedding": {
+      "owner": "engine-ts",
+      "since": "eng-0038",
+      "note": "FL-2.4: approval-time embedding vector (HNSW cosine) enabling semantic memory search with ACL-before-scoring."
+    },
+    "connector_accounts": {
+      "owner": "engine-ts",
+      "since": "eng-0039",
+      "note": "FL-2.5: knowledge connector accounts (sitemap live; Drive/Notion/Confluence ports await per-tenant OAuth apps - documented seam). Sync flows through the existing upload-session pipeline; sealed credentials; RLS org-scoped."
+    },
+    "eval_datasets": {
+      "owner": "engine-ts",
+      "since": "eng-0040",
+      "note": "FL-2.21: org-scoped eval datasets (Engine system of record); Studio eval-worker executes. RLS org-scoped."
+    },
+    "eval_cases": {
+      "owner": "engine-ts",
+      "since": "eng-0040",
+      "note": "FL-2.21: bounded eval cases with tau2-style state assertions + LLM-judge rubrics. RLS org-scoped."
+    },
+    "eval_runs": {
+      "owner": "engine-ts",
+      "since": "eng-0040",
+      "note": "FL-2.21: eval run results (pass^k attempts, aggregate score) pinned to an assistant version. RLS org-scoped."
+    },
+    "analytics_rollups": {
+      "owner": "engine-ts",
+      "since": "eng-0040",
+      "note": "FL-2.22/2.23/2.24: daily CSAT/outcome/usage rollups computed by outbox consumers; unique per (org, kind, period, scope). RLS org-scoped."
+    },
+    "tool_catalog.http_binding": {
+      "owner": "engine-ts",
+      "since": "eng-0040",
+      "note": "FL-2.10: customer HTTP endpoint binding + enc:v1:-sealed per-tool credential + per-run rate limit; credential disclosure ONLY via the scoped GetToolCredential op."
+    },
+    "conversation_shares": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.4: public share links (sha256 token at rest, TTL/revocation). RLS org-scoped."
+    },
+    "assistant_rollouts": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.12: A/B canary traffic split beside the atomic publish pointer; sticky per-conversation assignment. RLS org-scoped."
+    },
+    "run_judgments": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.13: online LLM-as-judge verdicts on sampled runs; scores/verdicts only, transcript via claim-check. RLS org-scoped."
+    },
+    "channel_message_templates": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.18: provider-approved outbound templates per channel account. RLS org-scoped."
+    },
+    "message_receipts": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.19: inbound delivery/read receipts upserted from channel status events. RLS org-scoped."
+    },
+    "messages.superseded_by": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.3: set-once regeneration/edit branch pointer; messages stay immutable."
+    },
+    "runs.regenerated_message_id": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.3: the superseded assistant message a regeneration run replaces, committed atomically."
+    },
+    "channel_accounts.platform": {
+      "owner": "engine-ts",
+      "since": "eng-0042",
+      "note": "FL-3.17: platform vocabulary widened to instagram/x/email (additive CHECK widening)."
+    },
+    "platform_staff": {
+      "owner": "engine-ts",
+      "since": "eng-0043",
+      "note": "AUTH-1.1: platform staff binding (super_admin/tenant_admin/operator/auditor) — the authority for the staff axis; platform-plane, no RLS (accounts posture); JWT claim is an optimization only."
+    },
+    "org_memberships.uq_one_active_owner_per_org": {
+      "owner": "engine-ts",
+      "since": "eng-0044",
+      "note": "AUTH-1.5: partial unique index enforcing at most one active owner per org at the database; lower bound (>=1) stays application-level so the org purge can delete all memberships."
+    },
+    "org_settings.kind": {
+      "owner": "engine-ts",
+      "since": "eng-0045",
+      "note": "AUTH-2.1: personal | team workspace taxonomy; team workspaces are created via POST /console/org (AUTH-2.2). Python-owned tenants DDL untouched."
+    },
+    "account_credentials.credential_id": {
+      "owner": "engine-ts",
+      "since": "eng-0046",
+      "note": "AUTH-3.1: passkey credential id for WebAuthn rows (many per account); uniqueness reworked into partial unique indexes (one row per (account, kind) for non-WebAuthn kinds)."
+    },
+    "accounts.password_hash": {
+      "owner": "engine-ts",
+      "since": "eng-0001",
+      "note": "AUTH-3.3 (eng-0047): column DROPPED — password material lives only in account_credentials kind='password' (single factor registry). Forward-fix only; no re-expansion."
     }
   },
   "rules": [

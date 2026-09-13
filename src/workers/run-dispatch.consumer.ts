@@ -27,11 +27,80 @@ export class RunDispatchConsumer implements OutboxConsumer {
   private static readonly logger = new Logger(RunDispatchConsumer.name);
 
   readonly name = 'run-dispatch';
-  readonly eventTypes = ['run.created'];
+  readonly eventTypes = ['run.created', 'run.resume_requested'];
 
   constructor(private readonly db: DbService) {}
 
   async handle(event: OutboxEvent): Promise<void> {
+    if (event.eventType === 'run.resume_requested') {
+      return this.handleResume(event);
+    }
+    return this.handleCreated(event);
+  }
+
+  /**
+   * Resume path (FL-1.1 approval park/resume): an APPROVED decision flipped
+   * the run WAITING_APPROVAL → RUNNING; this re-drives StartRun on Studio.
+   * The fresh executor observes the durable decision via GetApprovalState and
+   * continues — Engine toolEffects dedup makes the replay safe.
+   */
+  private async handleResume(event: OutboxEvent): Promise<void> {
+    const payload = (event.payload ?? {}) as {
+      run_id?: string;
+      conversation_id?: string;
+      message_id?: string;
+      assistant_version_id?: string;
+    };
+    const orgId = event.organizationId;
+    const runId = payload.run_id ?? event.aggregateId;
+    const conversationId = payload.conversation_id;
+    const messageId = payload.message_id;
+    const assistantVersionId = payload.assistant_version_id;
+    if (!runId || !conversationId || !messageId || !assistantVersionId) {
+      throw new SkipDispatchError(`run.resume_requested payload incomplete for run ${runId || '(unknown)'}`);
+    }
+    if (!isRuntimeConfigured()) {
+      RunDispatchConsumer.logger.debug(`runtime not configured; resume for run ${runId} skipped (event ${event.eventId})`);
+      return;
+    }
+    const capability = issueCapability({
+      organizationId: orgId,
+      conversationId,
+      runId,
+      assistantVersionId,
+      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe', 'escalation', 'artifact'],
+      subject: 'agent-studio-runtime',
+    });
+    const conversationVersion = await this.currentConversationVersion(orgId, conversationId);
+    const started = await startRunOnStudio({
+      organizationId: orgId,
+      conversationId,
+      runId,
+      messageId,
+      assistantVersionId,
+      expectedConversationVersion: conversationVersion,
+      capabilityToken: capability.token,
+    });
+    await this.recordResumeEvent(orgId, runId, started.workflowId);
+    RunDispatchConsumer.logger.log(`run ${runId} resume dispatched to studio (workflow ${started.workflowId})`);
+  }
+
+  private async recordResumeEvent(orgId: string, runId: string, workflowId: string): Promise<void> {
+    await this.db.withOrg(orgId, async (tx) => {
+      const rowId = uuidv7();
+      await tx.insert(runEvents).values({
+        id: rowId,
+        eventId: rowId,
+        runId,
+        organizationId: orgId,
+        eventType: 'run.resumed',
+        payload: { reason: 'approval_granted', workflow_id: workflowId },
+        producerIdentity: 'engine:run-dispatch',
+      });
+    });
+  }
+
+  private async handleCreated(event: OutboxEvent): Promise<void> {
     const payload = (event.payload ?? {}) as {
       run_id?: string;
       conversation_id?: string;
@@ -61,7 +130,7 @@ export class RunDispatchConsumer implements OutboxConsumer {
       // Full run-authority op set — a dispatch token missing an op (e.g.
       // 'context' or 'checkpoint') fails the RPC mid-run with no way for
       // Studio to re-mint (no L1 credentials on the runtime).
-      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe'],
+      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe', 'escalation'],
       subject: 'agent-studio-runtime',
     });
 

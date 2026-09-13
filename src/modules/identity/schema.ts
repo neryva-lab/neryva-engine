@@ -32,7 +32,9 @@ export const accounts = pgTable('accounts', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: citext('email').notNull(),
   emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true, mode: 'string' }),
-  passwordHash: text('password_hash'), // NULL ⇒ passwordless-only account
+  // password_hash was DROPPED (drizzle/0047, AUTH-3.3): password material
+  // lives only in account_credentials kind='password' — the single factor
+  // registry. Passwordless-only accounts simply have no such row.
   displayName: varchar('display_name', { length: 256 }),
   status: varchar('status', { length: 32 }).notNull().default('active'), // active | locked | disabled
   mfaLevel: varchar('mfa_level', { length: 16 }).notNull().default('none'), // none | totp | webauthn
@@ -54,16 +56,22 @@ export const accounts = pgTable('accounts', {
 export const accountCredentials = pgTable('account_credentials', {
   id: uuid('id').primaryKey().defaultRandom(),
   accountId: uuid('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-  kind: varchar('kind', { length: 32 }).notNull(), // password | email_code | totp | webauthn
+  // password | email_code | totp | webauthn — the single factor registry
+  // (AUTH-3.1). Uniqueness (drizzle/0046): one row per (account, kind) for
+  // every non-WebAuthn kind; WebAuthn rows are many-per-account, keyed by
+  // the passkey's credential_id.
+  kind: varchar('kind', { length: 32 }).notNull(),
   /** argon2id hash (password), TOTP secret envelope, or webauthn enrollment JSON. */
   secret: text('secret'),
+  /** WebAuthn: the passkey's credential id (NULL for every other factor). */
+  credentialId: varchar('credential_id', { length: 255 }),
   envelope: jsonb('envelope'),
   verifiedAt: timestamp('verified_at', { withTimezone: true, mode: 'string' }),
   lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'string' }),
   revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-}, (t) => [uniqueIndex('uq_account_credentials_account_kind').on(t.accountId, t.kind)]);
+});
 
 export const accountRecoveryCodes = pgTable('account_recovery_codes', {
   id: uuid('id').primaryKey().defaultRandom(),

@@ -12,6 +12,7 @@ export const ERROR_CODES = {
   FORBIDDEN: 'forbidden',
   ENTITLEMENT_REQUIRED: 'entitlement_required',
   PAST_DUE: 'past_due',
+  SEAT_LIMIT_REACHED: 'seat_limit_reached',
   STEP_UP_REQUIRED: 'step_up_required',
   NOT_FOUND: 'not_found',
   VALIDATION: 'validation_failed',
@@ -81,6 +82,16 @@ export class ApiError extends HttpException {
       ERROR_CODES.PAST_DUE,
       `Payment required: entitlement for "${product}" is past due (read-only)`,
       { product },
+    );
+  }
+
+  /** AUTH-4.1: the purchased seat wall at invite redemption (plan §D5). */
+  static seatLimitReached(product: string): ApiError {
+    return new ApiError(
+      HttpStatus.PAYMENT_REQUIRED,
+      ERROR_CODES.SEAT_LIMIT_REACHED,
+      `Payment required: all ${product} seats are in use — add seats to invite more members`,
+      { product, reason: 'seat_limit_reached' },
     );
   }
 

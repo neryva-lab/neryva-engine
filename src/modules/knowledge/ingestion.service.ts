@@ -8,6 +8,8 @@ import { uuidv7 } from '../../common/ids/uuidv7';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { artifacts, chunks, documentVersions, documents, embeddings, retrievalAcl, uploadSessions, UploadSession, EMBEDDING_MODEL } from './schema';
 import { chunkText } from './text';
+import { buildExtractorChain, TextExtractorPort } from './extraction.port';
+import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { EmbeddingService } from './embedding.service';
 
 /**
@@ -47,11 +49,17 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private ticking = false;
 
+  private readonly extractors: TextExtractorPort[] = buildExtractorChain({
+    ocrUrl: env.KNOWLEDGE_OCR_URL || undefined,
+    transcribeUrl: env.KNOWLEDGE_TRANSCRIBE_URL || undefined,
+  });
+
   constructor(
     private readonly db: DbService,
     private readonly storage: StorageService,
     private readonly embedding: EmbeddingService,
     private readonly scanner: DefaultScanner,
+    private readonly configPublish: ConfigPublishService,
   ) {}
 
   onModuleInit(): void {
@@ -223,7 +231,11 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
           await tx.delete(chunks).where(eq(chunks.documentVersionId, versionId));
         }
 
-        const pieces = chunkText(text, CHUNK_CHARS, MAX_CHUNKS);
+        // FL-2.3 — per-org chunking controls (`knowledge_config` published
+        // config). Falls back to the platform defaults when absent.
+        const orgConfig = await this.orgKnowledgeConfig(session.organizationId);
+        const pieces = chunkText(text, orgConfig.chunkSize, MAX_CHUNKS, orgConfig.chunkOverlap);
+        const embeddingModel = orgConfig.embeddingModel || EMBEDDING_MODEL;
         if (pieces.length === 0) {
           throw new Error('document produced no chunks (empty content)');
         }
@@ -245,7 +257,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
             id: uuidv7(),
             chunkId: chunkRows[0].id,
             organizationId: session.organizationId,
-            model: EMBEDDING_MODEL,
+            model: embeddingModel,
             embedding: vectors[i],
           });
         }
@@ -263,7 +275,15 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
   private async readyStage(session: UploadSession): Promise<void> {
     await this.db.withBypass(async (tx) => {
       await tx.update(uploadSessions).set({ state: 'READY', updatedAt: new Date().toISOString() }).where(eq(uploadSessions.id, session.id));
-      await tx.update(documents).set({ state: 'ready', updatedAt: new Date().toISOString() }).where(eq(documents.sourceArtifactId, session.artifactId));
+      const orgConfig = await this.orgKnowledgeConfig(session.organizationId);
+      await tx
+        .update(documents)
+        .set({
+          state: 'ready',
+          embeddingModel: orgConfig.embeddingModel || EMBEDDING_MODEL,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(documents.sourceArtifactId, session.artifactId));
       // Default ACL: documents are organization-visible at ingest
       // (retrieval.service's contract). Without this row the retrieval join
       // excludes the document entirely — it would be indexed but unreachable.
@@ -289,6 +309,21 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     KnowledgeIngestionWorker.logger.log(`upload session ${session.id} ingested (READY)`);
   }
 
+  /**
+   * FL-2.3 — per-org knowledge config. The embedding model tags every
+   * vector the pipeline writes (a real per-org provider lands with BYOK,
+   * FL-2.18); chunk size/overlap shape the lexical + vector granularity.
+   */
+  private async orgKnowledgeConfig(orgId: string): Promise<{ embeddingModel: string; chunkSize: number; chunkOverlap: number }> {
+    const published = await this.configPublish.latest(orgId, 'knowledge_config', null);
+    const payload = (published?.payload ?? {}) as { embedding_model?: string; chunk_size?: number; chunk_overlap?: number };
+    return {
+      embeddingModel: payload.embedding_model ?? EMBEDDING_MODEL,
+      chunkSize: Math.min(Math.max(200, payload.chunk_size ?? CHUNK_CHARS), 8000),
+      chunkOverlap: Math.min(Math.max(0, payload.chunk_overlap ?? 0), 1000),
+    };
+  }
+
   private async fail(session: UploadSession, message: string): Promise<void> {
     await this.db.withBypass(async (tx) => {
       await tx
@@ -308,7 +343,11 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     });
     if (!artifactRows) throw new Error('artifact vanished during extraction');
     const mediaType = artifactRows.content_type_detected ?? artifactRows.content_type_declared;
-    if (!mediaType.startsWith('text/') && mediaType !== 'application/json') {
+    // FL-2.6 - extractor dispatch by media type (plain text -> OCR ->
+    // transcription, in priority order). Absent worker URLs mean the media
+    // family is unsupported: a loud pipeline failure, never silent garbage.
+    const extractor = this.extractors.find((e) => e.supports(mediaType));
+    if (!extractor) {
       throw new Error(`unsupported media type for text extraction: ${mediaType}`);
     }
     const download = this.storage.presignDownload({ key: artifactRows.object_key, expiresIn: 120 });
@@ -320,7 +359,8 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     if (buffer.length > env.KNOWLEDGE_MAX_UPLOAD_BYTES) {
       throw new Error('object exceeds the ingestion byte bound');
     }
-    return buffer.toString('utf8');
+    const extraction = await extractor.extract({ bytes: buffer, mediaType });
+    return extraction.text;
   }
 }
 

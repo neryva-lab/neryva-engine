@@ -15,8 +15,9 @@ import {
   AssistantVersionExport,
   POLICY_SNAPSHOT_SCHEMA_VERSION,
 } from './schema';
-import { validateAssistantPayload, assertPublishable, AssistantPayload } from './validation';
+import { validateAssistantPayload, assertPublishable, assistantPayloadSchema, AssistantPayload } from './validation';
 import { toolCatalog } from './tool-catalog.schema';
+import { BUILT_IN_TOOLS } from './tool-catalog.service';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 
 /**
@@ -163,6 +164,7 @@ export class AssistantsService {
           guardrailPolicy: validated.normalized.guardrail_policy,
           instructions: validated.normalized.instructions ?? null,
           modelParams: validated.normalized.model_params ?? null,
+          budgetPolicy: validated.normalized.budget_policy ?? null,
           hash,
         })
         .returning(),
@@ -270,6 +272,7 @@ export class AssistantsService {
           guardrailPolicy: validated.normalized.guardrail_policy,
           instructions: validated.normalized.instructions ?? null,
           modelParams: validated.normalized.model_params ?? null,
+          budgetPolicy: validated.normalized.budget_policy ?? null,
           hash,
           publishedAt: new Date().toISOString(),
           publishedBy: input.publishedBy,
@@ -290,6 +293,7 @@ export class AssistantsService {
         knowledgePolicy: validated.normalized.knowledge_policy ?? null,
         instructions: validated.normalized.instructions ?? null,
         modelParams: validated.normalized.model_params ?? null,
+        budgetPolicy: validated.normalized.budget_policy ?? null,
         hash,
       });
 
@@ -417,6 +421,7 @@ export class AssistantsService {
           guardrailPolicy: validated.normalized.guardrail_policy,
           instructions: validated.normalized.instructions ?? null,
           modelParams: validated.normalized.model_params ?? null,
+          budgetPolicy: validated.normalized.budget_policy ?? null,
           rollbackOf: target.id,
           hash,
           publishedAt: new Date().toISOString(),
@@ -435,6 +440,7 @@ export class AssistantsService {
         knowledgePolicy: validated.normalized.knowledge_policy ?? null,
         instructions: validated.normalized.instructions ?? null,
         modelParams: validated.normalized.model_params ?? null,
+        budgetPolicy: validated.normalized.budget_policy ?? null,
         hash,
       });
       await tx.update(assistants).set({ activeVersionId: inserted.id, updatedAt: new Date().toISOString() }).where(eq(assistants.id, input.assistantId));
@@ -497,6 +503,9 @@ export class AssistantsService {
     }
     return {
       schema_version: version.schemaVersion,
+      instructions: version.instructions,
+      model_params: version.modelParams,
+      budget_policy: version.budgetPolicy,
       model_policy: version.modelPolicy,
       context_policy: version.contextPolicy,
       tool_policy: version.toolPolicy,
@@ -523,22 +532,25 @@ export class AssistantsService {
     if (!exported || typeof exported !== 'object' || typeof exported.hash !== 'string' || typeof exported.schema_version !== 'number') {
       throw ApiError.validation({ exported: 'must be an assistant version export envelope' });
     }
-    const recomputed = hashPayload({
-      model_policy: exported.model_policy,
-      context_policy: exported.context_policy,
-      tool_policy: exported.tool_policy,
-      // DB stores knowledge_policy as null; the canonical hash drops absent
-      // keys, so null normalizes to undefined before the digest is recomputed.
-      knowledge_policy: exported.knowledge_policy ?? undefined,
-      guardrail_policy: exported.guardrail_policy,
-    });
+    // The hash covers the FULL normalized payload — the exact shape the
+    // creation path hashes (canonicalHash over the parsed+defaulted payload).
+    // Parse-normalize first so defaulted fields match; a legacy lossy
+    // envelope (no instructions/model_params) then fails the hash check
+    // instead of silently importing a v2 assistant without its prompt.
+    const parsed = assistantPayloadSchema.safeParse(exported);
+    if (!parsed.success) {
+      throw ApiError.validation({
+        exported: `payload failed schema validation: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
+      });
+    }
+    const recomputed = hashPayload(parsed.data);
     if (recomputed !== exported.hash) {
       throw ApiError.validation({ hash: 'export envelope hash mismatch — payload is not canonical' });
     }
     return this.createVersion({
       orgId: input.orgId,
       assistantId: input.assistantId,
-      payload: exported as unknown as AssistantPayload,
+      payload: parsed.data,
       createdBy: input.createdBy,
     });
   }
@@ -551,11 +563,11 @@ export class AssistantsService {
    * only. Invalid refs must be rejected BEFORE `PUBLISHED` (Phase 3 exit gate).
    */
   private async rejectUnknownModels(orgId: string, payload: AssistantPayload): Promise<void> {
-    const loadCatalog = async (): Promise<{ models: Array<{ provider: string; model: string; enabled: boolean }> } | null> => {
+    const loadCatalog = async (): Promise<{ models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }> } | null> => {
       const latest = await this.configPublish.latest(orgId, 'model_catalog', null);
-      return (latest?.payload ?? null) as { models: Array<{ provider: string; model: string; enabled: boolean }> } | null;
+      return (latest?.payload ?? null) as { models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }> } | null;
     };
-    let catalog: { models: Array<{ provider: string; model: string; enabled: boolean }> } | null = null;
+    let catalog: { models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }> } | null = null;
     try {
       catalog = await loadCatalog();
     } catch {
@@ -573,6 +585,25 @@ export class AssistantsService {
       throw ApiError.validation({
         model_policy: `allowed_models not present in the published model catalog: ${unknown.join(', ')}`,
       });
+    }
+
+    // FL-2.19 — residency gate: the org's knowledge_config.residency pin must
+    // be covered by every referenced catalog model's `regions` list. Models
+    // without explicit regions only serve the 'default' residency class.
+    const residencyConfig = await this.configPublish.latest(orgId, 'knowledge_config', null);
+    const residency = String((residencyConfig?.payload as { residency?: string } | undefined)?.residency ?? 'default');
+    if (residency !== 'default') {
+      const uncovered = payload.model_policy.allowed_models.filter((ref) => {
+        const entry = catalog.models.find((m) => `${m.provider}/${m.model}` === ref);
+        if (!entry) return false;
+        const regions = entry.regions ?? ['default'];
+        return !regions.includes(residency);
+      });
+      if (uncovered.length > 0) {
+        throw ApiError.validation({
+          model_policy: `residency '${residency}' not served by catalog models: ${uncovered.join(', ')}`,
+        });
+      }
     }
   }
 
@@ -600,6 +631,10 @@ export class AssistantsService {
     const byName = new Map(rows.map((r) => [r.name, r]));
     const problems: string[] = [];
     for (const entry of tools) {
+      if (BUILT_IN_TOOLS.has(entry.name)) {
+        // Built-in tools are platform-implemented - no catalog row to pin.
+        continue;
+      }
       const row = byName.get(entry.name);
       if (!row || !row.enabled) {
         problems.push(`${entry.name}: not present in the tool catalog or disabled`);

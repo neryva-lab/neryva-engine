@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, gt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
 import { Observable } from 'rxjs';
+import { createHash, randomBytes } from 'node:crypto';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
@@ -12,11 +13,13 @@ import { uuidv7 } from '../../common/ids/uuidv7';
 import {
   conversations,
   conversationParticipants,
+  conversationShares,
   messages,
   runEvents,
   runs,
   messageFeedback,
   Conversation,
+  ConversationShare,
   MessageFeedback,
   Message,
   Run,
@@ -29,12 +32,20 @@ const SSE_EVENT_NAMES: Record<string, string> = {
   '2': 'delta', // EVENT_TYPE_ASSISTANT_CHUNK — token-stream channel
   '5': 'retrieval', // EVENT_TYPE_RETRIEVAL
   '6': 'approval', // EVENT_TYPE_APPROVAL
-  '11': 'terminal', // EVENT_TYPE_TERMINAL
+  '11': 'terminal',
+  '12': 'thinking', // EVENT_TYPE_THINKING (FL-3.6) // EVENT_TYPE_TERMINAL
 };
 
 import { assertRunTransition, isRunState, isTerminalRun } from './state-machine';
+import { EscalationsService } from './escalations.service';
+import { env } from '../../common/config/env';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { usageLedgerEntries } from '../billing/usage-ledger.schema';
+import { artifacts } from '../knowledge/schema';
+
+/** FL-1.6 — attachment media allowlist + per-attachment byte cap. */
+const ATTACHMENT_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
 /**
  * Conversation plane service — Phase 4 (imp/ledger.md 4.7-4.10).
@@ -60,6 +71,7 @@ export class ConversationsService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly purge: RetentionPurgeService,
+    private readonly escalations: EscalationsService,
   ) {}
 
   // ── Conversation lifecycle ───────────────────────────────────────────────
@@ -167,7 +179,9 @@ export class ConversationsService {
     expectedConversationVersion?: number;
     idempotencyKey?: string;
     traceId?: string;
-  }): Promise<{ message_id: string; run_id: string; sequence: number; conversation_version: number; replay?: boolean }> {
+    /** FL-1.6 — validated MESSAGE_ATTACHMENT artifact ids to pin on the message. */
+    attachments?: string[];
+  }): Promise<{ message_id: string; run_id: string | null; sequence: number; conversation_version: number; auto_responder?: 'paused'; replay?: boolean }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     validateMessageContent(input.content);
@@ -191,7 +205,7 @@ export class ConversationsService {
       if (scope) {
         const claim = await claimIdempotency(tx, scope);
         if (claim.kind === 'replay') {
-          return { ...(claim.response as { message_id: string; run_id: string; sequence: number; conversation_version: number }), replay: true };
+          return { ...(claim.response as { message_id: string; run_id: string | null; sequence: number; conversation_version: number }), replay: true };
         }
       }
 
@@ -209,18 +223,20 @@ export class ConversationsService {
     input: {
       orgId: string;
       conversationId: string;
+      principalId: string;
       content: Record<string, unknown>;
       expectedConversationVersion?: number;
       traceId?: string;
+      attachments?: string[];
     },
-  ): Promise<{ message_id: string; run_id: string; sequence: number; conversation_version: number }> {
+  ): Promise<{ message_id: string; run_id: string | null; sequence: number; conversation_version: number; auto_responder?: 'paused' }> {
     // Row lock serializes sequence allocation + the one-active-turn policy.
     const conv = await tx.select().from(conversations).where(eq(conversations.id, input.conversationId)).for('update').limit(1);
     if (conv.length === 0) {
       throw ApiError.notFound('conversation');
     }
     const conversation = conv[0];
-    if (conversation.status !== 'active') {
+    if (conversation.status !== 'active' && conversation.status !== 'escalated') {
       throw ApiError.conflict('conversation is not active', { status: conversation.status });
     }
     if (input.expectedConversationVersion !== undefined && conversation.version !== input.expectedConversationVersion) {
@@ -230,23 +246,30 @@ export class ConversationsService {
       });
     }
 
+    // FL-1.7d — pause semantics: while 'escalated' the user message is
+    // accepted into the durable transcript (the human agent reads it) but
+    // NO run is created — the auto-responder is paused. Resolve resumes it.
+    const escalated = conversation.status === 'escalated';
+
     // Pin the assistant's active published version + policy snapshot at acceptance.
-    const active = await tx.execute(sql`
-      select av.id as version_id, ps.id as snapshot_id
-      from assistants a
-      join assistant_versions av on av.id = a.active_version_id
-      join policy_snapshots ps on ps.assistant_version_id = av.id
-      where a.id = ${conversation.assistantId}::uuid
-      limit 1
-    `);
-    if (active.rows.length === 0) {
-      throw ApiError.conflict('assistant has no published version with a policy snapshot');
+    let pin: { version_id: string; snapshot_id: string } | null = null;
+    if (!escalated) {
+      pin = await this.pickVersionPin(tx, conversation.assistantId, conversation.id);
+      if (!pin) {
+        throw ApiError.conflict('assistant has no published version with a policy snapshot');
+      }
     }
-    const pin = active.rows[0] as { version_id: string; snapshot_id: string };
 
     const sequence = await nextMessageSequence(tx, input.conversationId);
     const messageId = uuidv7();
     const runId = uuidv7();
+
+    // FL-1.6 — re-validate every attachment against the org's artifacts table
+    // (tenant scope is the org predicate itself; purpose/media/size gates
+    // follow the knowledge plane's claim-check policy). The pinned ref keeps
+    // only digests and types — never object keys or credentials.
+    const attachmentRefs =
+      input.attachments && input.attachments.length > 0 ? await this.validateAttachments(tx, input.orgId, input.attachments) : null;
 
     await tx.insert(messages).values({
       id: messageId,
@@ -255,60 +278,479 @@ export class ConversationsService {
       sequence,
       role: 'user',
       content: input.content,
-      createdBy: null,
+      // Message attribution — user-scope memory resolution (FL-1.5) keys off
+      // this column; channel/widget senders carry their synthetic identity.
+      createdBy: input.principalId,
+      ...(attachmentRefs !== null ? { artifactRefs: attachmentRefs } : {}),
     });
 
-    try {
-      await tx.insert(runs).values({
-        id: runId,
-        organizationId: input.orgId,
-        conversationId: input.conversationId,
-        inputMessageId: messageId,
-        assistantVersionId: pin.version_id,
-        policySnapshotId: pin.snapshot_id,
-        state: 'ACCEPTED',
-      });
-    } catch (err) {
-      if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-        throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+    if (!escalated) {
+      const activePin = pin as { version_id: string; snapshot_id: string };
+      try {
+        await tx.insert(runs).values({
+          id: runId,
+          organizationId: input.orgId,
+          conversationId: input.conversationId,
+          inputMessageId: messageId,
+          assistantVersionId: activePin.version_id,
+          policySnapshotId: activePin.snapshot_id,
+          state: 'ACCEPTED',
+        });
+      } catch (err) {
+        if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
+          throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+        }
+        throw err;
       }
-      throw err;
-    }
 
-    await recordOutboxEvent(tx, {
-      aggregateType: 'run',
-      aggregateId: runId,
-      organizationId: input.orgId,
-      eventType: 'run.created',
-      partitionKey: input.conversationId,
-      payload: {
-        run_id: runId,
-        conversation_id: input.conversationId,
-        message_id: messageId,
-        assistant_version_id: pin.version_id,
-        policy_snapshot_id: pin.snapshot_id,
-      },
-      traceId: input.traceId,
-    });
+      await recordOutboxEvent(tx, {
+        aggregateType: 'run',
+        aggregateId: runId,
+        organizationId: input.orgId,
+        eventType: 'run.created',
+        partitionKey: input.conversationId,
+        payload: {
+          run_id: runId,
+          conversation_id: input.conversationId,
+          message_id: messageId,
+          assistant_version_id: activePin.version_id,
+          policy_snapshot_id: activePin.snapshot_id,
+        },
+        traceId: input.traceId,
+      });
+    }
 
     const nextVersion = conversation.version + 1;
     await tx.update(conversations).set({ version: nextVersion, updatedAt: new Date().toISOString() }).where(eq(conversations.id, input.conversationId));
 
+    if (escalated) {
+      return { message_id: messageId, run_id: null, sequence, conversation_version: nextVersion, auto_responder: 'paused' };
+    }
     return { message_id: messageId, run_id: runId, sequence, conversation_version: nextVersion };
+  }
+
+  /**
+   * FL-3.12 — version pinning with A/B canary rollout support. An ACTIVE
+   * rollout splits traffic across PUBLISHED versions by weight; assignment is
+   * sticky per conversation (consistent hash of the conversation id), so a
+   * conversation never flips variants mid-flight. A rollout variant without a
+   * policy snapshot (or not PUBLISHED) is never selected — fail-closed to the
+   * assistant's default active version.
+   */
+  private async pickVersionPin(
+    tx: NodePgDatabase,
+    assistantId: string,
+    conversationId: string,
+  ): Promise<{ version_id: string; snapshot_id: string } | null> {
+    const byVersionId = (versionId: string): Promise<{ version_id: string; snapshot_id: string } | null> =>
+      tx
+        .execute(sql`
+          select av.id as version_id, ps.id as snapshot_id
+          from assistant_versions av
+          join policy_snapshots ps on ps.assistant_version_id = av.id
+          where av.id = ${versionId}::uuid and av.status = 'PUBLISHED'
+          limit 1
+        `)
+        .then((r) => (r.rows[0] as { version_id: string; snapshot_id: string } | undefined) ?? null);
+
+    const rolloutRows = await tx.execute(sql`
+      select versions from assistant_rollouts
+      where assistant_id = ${assistantId}::uuid and state = 'active'
+      order by created_at desc
+      limit 1
+    `);
+    if (rolloutRows.rows.length > 0) {
+      const raw = (rolloutRows.rows[0] as { versions: unknown }).versions;
+      if (Array.isArray(raw)) {
+        const variants: Array<{ version_id: string; weight: number }> = [];
+        for (const v of raw) {
+          const rec = v as { version_id?: unknown; weight?: unknown };
+          if (typeof rec?.version_id === 'string' && typeof rec?.weight === 'number' && Number.isFinite(rec.weight) && rec.weight > 0) {
+            variants.push({ version_id: rec.version_id, weight: Math.floor(rec.weight) });
+          }
+        }
+        if (variants.length > 0) {
+          const chosen = pickStickyVariant(conversationId, variants);
+          const pin = await byVersionId(chosen);
+          if (pin) {
+            return pin;
+          }
+        }
+      }
+    }
+    const active = await tx.execute(sql`
+      select av.id as version_id, ps.id as snapshot_id
+      from assistants a
+      join assistant_versions av on av.id = a.active_version_id
+      join policy_snapshots ps on ps.assistant_version_id = av.id
+      where a.id = ${assistantId}::uuid
+      limit 1
+    `);
+    return (active.rows[0] as { version_id: string; snapshot_id: string } | undefined) ?? null;
+  }
+
+  /**
+   * FL-3.3 — regenerate an assistant reply. The target (default: the latest
+   * non-superseded assistant message) keeps its durable row; the replacement
+   * run records `regenerated_message_id` so CommitRunResult marks the
+   * original superseded in the SAME transaction that appends the new reply
+   * (invariant 5 — messages are immutable, branching is a pointer).
+   */
+  async regenerateMessage(input: {
+    orgId: string;
+    conversationId: string;
+    messageId?: string;
+    principalId: string;
+    expectedConversationVersion?: number;
+    idempotencyKey?: string;
+  }): Promise<{ run_id: string; regenerated_message_id: string; conversation_version: number }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.conversationId, 'conversationId');
+    const scope: IdempotencyScope | undefined = input.idempotencyKey
+      ? {
+          organizationId: input.orgId,
+          principalId: input.principalId,
+          endpointFamily: 'messages:regenerate',
+          idempotencyKey: input.idempotencyKey,
+          requestHash: canonicalHash({ conversation_id: input.conversationId, message_id: input.messageId ?? null }),
+        }
+      : undefined;
+
+    const result = await this.db.withOrg(input.orgId, async (tx) => {
+      if (scope) {
+        const claim = await claimIdempotency(tx, scope);
+        if (claim.kind === 'replay') {
+          return claim.response as { run_id: string; regenerated_message_id: string; conversation_version: number };
+        }
+      }
+      const conv = await tx.select().from(conversations).where(eq(conversations.id, input.conversationId)).for('update').limit(1);
+      if (conv.length === 0) {
+        throw ApiError.notFound('conversation');
+      }
+      if (conv[0].status !== 'active') {
+        throw ApiError.conflict('conversation is not active', { status: conv[0].status });
+      }
+      if (input.expectedConversationVersion !== undefined && conv[0].version !== input.expectedConversationVersion) {
+        throw ApiError.conflict('stale conversation version', { expected: input.expectedConversationVersion, actual: conv[0].version });
+      }
+
+      let target: Message | undefined;
+      if (input.messageId !== undefined) {
+        assertUuid(input.messageId, 'messageId');
+        const rows = await tx
+          .select()
+          .from(messages)
+          .where(and(eq(messages.id, input.messageId), eq(messages.conversationId, input.conversationId)))
+          .limit(1);
+        if (rows.length === 0 || rows[0].role !== 'assistant') {
+          throw ApiError.notFound('assistant message');
+        }
+        target = rows[0];
+      } else {
+        const rows = await tx
+          .select()
+          .from(messages)
+          .where(and(eq(messages.conversationId, input.conversationId), eq(messages.role, 'assistant'), isNull(messages.supersededBy)))
+          .orderBy(desc(messages.sequence))
+          .limit(1);
+        target = rows[0];
+      }
+      if (!target) {
+        throw ApiError.notFound('assistant message');
+      }
+      if (target.supersededBy) {
+        throw ApiError.conflict('message was already regenerated', { superseded_by: target.supersededBy });
+      }
+      // The regeneration replays the ORIGINAL input user message.
+      const userRows = await tx
+        .select()
+        .from(messages)
+        .where(and(eq(messages.conversationId, input.conversationId), eq(messages.role, 'user'), sql`${messages.sequence} < ${target.sequence}`, isNull(messages.supersededBy)))
+        .orderBy(desc(messages.sequence))
+        .limit(1);
+      const userMessage = userRows[0];
+      if (!userMessage) {
+        throw ApiError.conflict('no user message precedes the assistant reply');
+      }
+
+      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id);
+      if (!pin) {
+        throw ApiError.conflict('assistant has no published version with a policy snapshot');
+      }
+      const runId = uuidv7();
+      try {
+        await tx.insert(runs).values({
+          id: runId,
+          organizationId: input.orgId,
+          conversationId: input.conversationId,
+          inputMessageId: userMessage.id,
+          assistantVersionId: pin.version_id,
+          policySnapshotId: pin.snapshot_id,
+          state: 'ACCEPTED',
+          regeneratedMessageId: target.id,
+        });
+      } catch (err) {
+        if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
+          throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+        }
+        throw err;
+      }
+      await recordOutboxEvent(tx, {
+        aggregateType: 'run',
+        aggregateId: runId,
+        organizationId: input.orgId,
+        eventType: 'run.created',
+        partitionKey: input.conversationId,
+        payload: {
+          run_id: runId,
+          conversation_id: input.conversationId,
+          message_id: userMessage.id,
+          assistant_version_id: pin.version_id,
+          policy_snapshot_id: pin.snapshot_id,
+          regenerated_message_id: target.id,
+        },
+      });
+      const nextVersion = conv[0].version + 1;
+      await tx
+        .update(conversations)
+        .set({ version: nextVersion, updatedAt: new Date().toISOString() })
+        .where(eq(conversations.id, input.conversationId));
+      const result = { run_id: runId, regenerated_message_id: target.id, conversation_version: nextVersion };
+      if (scope) {
+        await completeIdempotency(tx, scope, result);
+      }
+      return result;
+    });
+    await this.audit.add({
+      action: 'message.regenerated',
+      resourceType: 'message',
+      resourceId: result.regenerated_message_id,
+      actorType: 'account',
+      actorId: input.principalId,
+      tenantId: input.orgId,
+      details: { run_id: result.run_id },
+    });
+    return result;
+  }
+
+  /**
+   * FL-3.3 — edit-and-resend: the caller's LATEST user message is replaced by
+   * an edited copy. Both rows stay durable (invariant 5): the original gains
+   * `superseded_by` (set-once), the new message carries `branched_from`, and
+   * the conversation's branch pointer records the fork point. A new run is
+   * created over the edited text — the normal start-message machinery.
+   */
+  async editMessage(input: {
+    orgId: string;
+    conversationId: string;
+    messageId: string;
+    content: Record<string, unknown>;
+    principalId: string;
+    expectedConversationVersion?: number;
+    idempotencyKey?: string;
+    attachments?: string[];
+  }): Promise<{ message_id: string; run_id: string; sequence: number; conversation_version: number; branched_from: string }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.conversationId, 'conversationId');
+    assertUuid(input.messageId, 'messageId');
+    validateMessageContent(input.content);
+    const requestHash = canonicalHash({ conversation_id: input.conversationId, message_id: input.messageId, content: input.content });
+    const scope: IdempotencyScope | undefined = input.idempotencyKey
+      ? {
+          organizationId: input.orgId,
+          principalId: input.principalId,
+          endpointFamily: 'messages:edit',
+          idempotencyKey: input.idempotencyKey,
+          requestHash,
+        }
+      : undefined;
+
+    const result = await this.db.withOrg(input.orgId, async (tx) => {
+      if (scope) {
+        const claim = await claimIdempotency(tx, scope);
+        if (claim.kind === 'replay') {
+          return claim.response as { message_id: string; run_id: string; sequence: number; conversation_version: number; branched_from: string };
+        }
+      }
+      const conv = await tx.select().from(conversations).where(eq(conversations.id, input.conversationId)).for('update').limit(1);
+      if (conv.length === 0) {
+        throw ApiError.notFound('conversation');
+      }
+      if (conv[0].status !== 'active') {
+        throw ApiError.conflict('conversation is not active', { status: conv[0].status });
+      }
+      if (input.expectedConversationVersion !== undefined && conv[0].version !== input.expectedConversationVersion) {
+        throw ApiError.conflict('stale conversation version', { expected: input.expectedConversationVersion, actual: conv[0].version });
+      }
+      const targetRows = await tx
+        .select()
+        .from(messages)
+        .where(and(eq(messages.id, input.messageId), eq(messages.conversationId, input.conversationId), eq(messages.role, 'user')))
+        .limit(1);
+      const target = targetRows[0];
+      if (!target) {
+        throw ApiError.notFound('user message');
+      }
+      if (target.supersededBy) {
+        throw ApiError.conflict('message was already edited', { superseded_by: target.supersededBy });
+      }
+      // Only the LATEST user message is editable — editing an older one would
+      // silently fork the transcript's meaning.
+      const latest = await tx
+        .select({ id: messages.id })
+        .from(messages)
+        .where(and(eq(messages.conversationId, input.conversationId), eq(messages.role, 'user'), isNull(messages.supersededBy)))
+        .orderBy(desc(messages.sequence))
+        .limit(1);
+      if (latest[0]?.id !== target.id) {
+        throw ApiError.conflict('only the latest user message can be edited');
+      }
+
+      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id);
+      if (!pin) {
+        throw ApiError.conflict('assistant has no published version with a policy snapshot');
+      }
+      const sequence = await nextMessageSequence(tx, input.conversationId);
+      const messageId = uuidv7();
+      const runId = uuidv7();
+
+      // FL-1.6 attachment gate — shared validator (same bounds as start-message).
+      const attachmentRefs =
+        input.attachments && input.attachments.length > 0 ? await this.validateAttachments(tx, input.orgId, input.attachments) : null;
+
+      await tx.insert(messages).values({
+        id: messageId,
+        conversationId: input.conversationId,
+        organizationId: input.orgId,
+        sequence,
+        role: 'user',
+        content: input.content,
+        createdBy: input.principalId,
+        branchedFrom: target.id,
+        ...(attachmentRefs !== null ? { artifactRefs: attachmentRefs } : {}),
+      });
+      // Set-once supersede — a concurrent editor loses here (conflict).
+      const superseded = await tx
+        .update(messages)
+        .set({ supersededBy: messageId })
+        .where(and(eq(messages.id, target.id), isNull(messages.supersededBy)))
+        .returning({ id: messages.id });
+      if (superseded.length === 0) {
+        throw ApiError.conflict('message was already edited');
+      }
+
+      try {
+        await tx.insert(runs).values({
+          id: runId,
+          organizationId: input.orgId,
+          conversationId: input.conversationId,
+          inputMessageId: messageId,
+          assistantVersionId: pin.version_id,
+          policySnapshotId: pin.snapshot_id,
+          state: 'ACCEPTED',
+        });
+      } catch (err) {
+        if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
+          throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+        }
+        throw err;
+      }
+      await recordOutboxEvent(tx, {
+        aggregateType: 'run',
+        aggregateId: runId,
+        organizationId: input.orgId,
+        eventType: 'run.created',
+        partitionKey: input.conversationId,
+        payload: {
+          run_id: runId,
+          conversation_id: input.conversationId,
+          message_id: messageId,
+          assistant_version_id: pin.version_id,
+          policy_snapshot_id: pin.snapshot_id,
+        },
+      });
+      const nextVersion = conv[0].version + 1;
+      await tx
+        .update(conversations)
+        .set({ version: nextVersion, branchedFromMessageId: target.id, updatedAt: new Date().toISOString() })
+        .where(eq(conversations.id, input.conversationId));
+      const result = { message_id: messageId, run_id: runId, sequence, conversation_version: nextVersion, branched_from: target.id };
+      if (scope) {
+        await completeIdempotency(tx, scope, result);
+      }
+      return result;
+    });
+    await this.audit.add({
+      action: 'message.edited',
+      resourceType: 'message',
+      resourceId: result.branched_from,
+      actorType: 'account',
+      actorId: input.principalId,
+      tenantId: input.orgId,
+      details: { replacement_id: result.message_id },
+    });
+    return result;
+  }
+
+  /** FL-1.6 attachment gate shared by the start-message and edit paths. */
+  private async validateAttachments(
+    tx: NodePgDatabase,
+    orgId: string,
+    attachments: string[],
+  ): Promise<Array<{ artifact_id: string; media_type: string; byte_length: number; sha256: string; purpose: string }>> {
+    const ids = [...new Set(attachments)];
+    if (ids.length > 4) {
+      throw ApiError.validation({ attachments: 'at most 4 attachments per message' });
+    }
+    const rows = await tx
+      .select()
+      .from(artifacts)
+      .where(and(eq(artifacts.organizationId, orgId), inArray(artifacts.id, ids)));
+    if (rows.length !== ids.length) {
+      throw ApiError.validation({ attachments: 'one or more artifact ids not found in this organization' });
+    }
+    for (const a of rows) {
+      if (a.purpose !== 'MESSAGE_ATTACHMENT') {
+        throw ApiError.validation({ attachments: `artifact ${a.id} purpose ${a.purpose} is not an attachment` });
+      }
+      if (a.state !== 'active') {
+        throw ApiError.validation({ attachments: `artifact ${a.id} is not active` });
+      }
+      const mediaType = a.contentTypeDetected ?? a.contentTypeDeclared;
+      if (!ATTACHMENT_MEDIA_TYPES.has(mediaType)) {
+        throw ApiError.validation({ attachments: `artifact ${a.id} media type ${mediaType} is not supported` });
+      }
+      if (a.byteLength > MAX_ATTACHMENT_BYTES) {
+        throw ApiError.validation({ attachments: `artifact ${a.id} exceeds ${MAX_ATTACHMENT_BYTES} bytes` });
+      }
+    }
+    return rows.map((a) => ({
+      artifact_id: a.id,
+      media_type: a.contentTypeDetected ?? a.contentTypeDeclared,
+      byte_length: a.byteLength,
+      sha256: Buffer.from(a.sha256).toString('hex'),
+      purpose: a.purpose,
+    }));
   }
 
   // ── Messages (read path) ─────────────────────────────────────────────────
 
-  async listMessages(orgId: string, conversationId: string, opts?: { afterSequence?: number; limit?: number }): Promise<{ messages: Message[]; next_cursor: number | null }> {
+  async listMessages(orgId: string, conversationId: string, opts?: { afterSequence?: number; limit?: number; includeSuperseded?: boolean }): Promise<{ messages: Message[]; next_cursor: number | null }> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
     const limit = clampLimit(opts?.limit);
     const after = opts?.afterSequence ?? 0;
+    const conditions = [eq(messages.conversationId, conversationId), gt(messages.sequence, after)];
+    // FL-3.3 — the active branch hides superseded rows; `include_superseded`
+    // serves the branch history (the replacement pointer is on each row).
+    if (!opts?.includeSuperseded) {
+      conditions.push(isNull(messages.supersededBy));
+    }
     const rows = await this.db.withOrg(orgId, (tx) =>
       tx
         .select()
         .from(messages)
-        .where(and(eq(messages.conversationId, conversationId), gt(messages.sequence, after)))
+        .where(and(...conditions))
         .orderBy(asc(messages.sequence))
         .limit(limit),
     );
@@ -360,6 +802,8 @@ export class ConversationsService {
     leaseEpoch?: number;
     /** Contract v1.1 UsageEntry — recorded in the SAME TX as the terminal commit. */
     usage?: { provider: string; model: string; promptTokens: number; completionTokens: number; totalTokens: number };
+    /** FL-3.4 — up to 4 short follow-up suggestions surfaced with the reply. */
+    suggestedFollowups?: string[];
   }): Promise<{ message_id: string; run_id: string; replay: boolean }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.runId, 'runId');
@@ -401,14 +845,86 @@ export class ConversationsService {
 
       const sequence = await nextMessageSequence(tx, run.conversationId);
       const messageId = uuidv7();
+
+      // FL-2.9 - citations plumbing: retrieval events emitted for THIS run
+      // (wire EVENT_TYPE_RETRIEVAL → stored '5', payload {case:'retrieval'})
+      // carry the manifest's document/chunk ranges; the committed assistant
+      // message carries a bounded `citations` part so consumers can render
+      // sources without a second round trip.
+      const retrievalRows = await tx.execute(sql`
+        select payload->'value'->'citations' as citations from run_events
+        where run_id = ${run.id}::uuid and event_type = '5' and payload->>'case' = 'retrieval'
+        order by engine_sequence desc
+        limit 5
+      `);
+      const citations = (retrievalRows.rows as Array<{ citations?: Array<Record<string, unknown>> } | null>)
+        .flatMap((r) => (r?.citations ?? []).slice(0, 5))
+        .slice(0, 10)
+        .map((c) => ({
+          document_id: String(c['document_id'] ?? ''),
+          chunk_id: String(c['chunk_id'] ?? ''),
+          source_range: {
+            start: Number(c['source_range_start'] ?? 0),
+            end: Number(c['source_range_end'] ?? 0),
+          },
+        }));
+
+      // FL-3.2 — generated media plumbing (same pattern as citations): the
+      // runtime uploads each image via PutRunArtifact (GENERATED_MEDIA) and
+      // emits a MediaGenerated run event (stored '13', payload case 'media');
+      // the committed assistant message pins bounded refs so consumers render
+      // attachments and the channel plane can deliver them. Artifact
+      // ownership is re-verified here.
+      const mediaRows = await tx.execute(sql`
+        select payload->'value' as value from run_events
+        where run_id = ${run.id}::uuid and event_type = '13' and payload->>'case' = 'media'
+        order by engine_sequence asc
+        limit 8
+      `);
+      const mediaRefs: Array<{ artifact_id: string; media_type: string }> = [];
+      for (const row of mediaRows.rows as Array<{ value: { artifact_id?: unknown; media_type?: unknown } | null }>) {
+        const artifactId = row.value?.artifact_id;
+        const mediaType = row.value?.media_type;
+        if (typeof artifactId !== 'string' || typeof mediaType !== 'string' || mediaRefs.length >= 4) {
+          continue;
+        }
+        const owned = await tx
+          .select({ id: artifacts.id, purpose: artifacts.purpose, state: artifacts.state })
+          .from(artifacts)
+          .where(and(eq(artifacts.id, artifactId), eq(artifacts.organizationId, input.orgId)))
+          .limit(1);
+        if (owned[0]?.purpose === 'GENERATED_MEDIA' && owned[0].state === 'active' && !mediaRefs.some((m) => m.artifact_id === artifactId)) {
+          mediaRefs.push({ artifact_id: artifactId, media_type: mediaType.slice(0, 100) });
+        }
+      }
+
+      // FL-3.4 — suggested follow-ups ride the SAME commit (bounded, typed).
+      const followups = normalizeFollowups(input.suggestedFollowups);
+      const contentOut = {
+        ...input.content,
+        ...(citations.length > 0 ? { citations } : {}),
+        ...(mediaRefs.length > 0 ? { generated_media: mediaRefs } : {}),
+        ...(followups.length > 0 ? { suggested_followups: followups } : {}),
+      };
+
       await tx.insert(messages).values({
         id: messageId,
         conversationId: run.conversationId,
         organizationId: input.orgId,
         sequence,
         role: 'assistant',
-        content: input.content,
+        content: contentOut,
+        ...(mediaRefs.length > 0 ? { artifactRefs: mediaRefs } : {}),
       });
+
+      // FL-3.3 — a regeneration supersedes the original reply in the SAME
+      // transaction that appends its replacement (set-once pointer).
+      if (run.regeneratedMessageId) {
+        await tx
+          .update(messages)
+          .set({ supersededBy: messageId })
+          .where(and(eq(messages.id, run.regeneratedMessageId), isNull(messages.supersededBy)));
+      }
 
       const insertedEvent = await tx
         .insert(runEvents)
@@ -483,9 +999,183 @@ export class ConversationsService {
     });
   }
 
-  /** Set/update the human-facing conversation title (drizzle/0033). */
-  async setTitle(input: { orgId: string; conversationId: string; title: string; actor: string }): Promise<Conversation> {
+  /**
+   * FL-3.4 — pin/unpin a message (rendering affordance; never hides content).
+   * The message must belong to the conversation; pin state is metadata only.
+   */
+  async setPinned(input: { orgId: string; conversationId: string; messageId: string; pinned: boolean; actor: string }): Promise<Message> {
     assertUuid(input.orgId, 'orgId');
+    assertUuid(input.conversationId, 'conversationId');
+    assertUuid(input.messageId, 'messageId');
+    const row = await this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .update(messages)
+        .set({
+          pinnedAt: input.pinned ? new Date().toISOString() : null,
+          pinnedBy: input.pinned ? input.actor.slice(0, 128) : null,
+        })
+        .where(and(eq(messages.id, input.messageId), eq(messages.conversationId, input.conversationId), isNull(messages.supersededBy)))
+        .returning();
+      if (rows.length === 0) {
+        throw ApiError.notFound('message');
+      }
+      return rows[0];
+    });
+    await this.audit.add({
+      action: input.pinned ? 'message.pinned' : 'message.unpinned',
+      resourceType: 'message',
+      resourceId: input.messageId,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { conversation_id: input.conversationId },
+    });
+    return row;
+  }
+
+  // ── Public share links (FL-3.4) ──────────────────────────────────────────
+
+  /**
+   * Create a share link. The raw token is returned EXACTLY ONCE — only its
+   * sha256 is stored (same discipline as widget session tokens). TTL is
+   * optional; revocation is explicit and audited.
+   */
+  async createShare(input: { orgId: string; conversationId: string; ttlSeconds?: number; actor: string }): Promise<{ share: ConversationShare; token: string }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.conversationId, 'conversationId');
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const expiresAt =
+      input.ttlSeconds !== undefined
+        ? new Date(Date.now() + Math.min(Math.max(60, input.ttlSeconds), 90 * 86_400) * 1000).toISOString()
+        : null;
+    const row = await this.db.withOrg(input.orgId, async (tx) => {
+      const conv = await tx.select({ id: conversations.id }).from(conversations).where(eq(conversations.id, input.conversationId)).limit(1);
+      if (conv.length === 0) {
+        throw ApiError.notFound('conversation');
+      }
+      const rows = await tx
+        .insert(conversationShares)
+        .values({
+          id: uuidv7(),
+          organizationId: input.orgId,
+          conversationId: input.conversationId,
+          tokenHash,
+          createdBy: input.actor.slice(0, 128),
+          expiresAt,
+        })
+        .returning();
+      return rows[0];
+    });
+    await this.audit.add({
+      action: 'conversation.shared',
+      resourceType: 'conversation_share',
+      resourceId: row.id,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { conversation_id: input.conversationId, expires_at: expiresAt },
+    });
+    return { share: row, token };
+  }
+
+  async listShares(orgId: string, conversationId: string): Promise<ConversationShare[]> {
+    assertUuid(orgId, 'orgId');
+    assertUuid(conversationId, 'conversationId');
+    return this.db.withOrg(orgId, (tx) =>
+      tx
+        .select()
+        .from(conversationShares)
+        .where(and(eq(conversationShares.organizationId, orgId), eq(conversationShares.conversationId, conversationId)))
+        .orderBy(desc(conversationShares.createdAt))
+        .limit(100),
+    );
+  }
+
+  async revokeShare(input: { orgId: string; shareId: string; actor: string }): Promise<ConversationShare> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.shareId, 'shareId');
+    const row = await this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .update(conversationShares)
+        .set({ revokedAt: new Date().toISOString() })
+        .where(and(eq(conversationShares.id, input.shareId), eq(conversationShares.organizationId, input.orgId), isNull(conversationShares.revokedAt)))
+        .returning();
+      if (rows.length === 0) {
+        throw ApiError.notFound('share');
+      }
+      return rows[0];
+    });
+    await this.audit.add({
+      action: 'conversation_share.revoked',
+      resourceType: 'conversation_share',
+      resourceId: input.shareId,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: {},
+    });
+    return row;
+  }
+
+  /**
+   * Token-only public resolution (no tenant context — the token IS the
+   * credential). Serves a REDACTED projection: role/sequence/time, text,
+   * citations and follow-ups only. Channel bindings, participants, artifact
+   * refs and internal ids never leave the system. Expired/revoked shares
+   * resolve to null and the caller renders a plain 404.
+   */
+  async resolvePublicShare(token: string): Promise<{
+    title: string | null;
+    created_at: string;
+    messages: Array<{ sequence: number; role: string; text: string; citations?: unknown; suggested_followups?: string[]; pinned: boolean; created_at: string }>;
+  } | null> {
+    if (!token || token.length < 16 || token.length > 128) {
+      return null;
+    }
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    return this.db.withBypass(async (tx) => {
+      const shareRows = await tx
+        .select()
+        .from(conversationShares)
+        .where(and(eq(conversationShares.tokenHash, tokenHash), isNull(conversationShares.revokedAt)))
+        .limit(1);
+      const share = shareRows[0];
+      if (!share || (share.expiresAt !== null && Date.parse(share.expiresAt) <= Date.now())) {
+        return null;
+      }
+      const convRows = await tx.select().from(conversations).where(eq(conversations.id, share.conversationId)).limit(1);
+      const conversation = convRows[0];
+      if (!conversation || conversation.status === 'deleted') {
+        return null;
+      }
+      const msgRows = await tx
+        .select()
+        .from(messages)
+        .where(and(eq(messages.conversationId, conversation.id), isNull(messages.supersededBy)))
+        .orderBy(asc(messages.sequence))
+        .limit(200);
+      return {
+        title: conversation.title,
+        created_at: conversation.createdAt,
+        messages: msgRows.map((m) => {
+          const content = (m.content ?? {}) as { text?: unknown; citations?: unknown; suggested_followups?: unknown };
+          return {
+            sequence: m.sequence,
+            role: m.role,
+            text: typeof content.text === 'string' ? content.text.slice(0, 16_000) : '',
+            ...(content.citations !== undefined ? { citations: content.citations } : {}),
+            ...(Array.isArray(content.suggested_followups) ? { suggested_followups: content.suggested_followups.map(String).slice(0, 4) } : {}),
+            pinned: m.pinnedAt !== null,
+            created_at: m.createdAt,
+          };
+        }),
+      };
+    });
+  }
+
+  /** Set/update the human-facing conversation title (drizzle/0033). */
+  async setTitle(input: { orgId: string; conversationId: string; title: string; actor: string }): Promise<Conversation> {    assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     const title = input.title.trim().slice(0, 256);
     if (!title) {
@@ -567,7 +1257,54 @@ export class ConversationsService {
         partitionKey: input.conversationId,
         payload: { message_id: input.messageId, conversation_id: input.conversationId, account_id: input.accountId, rating: input.rating },
       });
-      return rows[0];
+      const result = rows[0];
+      await this.maybeAutoEscalate({ orgId: input.orgId, conversationId: input.conversationId });
+      return result;
+    });
+  }
+
+  /**
+   * FL-1.7c auto-escalation hook (flag-gated): N consecutive negative
+   * feedback ratings in one conversation escalate to a human agent. Runs
+   * AFTER the feedback TX commits - a hook failure must never fail the
+   * feedback write, so it is best-effort with a logged warning.
+   */
+  private async maybeAutoEscalate(input: { orgId: string; conversationId: string }): Promise<void> {
+    if (!env.HARNESS__AUTO_ESCALATE_ENABLED) {
+      return;
+    }
+    try {
+      const streak = await this.consecutiveNegativeStreak(input.orgId, input.conversationId);
+      if (streak >= env.HARNESS__AUTO_ESCALATE_NEGATIVE_STREAK) {
+        await this.escalations.escalate({
+          orgId: input.orgId,
+          conversationId: input.conversationId,
+          reason: 'negative_feedback',
+          actor: 'engine:auto-escalation',
+        });
+      }
+    } catch (err) {
+      ConversationsService.logger.warn(`auto-escalation hook failed for conversation ${input.conversationId}: ${(err as Error).message}`);
+    }
+  }
+
+  /** Newest-first walk over rated messages until the first positive. */
+  private async consecutiveNegativeStreak(orgId: string, conversationId: string): Promise<number> {
+    return this.db.withOrg(orgId, async (tx) => {
+      const rows = await tx.execute(sql`
+        select f.rating
+        from message_feedback f
+        join messages m on m.id = f.message_id
+        where m.conversation_id = ${conversationId}::uuid and m.organization_id = ${orgId}::uuid
+        order by m.sequence desc
+        limit 20
+      `);
+      let streak = 0;
+      for (const row of rows.rows as Array<{ rating: string }>) {
+        if (row.rating !== 'down') break;
+        streak += 1;
+      }
+      return streak;
     });
   }
 
@@ -739,9 +1476,46 @@ export interface SseMessage {
   retry?: number;
 }
 
-async function nextMessageSequence(tx: NodePgDatabase, conversationId: string): Promise<number> {
+export async function nextMessageSequence(tx: NodePgDatabase, conversationId: string): Promise<number> {
   const res = await tx.execute(sql`select coalesce(max(sequence), 0) + 1 as next from messages where conversation_id = ${conversationId}::uuid`);
   return Number((res.rows[0] as { next: string | number }).next);
+}
+
+/**
+ * FL-3.12 — sticky variant selection. A consistent hash of the conversation
+ * id picks a point on the cumulative weight axis: the same conversation
+ * always lands on the same variant (no per-request randomness), and the
+ * traffic share converges to the configured weights.
+ */
+function pickStickyVariant(conversationId: string, variants: Array<{ version_id: string; weight: number }>): string {
+  const total = variants.reduce((acc, v) => acc + v.weight, 0);
+  if (total <= 0) {
+    return variants[0].version_id;
+  }
+  let point = createHash('sha256').update(`rollout:${conversationId}`).digest().readUInt32BE(0) % total;
+  for (const v of variants) {
+    point -= v.weight;
+    if (point < 0) {
+      return v.version_id;
+    }
+  }
+  return variants[variants.length - 1].version_id;
+}
+
+/** FL-3.4 — bounded, trimmed follow-up suggestions (max 4 × 200 chars). */
+function normalizeFollowups(input?: string[]): string[] {
+  if (!input) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const raw of input) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim().slice(0, 200);
+    if (trimmed.length === 0) continue;
+    out.push(trimmed);
+    if (out.length >= 4) break;
+  }
+  return out;
 }
 
 function isUniqueViolation(err: unknown, constraint: string): boolean {

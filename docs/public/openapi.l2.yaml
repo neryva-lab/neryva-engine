@@ -1,0 +1,247 @@
+openapi: 3.1.0
+info:
+  title: Neryva Public API (L2)
+  version: 1.0.0
+  description: |
+    Conversation-plane surface of the Neryva Engine, authenticated with
+    `nrv_live_` API keys (FL-2.25). All mutating endpoints honor the
+    idempotency contract: the same key + same body replays the original
+    response; the same key + a different body is a 409 conflict.
+
+    Streaming uses Server-Sent Events with `engine_sequence` as the
+    authoritative, gapless replay cursor (`Last-Event-ID`).
+servers:
+  - url: https://engine.neryva.com
+    description: Production Engine
+  - url: http://localhost:3000
+    description: Local development
+security:
+  - BearerApiKey: []
+tags:
+  - name: conversations
+    description: Conversation and message lifecycle
+paths:
+  /v1/conversations:
+    post:
+      operationId: createConversation
+      tags: [conversations]
+      summary: Create a conversation for an assistant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assistant_id]
+              properties:
+                assistant_id:
+                  type: string
+                  format: uuid
+      responses:
+        '201':
+          description: Conversation created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversation: { $ref: '#/components/schemas/Conversation' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/conversations/{conversationId}/messages:
+    post:
+      operationId: acceptMessage
+      tags: [conversations]
+      summary: Send a user message and start a run
+      description: |
+        The ONE message entry point: message + run + outbox are committed in a
+        single PostgreSQL transaction. Returns `run_id` for streaming. When the
+        conversation is escalated, `run_id` is null and `auto_responder` is
+        `paused`.
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: object
+                  required: [text]
+                  properties:
+                    text: { type: string, maxLength: 16000 }
+                expected_conversation_version: { type: integer }
+                idempotency_key: { type: string, minLength: 8, maxLength: 255 }
+                attachments:
+                  type: array
+                  maxItems: 4
+                  items: { type: string, format: uuid }
+                  description: MESSAGE_ATTACHMENT artifact ids from the knowledge plane.
+      responses:
+        '200':
+          description: Message accepted; run created (or paused under escalation)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptMessageResult' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    get:
+      operationId: listMessages
+      tags: [conversations]
+      summary: List messages (cursor = last sequence)
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: after
+          in: query
+          schema: { type: integer, minimum: 0 }
+          description: Return messages with sequence > after.
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Message page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  next_cursor:
+                    type: integer
+                    nullable: true
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/conversations/{conversationId}/streams/{runId}:
+    get:
+      operationId: streamRunEvents
+      tags: [conversations]
+      summary: Stream a run's durable events (SSE)
+      description: |
+        Named SSE events: `delta` (assistant chunks), `thinking` (reasoning
+        display), `retrieval` (knowledge hits), `approval`, `terminal`. The
+        SSE `id` is the engine_sequence — reconnect with `Last-Event-ID` for
+        an identical gapless replay.
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: last_event_id
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+          description: Replay cursor (engine_sequence).
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, description: engine_sequence }
+                  event: { type: string, enum: [delta, thinking, retrieval, approval, terminal] }
+                  data: { type: object }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  parameters:
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, maxLength: 255 }
+      description: HTTP-tier idempotency lease; the DB tier uses body `idempotency_key`.
+  securitySchemes:
+    BearerApiKey:
+      type: http
+      scheme: bearer
+      description: "`nrv_live_` API key (L2 principal), scope-gated."
+  schemas:
+    Conversation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        assistant_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, archived, deleted, escalated] }
+        version: { type: integer }
+        title: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    AcceptMessageResult:
+      type: object
+      properties:
+        message_id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid, nullable: true }
+        sequence: { type: integer }
+        conversation_version: { type: integer }
+        auto_responder: { type: string, enum: [paused], nullable: true }
+        replay: { type: boolean }
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sequence: { type: integer }
+        role: { type: string, enum: [user, assistant, tool, system] }
+        content:
+          type: object
+          properties:
+            text: { type: string }
+            citations:
+              type: array
+              items:
+                type: object
+                properties:
+                  document_id: { type: string, format: uuid }
+                  chunk_id: { type: string, format: uuid }
+                  source_range:
+                    type: object
+                    properties:
+                      start: { type: integer }
+                      end: { type: integer }
+            suggested_followups:
+              type: array
+              maxItems: 4
+              items: { type: string, maxLength: 200 }
+        created_at: { type: string, format: date-time }
+  responses:
+    Validation:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Idempotency conflict or concurrent mutation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Error:
+      description: Standard error envelope
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

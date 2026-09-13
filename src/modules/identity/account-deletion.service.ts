@@ -55,8 +55,9 @@ export class AccountDeletionService {
     // is enrolled. A passwordless, MFA-less account has no factor to
     // confirm with and may not self-delete (compromise containment posture).
     let confirmed = false;
-    if (account.passwordHash) {
-      if (!input.password || !(await this.credentials.verifyPassword(account.passwordHash, input.password))) {
+    const storedHash = await this.credentials.getPasswordHash(input.accountId);
+    if (storedHash) {
+      if (!input.password || !(await this.credentials.verifyPassword(storedHash, input.password))) {
         throw ApiError.unauthenticated('Current password is incorrect');
       }
       confirmed = true;

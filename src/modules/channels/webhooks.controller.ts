@@ -83,6 +83,91 @@ export class ChannelsWebhookController {
     return { received: result.outcome === 'accepted' };
   }
 
+  // ── FL-3.17 — Instagram (Meta Graph contract, identical envelope) ───────
+
+  @Get('instagram/:accountId')
+  @Public()
+  async verifyInstagram(
+    @Param('accountId') accountId: string,
+    @Query('hub.mode') mode: string,
+    @Query('hub.verify_token') token: string,
+    @Query('hub.challenge') challenge: string,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    await this.verifyMeta(accountId, mode, token, challenge, reply);
+  }
+
+  @Post('instagram/:accountId')
+  @HttpCode(200)
+  @Public()
+  async receiveInstagram(@Param('accountId') accountId: string, @Req() request: FastifyRequest & { rawBody?: string }, @Body() body: unknown): Promise<{ received: boolean }> {
+    void body;
+    return this.receiveMeta('instagram', accountId, request);
+  }
+
+  // ── FL-3.17 — X (CRC challenge + HMAC-SHA256 over the raw body) ──────────
+
+  @Get('x/:accountId')
+  @Public()
+  async verifyX(
+    @Param('accountId') accountId: string,
+    @Query('crc_token') crcToken: string,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const account = await this.requireAccount(accountId);
+    const secret = String(this.channels.decryptCredentials(account).app_secret ?? '');
+    if (!crcToken || !secret) {
+      throw new ApiError(403, 'forbidden', 'webhook verification failed');
+    }
+    // X compares the exact base64 of the HMAC — echo verbatim.
+    const responseToken = createHmac('sha256', secret).update(crcToken, 'utf8').digest('base64');
+    reply.code(200).type('application/json').send({ response_token: responseToken });
+  }
+
+  @Post('x/:accountId')
+  @HttpCode(200)
+  @Public()
+  async receiveX(@Param('accountId') accountId: string, @Req() request: FastifyRequest & { rawBody?: string }, @Body() body: unknown): Promise<{ received: boolean }> {
+    void body;
+    const account = await this.requireAccount(accountId);
+    const rawBody = request.rawBody ?? '';
+    const presented = request.headers['x-hub-signature-256'];
+    const signature = Array.isArray(presented) ? presented[0] : presented;
+    const secret = String(this.channels.decryptCredentials(account).app_secret ?? '');
+    if (!signature || !signature.startsWith('sha256=') || !secret) {
+      throw new ApiError(401, 'unauthenticated', 'missing webhook signature');
+    }
+    const expected = createHmac('sha256', secret).update(rawBody, 'utf8').digest('base64');
+    if (!safeEqual(signature.slice('sha256='.length), expected)) {
+      throw new ApiError(401, 'unauthenticated', 'webhook signature mismatch');
+    }
+    if (await this.ingestService.rateLimited(account.id)) {
+      throw new ApiError(429, 'rate_limited', 'channel webhook rate limit exceeded');
+    }
+    const result = await this.ingestService.acceptWebhook({ account, rawBody, signatureOk: true });
+    return { received: result.outcome === 'accepted' };
+  }
+
+  // ── FL-3.17 — email (inbound-parse webhook, shared secret header) ────────
+
+  @Post('email/:accountId')
+  @HttpCode(200)
+  @Public()
+  async receiveEmail(@Param('accountId') accountId: string, @Req() request: FastifyRequest & { rawBody?: string }): Promise<{ received: boolean }> {
+    const account = await this.requireAccount(accountId);
+    const presented = request.headers['x-webhook-secret'];
+    const presentedSecret = Array.isArray(presented) ? presented[0] : presented;
+    const secret = String(this.channels.decryptCredentials(account).webhook_secret ?? '');
+    if (!presentedSecret || !secret || !safeEqual(String(presentedSecret), secret)) {
+      throw new ApiError(401, 'unauthenticated', 'webhook secret mismatch');
+    }
+    if (await this.ingestService.rateLimited(account.id)) {
+      throw new ApiError(429, 'rate_limited', 'channel webhook rate limit exceeded');
+    }
+    const result = await this.ingestService.acceptWebhook({ account, rawBody: request.rawBody ?? '', signatureOk: true });
+    return { received: result.outcome === 'accepted' };
+  }
+
   // ── internals ────────────────────────────────────────────────────────────
 
   private async verifyMeta(accountId: string, mode: string, token: string, challenge: string, reply: FastifyReply): Promise<void> {
@@ -94,7 +179,7 @@ export class ChannelsWebhookController {
     reply.code(200).type('text/plain').send(challenge);
   }
 
-  private async receiveMeta(platform: 'messenger' | 'whatsapp', accountId: string, request: FastifyRequest & { rawBody?: string }): Promise<{ received: boolean }> {
+  private async receiveMeta(platform: 'messenger' | 'whatsapp' | 'instagram', accountId: string, request: FastifyRequest & { rawBody?: string }): Promise<{ received: boolean }> {
     const account = await this.requireAccount(accountId);
     const rawBody = request.rawBody ?? '';
     // X-Hub-Signature-256 over the RAW body with the account's app secret —

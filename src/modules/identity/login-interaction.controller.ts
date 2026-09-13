@@ -142,13 +142,17 @@ export class LoginInteractionController {
     const email = normalizeEmail(String(body.email ?? ''));
     const password = String(body.password ?? '');
     const account = await this.accounts.findByEmail(email);
-    if (!account || !account.passwordHash) {
+    // AUTH-3.2: password material lives in account_credentials — one extra
+    // read for the passwordless branch, enumeration resistance preserved
+    // (unknown email and known-passwordless take the same dummy-verify path).
+    const storedHash = account ? await this.credentials.getPasswordHash(account.id) : null;
+    if (!account || !storedHash) {
       // Enumeration resistance: uniform failure with a dummy verify for timing.
       await this.credentials.verifyPassword(DUMMY_ARGON2_HASH, password);
       await this.events.emit(EngineEvents.LoginFailure, { reason: 'password_unknown' });
       throw ApiError.unauthenticated('Invalid email or password');
     }
-    const ok = await this.credentials.verifyPassword(account.passwordHash, password);
+    const ok = await this.credentials.verifyPassword(storedHash, password);
     if (!ok) {
       await this.events.emit(EngineEvents.LoginFailure, { reason: 'password_invalid', accountId: account.id });
       await this.audit.add({
@@ -161,8 +165,8 @@ export class LoginInteractionController {
       });
       throw ApiError.unauthenticated('Invalid email or password');
     }
-    if (this.credentials.needsRehash(account.passwordHash)) {
-      await this.accounts.updatePasswordHash(account.id, await this.credentials.hashPassword(password));
+    if (this.credentials.needsRehash(storedHash)) {
+      await this.credentials.setPasswordHash(account.id, await this.credentials.hashPassword(password));
     }
     await this.challengeOrFinish(req, reply, uid, interaction, account.id, 'password', email);
   }

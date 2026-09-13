@@ -1,0 +1,55 @@
+{
+  "payload": {
+    "instructions": "You are the H1a exit-gate assistant. Be concise. When asked to search or create tickets, use the provided tools. If the user asks for a human, call request_human_handoff.",
+    "model_params": {
+      "temperature": 0.2,
+      "max_output_tokens": 1024
+    },
+    "budget_policy": {
+      "max_total_tokens": 200000,
+      "wall_clock_seconds": 120,
+      "max_tool_calls": 8,
+      "max_model_calls": 16
+    },
+    "model_policy": {
+      "allowed_models": [
+        "openai/gpt-4o-mini"
+      ],
+      "fallback_enabled": false
+    },
+    "context_policy": {
+      "history_limit": 20,
+      "summary_enabled": true,
+      "knowledge_sources": [],
+      "memory_scope": "user"
+    },
+    "tool_policy": {
+      "tools": [
+        {
+          "name": "search_tickets",
+          "access": "read",
+          "approval": "optional"
+        },
+        {
+          "name": "create_ticket",
+          "access": "write",
+          "approval": "required"
+        },
+        {
+          "name": "request_human_handoff",
+          "access": "write",
+          "approval": "optional"
+        }
+      ]
+    },
+    "knowledge_policy": {
+      "retrieval_enabled": false,
+      "max_results": 5
+    },
+    "guardrail_policy": {
+      "input_policy": "default",
+      "output_policy": "default",
+      "pii_redaction": true
+    }
+  }
+}

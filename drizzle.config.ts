@@ -33,6 +33,7 @@ export default {
     './src/modules/webhooks/schema.ts',
     './src/modules/notifications/schema.ts',
     './src/modules/staff/schema.ts',
+    './src/common/auth/platform-staff.schema.ts',
     './src/modules/config-publish/config-publish.schema.ts',
     './src/modules/console/announcements.schema.ts',
   ],

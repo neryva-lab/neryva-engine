@@ -10,7 +10,7 @@ import { conversations } from '../conversations/schema';
  * drizzle/0030_channels.sql.
  */
 
-export const CHANNEL_PLATFORMS = ['whatsapp', 'messenger', 'telegram', 'web'] as const;
+export const CHANNEL_PLATFORMS = ['whatsapp', 'messenger', 'telegram', 'web', 'instagram', 'x', 'email'] as const;
 export type ChannelPlatform = (typeof CHANNEL_PLATFORMS)[number];
 
 export const CHANNEL_ACCOUNT_STATUSES = ['pending', 'active', 'suspended'] as const;
@@ -26,6 +26,15 @@ export interface ChannelConfig {
   out_of_window_template?: { name: string; language: string };
   /** Messenger only: utility note sent outside the 24h window. */
   out_of_window_note?: string;
+  /** FL-1.7b - notes relayed to the end user on escalation lifecycle events. */
+  escalation_note?: string;
+  escalation_resolved_note?: string;
+  /** FL-2.8 - widget quick-reply chips (max 6, 64 chars each). */
+  quick_replies?: string[];
+  /** FL-2.8 - show a thumbs CSAT widget bound to message_feedback. */
+  csat_enabled?: boolean;
+  /** FL-3.1 - deliver assistant replies on WhatsApp ALSO as a synthesized voice note. */
+  voice_replies_enabled?: boolean;
 }
 
 export const channelAccounts = pgTable(
@@ -170,3 +179,67 @@ export type ChannelIdentity = typeof channelIdentities.$inferSelect;
 export type ChannelSession = typeof channelSessions.$inferSelect;
 export type ChannelMessageLink = typeof channelMessageLinks.$inferSelect;
 export type ChannelEvent = typeof channelEvents.$inferSelect;
+
+/**
+ * FL-3.18 — provider-approved outbound message templates (WhatsApp class),
+ * managed per channel account. `variables` is an ordered list of placeholder
+ * descriptors rendered at send time; the raw template is never user content.
+ */
+export const channelMessageTemplates = pgTable(
+  'channel_message_templates',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    channelAccountId: uuid('channel_account_id')
+      .notNull()
+      .references(() => channelAccounts.id, { onDelete: 'cascade' }),
+    platform: varchar('platform', { length: 32 }).notNull(),
+    name: varchar('name', { length: 128 }).notNull(),
+    language: varchar('language', { length: 16 }).notNull().default('en'),
+    bodyText: varchar('body_text', { length: 4096 }).notNull(),
+    variables: jsonb('variables').notNull().default([]),
+    providerTemplateId: varchar('provider_template_id', { length: 255 }),
+    /** draft | approved | rejected | archived */
+    status: varchar('status', { length: 16 }).notNull().default('draft'),
+    createdBy: varchar('created_by', { length: 128 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_channel_templates_account_name').on(t.channelAccountId, t.name, t.language),
+    index('ix_channel_templates_org').on(t.organizationId, t.channelAccountId),
+  ],
+);
+
+export type ChannelMessageTemplate = typeof channelMessageTemplates.$inferSelect;
+
+/**
+ * FL-3.19 — inbound delivery/read receipts, upserted from channel status
+ * events (Meta statuses read/delivered) and widget read markers. One row per
+ * (message, account, state); the occurred_at of the FIRST such report wins.
+ */
+export const messageReceipts = pgTable(
+  'message_receipts',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    messageId: uuid('message_id').notNull(),
+    channelAccountId: uuid('channel_account_id')
+      .notNull()
+      .references(() => channelAccounts.id, { onDelete: 'cascade' }),
+    platform: varchar('platform', { length: 32 }).notNull(),
+    /** delivered | read */
+    state: varchar('state', { length: 16 }).notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_message_receipts_message_account_state').on(t.messageId, t.channelAccountId, t.state),
+    index('ix_message_receipts_org_conversation').on(t.organizationId, t.conversationId),
+  ],
+);
+
+export type MessageReceipt = typeof messageReceipts.$inferSelect;

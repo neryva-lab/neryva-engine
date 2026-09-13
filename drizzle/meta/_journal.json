@@ -246,6 +246,90 @@
       "when": 1761246300005,
       "tag": "0035_artifact_message_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1761246300006,
+      "tag": "0036_assistant_budget_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1761246300007,
+      "tag": "0037_escalations",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1761246300008,
+      "tag": "0038_hybrid_retrieval",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1761246300009,
+      "tag": "0039_connectors",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1761246300010,
+      "tag": "0040_parity_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1761246300011,
+      "tag": "0041_memory_temporal",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1761246300012,
+      "tag": "0042_fl3_frontier",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1761246300013,
+      "tag": "0043_platform_staff",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1761246300014,
+      "tag": "0044_org_owner_invariant",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1761246300015,
+      "tag": "0045_org_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1761246300016,
+      "tag": "0046_credentials_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1761246300017,
+      "tag": "0047_credentials_contract",
+      "breakpoints": true
     }
   ]
 }

@@ -94,7 +94,11 @@ export class MfaService {
         .insert(accountCredentials)
         .values({ accountId, kind: 'totp', envelope: pending.envelope, verifiedAt: now })
         .onConflictDoUpdate({
+          // AUTH-3.1: the (account, kind) unique index is now PARTIAL
+          // (WHERE kind <> 'webauthn') — the conflict target must carry the
+          // implying predicate or inference fails.
           target: [accountCredentials.accountId, accountCredentials.kind],
+          targetWhere: eq(accountCredentials.kind, 'totp'),
           set: { envelope: pending.envelope, verifiedAt: now, revokedAt: null, updatedAt: now },
         });
       await tx.update(accounts).set({ mfaLevel: 'totp', updatedAt: now }).where(eq(accounts.id, accountId));

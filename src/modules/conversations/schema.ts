@@ -24,6 +24,8 @@ export const conversations = pgTable(
     title: varchar('title', { length: 256 }),
     /** Optimistic concurrency — expose as ETag / expected_conversation_version. */
     version: integer('version').notNull().default(1),
+    /** FL-3.3 — the message after which the active branch forked (edit-and-resend). */
+    branchedFromMessageId: uuid('branched_from_message_id'),
     retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -67,6 +69,17 @@ export const messages = pgTable(
     content: jsonb('content').notNull(),
     artifactRefs: jsonb('artifact_refs'),
     classification: varchar('classification', { length: 32 }).notNull().default('confidential'),
+    /**
+     * FL-3.3 — set-once branch pointers. Messages are immutable: a regenerate
+     * or edit-and-resend APPENDS a replacement and marks the original with
+     * `superseded_by` (never edits content). `branched_from` links the
+     * replacement back to the original user message.
+     */
+    supersededBy: uuid('superseded_by'),
+    branchedFrom: uuid('branched_from'),
+    /** FL-3.4 — pin state (console/user affordance; never hides the message). */
+    pinnedAt: timestamp('pinned_at', { withTimezone: true, mode: 'string' }),
+    pinnedBy: varchar('pinned_by', { length: 128 }),
     createdBy: varchar('created_by', { length: 128 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
@@ -108,6 +121,8 @@ export const runs = pgTable(
     terminalReason: varchar('terminal_reason', { length: 64 }),
     /** Set by the atomic CommitRunResult path — the idempotent replay anchor. */
     resultMessageId: uuid('result_message_id'),
+    /** FL-3.3 — the superseded assistant message this regeneration replaces. */
+    regeneratedMessageId: uuid('regenerated_message_id'),
     lastEventSequence: integer('last_event_sequence').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -217,6 +232,35 @@ export const messageFeedback = pgTable(
 
 export type ConversationSummary = typeof conversationSummaries.$inferSelect;
 export type MessageFeedback = typeof messageFeedback.$inferSelect;
+
+/**
+ * FL-3.4 — public share links. The raw token is returned ONCE at creation;
+ * only its sha256 is stored. Read paths serve a REDACTED projection (text +
+ * citations + follow-ups; no channel bindings, no participant rows) and
+ * never include superseded messages.
+ */
+export const conversationShares = pgTable(
+  'conversation_shares',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    createdBy: varchar('created_by', { length: 128 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+    retentionClass: varchar('retention_class', { length: 32 }).notNull().default('interaction-history'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_conversation_shares_token').on(t.tokenHash),
+    index('ix_conversation_shares_org_conv').on(t.organizationId, t.conversationId),
+  ],
+);
+
+export type ConversationShare = typeof conversationShares.$inferSelect;
 
 export const MESSAGE_ROLES = ['user', 'assistant', 'tool', 'system'] as const;
 export const CONVERSATION_STATUSES = ['active', 'archived', 'deleted'] as const;

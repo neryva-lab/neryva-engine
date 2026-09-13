@@ -83,7 +83,7 @@ export class PasswordService {
       throw ApiError.unauthenticated('Invalid or expired reset link');
     }
     const hash = await this.credentials.hashPassword(newPassword);
-    await this.accountsService.updatePasswordHash(consumed.accountId, hash);
+    await this.credentials.setPasswordHash(consumed.accountId, hash);
     await this.accountsService.revokeAllSessions(consumed.accountId); // kill every stolen session
     await this.recordRevocation(consumed.accountId);
     await this.audit.add({
@@ -108,10 +108,11 @@ export class PasswordService {
     if (!account) {
       throw ApiError.notFound('account');
     }
-    if (!account.passwordHash) {
+    const storedHash = await this.credentials.getPasswordHash(accountId);
+    if (!storedHash) {
       throw ApiError.conflict('no password set — use the set-password endpoint');
     }
-    if (!(await this.credentials.verifyPassword(account.passwordHash, currentPassword))) {
+    if (!(await this.credentials.verifyPassword(storedHash, currentPassword))) {
       await this.audit.add({
         action: 'password.change_failed',
         resourceType: 'account',
@@ -123,7 +124,7 @@ export class PasswordService {
       throw ApiError.unauthenticated('Current password is incorrect');
     }
     const hash = await this.credentials.hashPassword(newPassword);
-    await this.accountsService.updatePasswordHash(accountId, hash);
+    await this.credentials.setPasswordHash(accountId, hash);
     await this.accountsService.revokeAllSessions(accountId);
     await this.recordRevocation(accountId);
     await this.audit.add({
@@ -143,7 +144,7 @@ export class PasswordService {
     if (!account) {
       throw ApiError.notFound('account');
     }
-    if (account.passwordHash) {
+    if (await this.credentials.getPasswordHash(accountId)) {
       throw ApiError.conflict('password already set — use the change-password endpoint');
     }
     // The one-way binding rule (doc-06 Δ1, benchmark pattern #5): an
@@ -156,7 +157,7 @@ export class PasswordService {
       throw ApiError.forbidden('verify your email before setting a password');
     }
     const hash = await this.credentials.hashPassword(newPassword);
-    await this.accountsService.updatePasswordHash(accountId, hash);
+    await this.credentials.setPasswordHash(accountId, hash);
     await this.audit.add({
       action: 'password.set',
       resourceType: 'account',

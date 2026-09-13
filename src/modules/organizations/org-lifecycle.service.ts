@@ -39,9 +39,10 @@ import { orgDeletions, orgInvites, orgMemberships, orgServiceAccounts, productEn
  *    links would BREAK the chain — the legally correct posture for a
  *    tamper-evident log).
  *
- * TRANSFER (owner + step-up): promote target → owner, demote actor →
- * admin, atomically via the memberships service's exactly-one-owner
- * invariants; both parties notified + audited.
+ * TRANSFER (owner + step-up): one transaction, demote-then-promote (AUTH-1.6)
+ * — the partial unique index uq_one_active_owner_per_org (drizzle/0044) is the
+ * database backstop for the exactly-one-owner invariant; both parties
+ * notified + audited.
  */
 @Injectable()
 export class OrgLifecycleService {
@@ -291,23 +292,52 @@ export class OrgLifecycleService {
     if (input.targetAccountId === input.actorId) {
       throw ApiError.validation({ target_account_id: 'cannot transfer to yourself' });
     }
-    // Both invariants live in MembershipsService.changeRole: promoting the
-    // target requires exactly one current owner; demoting the actor
-    // requires another owner to remain — the promote-then-demote order
-    // satisfies both atomically enough (any failure leaves a valid state:
-    // two owners momentarily, which the invariants tolerate on the next
-    // change; a partial failure is audited below).
-    await this.memberships.changeRole({ orgId: input.orgId, accountId: input.targetAccountId, role: 'owner', actorId: input.actorId, actorEmail: input.actorEmail });
-    try {
-      await this.memberships.changeRole({ orgId: input.orgId, accountId: input.actorId, role: 'admin', actorId: input.actorId, actorEmail: input.actorEmail });
-    } catch (err) {
-      // Promote succeeded, demote failed → two active owners. Roll the
-      // promotion back so the org never sits in an unintended state.
-      await this.memberships
-        .changeRole({ orgId: input.orgId, accountId: input.targetAccountId, role: 'admin', actorId: input.actorId })
-        .catch(() => undefined);
-      throw ApiError.conflict(`transfer failed at demotion step: ${(err as Error).message}`);
-    }
+    // AUTH-1.6 (auth_plan.md D2): ONE transaction, demote-then-promote — the
+    // only ordering that never momentarily holds two active owners, so the
+    // partial unique index uq_one_active_owner_per_org (drizzle/0044) holds at
+    // every statement boundary. A crash rolls the whole TX back; a concurrent
+    // transfer loses at its promote statement with 23505. Direct UPDATEs, not
+    // changeRole — its owner-preservation check would trip mid-transfer by
+    // design. The post-condition re-check is defense-in-depth.
+    const now = new Date().toISOString();
+    await this.db.withOrg(input.orgId, async (tx) => {
+      const demoted = await tx
+        .update(orgMemberships)
+        .set({ role: 'admin', updatedAt: now })
+        .where(
+          and(
+            eq(orgMemberships.orgId, input.orgId),
+            eq(orgMemberships.accountId, input.actorId),
+            eq(orgMemberships.role, 'owner'),
+            eq(orgMemberships.status, 'active'),
+          ),
+        )
+        .returning({ id: orgMemberships.id });
+      if (demoted.length === 0) {
+        throw ApiError.forbidden('only the current owner may transfer ownership');
+      }
+      const promoted = await tx
+        .update(orgMemberships)
+        .set({ role: 'owner', updatedAt: now })
+        .where(
+          and(
+            eq(orgMemberships.orgId, input.orgId),
+            eq(orgMemberships.accountId, input.targetAccountId),
+            eq(orgMemberships.status, 'active'),
+          ),
+        )
+        .returning({ id: orgMemberships.id });
+      if (promoted.length === 0) {
+        throw ApiError.notFound('target member (must be an active member of the org)');
+      }
+      const owners = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(orgMemberships)
+        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.role, 'owner'), eq(orgMemberships.status, 'active')));
+      if (Number(owners[0]?.n ?? 0) !== 1) {
+        throw ApiError.conflict('ownership transfer must leave exactly one active owner');
+      }
+    });
 
     await this.audit.add({
       action: 'org.ownership_transferred',

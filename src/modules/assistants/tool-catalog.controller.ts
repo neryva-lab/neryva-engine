@@ -1,10 +1,10 @@
-import { Body, Controller, Get, Param, Patch, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { Idempotent } from '../../common/http/idempotency';
 import { ApiError } from '../../common/http/api-error';
-import { ToolCatalogService, UpsertToolInput } from './tool-catalog.service';
+import { ToolCatalogService, TOOL_TEMPLATES, UpsertToolInput } from './tool-catalog.service';
 import { TOOL_APPROVAL_REQUIREMENTS, TOOL_EFFECT_CLASSES } from './tool-catalog.schema';
 
 interface UpsertToolDto {
@@ -83,6 +83,50 @@ export class ToolCatalogController {
   async list(@Param('orgId') orgId: string) {
     const tools = await this.catalog.list(orgId);
     return { tools };
+  }
+
+  // ── FL-3.11 — pre-built tool template directory ──────────────────────────
+
+  @Get('templates')
+  @Roles('owner', 'admin', 'developer', 'reader')
+  @UseGuards(OrgRolesGuard)
+  async listTemplates() {
+    return { templates: TOOL_TEMPLATES };
+  }
+
+  /** Instantiate a template into a real catalog row (endpoint + credential per org). */
+  @Post('from-template')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async fromTemplate(
+    @Param('orgId') orgId: string,
+    @Body() dto: { template_id?: unknown; url?: unknown; credential?: unknown; rate_limit_per_run?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    if (typeof dto.template_id !== 'string') {
+      throw ApiError.validation({ template_id: 'is required' });
+    }
+    const template = TOOL_TEMPLATES.find((t) => t.id === dto.template_id);
+    if (!template) {
+      throw ApiError.notFound('tool template');
+    }
+    if (typeof dto.url !== 'string' || !/^https:\/\//.test(dto.url)) {
+      throw ApiError.validation({ url: 'must be an https URL' });
+    }
+    const row = await this.catalog.upsert({
+      orgId,
+      name: template.name,
+      description: template.description,
+      inputSchema: template.inputSchema,
+      effectClass: template.effectClass,
+      approvalRequirement: template.approvalRequirement,
+      httpBinding: { url: dto.url },
+      credential: typeof dto.credential === 'string' && dto.credential.length > 0 ? dto.credential : undefined,
+      rateLimitPerRun: typeof dto.rate_limit_per_run === 'number' && Number.isFinite(dto.rate_limit_per_run) ? Math.floor(dto.rate_limit_per_run) : undefined,
+      actor: principal.id,
+    });
+    return { tool: row };
   }
 
   @Get(':name')

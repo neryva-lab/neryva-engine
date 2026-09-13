@@ -26,6 +26,8 @@ export const CAPABILITY_OPS = [
   'checkpoint',
   'commit',
   'observe',
+  'escalation',
+  'artifact',
 ] as const;
 
 export type CapabilityOp = (typeof CAPABILITY_OPS)[number];

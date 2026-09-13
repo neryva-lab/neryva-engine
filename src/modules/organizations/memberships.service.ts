@@ -40,6 +40,21 @@ export interface ListMembersOptions {
 const LAST_ACTIVE_WRITE_THRESHOLD_MS = 5 * 60 * 1000;
 
 /**
+ * AUTH-1.5: the partial unique index uq_one_active_owner_per_org
+ * (drizzle/0044) is the concurrency backstop for the exactly-one-owner
+ * invariant — any statement that would leave a second active owner fails at
+ * the database. Translate that specific violation into the stable API error
+ * instead of leaking a raw 23505; every other error propagates unchanged.
+ */
+function translateOwnerInvariant(err: unknown): unknown {
+  const pg = err as { code?: string; constraint?: string };
+  if (pg?.code === '23505' && pg?.constraint === 'uq_one_active_owner_per_org') {
+    return ApiError.conflict('the organization already has an active owner — transfer ownership instead', { reason: 'owner_already_present' });
+  }
+  return err;
+}
+
+/**
  * Membership lifecycle (O-2/O-3): the converged role set (Δ4), role changes
  * audited, owner invariants enforced (an org always keeps exactly one
  * active owner; transfers are step-up-gated at the controller layer).
@@ -228,17 +243,54 @@ export class MembershipsService {
 
   async addMember(input: { orgId: string; accountId: string; role: OrgRole; invitedBy: string }): Promise<typeof orgMemberships.$inferSelect> {
     assertRole(input.role);
-    await this.assertCapacity(input.orgId);
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
+    const now = new Date().toISOString();
+    const inserted = await this.db.withOrg(input.orgId, async (tx) => {
+      // AUTH-4.1 (auth_plan.md D5): the seat wall lives at the moment
+      // membership is granted, inside the granting transaction. Locking the
+      // seat-bearing entitlement rows FOR UPDATE serializes redemptions per
+      // org — two concurrent invites cannot both read "under the limit" and
+      // both insert; the second parks on the lock and re-counts after the
+      // first commits. Orgs without a seat-bearing entitlement are exactly
+      // the orgs with no cap, so the lock is moot there. Service accounts
+      // never pass through here (they are not seats); owners are never
+      // granted via this path (INVITABLE_ROLES).
+      if (env.ENTITLEMENTS__SEAT_ENFORCEMENT) {
+        const seatRows = await tx
+          .select({ product: productEntitlements.product, seats: productEntitlements.seats, status: productEntitlements.status })
+          .from(productEntitlements)
+          .where(and(eq(productEntitlements.orgId, input.orgId), sql`${productEntitlements.seats} IS NOT NULL`))
+          .for('update');
+        const capped = seatRows.filter((row) => row.status === 'trial' || row.status === 'active' || row.status === 'past_due');
+        if (capped.length > 0) {
+          const current = await tx
+            .select({ status: orgMemberships.status })
+            .from(orgMemberships)
+            .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, input.accountId)))
+            .limit(1);
+          const consumesSeat = current[0]?.status !== 'active'; // re-activating an existing member consumes no additional seat
+          if (consumesSeat) {
+            const actives = await tx
+              .select({ n: sql<number>`count(*)::int` })
+              .from(orgMemberships)
+              .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.status, 'active')));
+            const activeCount = Number(actives[0]?.n ?? 0);
+            const limiting = capped.find((row) => activeCount >= (row.seats ?? 0));
+            if (limiting) {
+              throw ApiError.seatLimitReached(limiting.product);
+            }
+          }
+        }
+      }
+      await this.assertCapacityTx(tx, input.orgId);
+      return tx
         .insert(orgMemberships)
         .values({ orgId: input.orgId, accountId: input.accountId, role: input.role, invitedBy: input.invitedBy })
         .onConflictDoUpdate({
           target: [orgMemberships.accountId, orgMemberships.orgId],
-          set: { role: input.role, status: 'active', updatedAt: new Date().toISOString() },
+          set: { role: input.role, status: 'active', updatedAt: now },
         })
-        .returning(),
-    );
+        .returning();
+    });
     await this.audit.add({
       action: 'org.member_added',
       resourceType: 'org_membership',
@@ -253,10 +305,11 @@ export class MembershipsService {
   }
 
   /** Hard cap on org size (abuse posture, not billing — seats are billing's). */
-  private async assertCapacity(orgId: string): Promise<void> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select({ n: count() }).from(orgMemberships).where(and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.status, 'active'))),
-    );
+  private async assertCapacityTx(tx: Parameters<Parameters<DbService['withOrg']>[1]>[0], orgId: string): Promise<void> {
+    const rows = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(orgMemberships)
+      .where(and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.status, 'active')));
     if (Number(rows[0]?.n ?? 0) >= env.ORG_MAX_MEMBERS) {
       throw ApiError.conflict(`organization is at its member cap (${env.ORG_MAX_MEMBERS})`);
     }
@@ -284,12 +337,16 @@ export class MembershipsService {
         throw ApiError.conflict('org must have exactly one owner before a transfer');
       }
     }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgMemberships)
-        .set({ role: input.role, updatedAt: new Date().toISOString() })
-        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, input.accountId))),
-    );
+    try {
+      await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .update(orgMemberships)
+          .set({ role: input.role, updatedAt: new Date().toISOString() })
+          .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, input.accountId))),
+      );
+    } catch (err) {
+      throw translateOwnerInvariant(err);
+    }
     await this.audit.add({
       action: 'org.member_role_changed',
       resourceType: 'org_membership',
@@ -352,12 +409,19 @@ export class MembershipsService {
     if (current.status !== 'suspended') {
       throw ApiError.conflict('member is not suspended');
     }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgMemberships)
-        .set({ status: 'active', updatedAt: new Date().toISOString() })
-        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, input.accountId))),
-    );
+    try {
+      await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .update(orgMemberships)
+          .set({ status: 'active', updatedAt: new Date().toISOString() })
+          .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, input.accountId))),
+      );
+    } catch (err) {
+      // Defense-in-depth: suspended owners are impossible today (suspendMember
+      // refuses owners), so reactivation cannot create a second owner — but if
+      // that ever changes, the index (0044) catches it here.
+      throw translateOwnerInvariant(err);
+    }
     await this.audit.add({
       action: 'org.member_reactivated',
       resourceType: 'org_membership',

@@ -100,5 +100,5 @@ export type PublishedConfig = typeof publishedConfigs.$inferSelect;
 export type ConfigDraft = typeof configDrafts.$inferSelect;
 
 /** The closed scope vocabulary — adding one is a reviewable act. */
-export const CONFIG_SCOPES = ['policy_set', 'guardrail_profile', 'quota_profile', 'model_catalog'] as const;
+export const CONFIG_SCOPES = ['policy_set', 'guardrail_profile', 'quota_profile', 'model_catalog', 'knowledge_config'] as const;
 export type ConfigScope = (typeof CONFIG_SCOPES)[number];

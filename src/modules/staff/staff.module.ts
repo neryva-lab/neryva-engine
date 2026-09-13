@@ -7,6 +7,7 @@ import { OrganizationsModule } from '../organizations/organizations.module';
 import { SatellitesModule } from '../satellites/satellites.module';
 import { StaffController } from './staff.controller';
 import { StaffImpersonationService } from './staff-impersonation.service';
+import { PlatformStaffAdminService } from './platform-staff.admin';
 
 /** Expired-impersonation session sweep on boot (crash-safe catch-up). */
 @Injectable()
@@ -33,7 +34,7 @@ export class StaffBoot implements OnModuleInit {
 @Module({
   imports: [IdentityModule, OrganizationsModule, SatellitesModule, BillingModule],
   controllers: [StaffController],
-  providers: [StaffImpersonationService, StaffBoot],
+  providers: [StaffImpersonationService, PlatformStaffAdminService, StaffBoot],
   exports: [StaffImpersonationService],
 })
 export class StaffModule {

@@ -102,6 +102,8 @@ export const productEntitlements = pgTable('product_entitlements', {
 /** Engine-owned org profile/settings (one row per org, created lazily). */
 export const orgSettings = pgTable('org_settings', {
   orgId: varchar('org_id', { length: 36 }).primaryKey(),
+  /** AUTH-2.1: personal (ADR-001 signup autocreation) | team (explicit creation). */
+  kind: varchar('kind', { length: 16 }).notNull().default('personal'), // personal | team
   supportEmail: varchar('support_email', { length: 320 }),
   defaultProjectId: uuid('default_project_id'),
   /** { logo_dataurl?, brand_color? } — caps enforced at the service layer. */

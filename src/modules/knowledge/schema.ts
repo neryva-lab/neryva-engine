@@ -101,6 +101,8 @@ export const documents = pgTable(
     title: varchar('title', { length: 256 }),
     /** processing | ready | failed */
     state: varchar('state', { length: 32 }).notNull().default('processing'),
+    /** FL-2.2: embedding model the document's active vectors were computed with. */
+    embeddingModel: varchar('embedding_model', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
@@ -185,6 +187,12 @@ export const memoryItems = pgTable(
     visibility: varchar('visibility', { length: 32 }).notNull().default('organization'),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
     deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }),
+    /** FL-2.4: approval-time embedding - semantic memory search (HNSW cosine). */
+    embedding: vector('embedding'),
+    /** FL-3.9: temporal validity - supersedes marks the replaced prior item. */
+    validFrom: timestamp('valid_from', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    invalidAt: timestamp('invalid_at', { withTimezone: true, mode: 'string' }),
+    supersedes: uuid('supersedes'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },

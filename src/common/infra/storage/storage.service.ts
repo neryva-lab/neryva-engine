@@ -134,6 +134,49 @@ export class StorageService {
   }
 
   /**
+   * FL-2.5 — SERVER-side object store for connectors: presign a PUT
+   * (UNSIGNED-PAYLOAD query signing, same primitive as downloads) and
+   * execute it in-process. Bounded to the connector's per-document cap by
+   * the caller; the engine still never accepts raw bytes from end users.
+   */
+  async putObject(input: { key: string; contentType: string; body: Buffer }): Promise<{ key: string; byteLength: number }> {
+    this.requireAvailable();
+    const expiresIn = 120;
+    const { amzDate, scope, signingKey } = this.signingMaterial();
+    const url = new URL(this.objectUrl(input.key));
+    const query = new Map<string, string>([
+      ['X-Amz-Algorithm', 'AWS4-HMAC-SHA256'],
+      ['X-Amz-Credential', `${env.S3_ACCESS_KEY_ID}/${scope}`],
+      ['X-Amz-Date', amzDate],
+      ['X-Amz-Expires', String(expiresIn)],
+      ['X-Amz-SignedHeaders', 'host'],
+    ]);
+    const canonicalQuery = [...query.entries()]
+      .map(([k, v]) => `${uriEncode(k)}=${uriEncode(v)}`)
+      .sort()
+      .join('&');
+    const canonicalRequest = ['PUT', url.pathname, canonicalQuery, `host:${url.host}
+`, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+    const stringToSign = [
+      'AWS4-HMAC-SHA256',
+      amzDate,
+      scope,
+      createHash('sha256').update(canonicalRequest).digest('hex'),
+    ].join('\n');
+    const signature = createHmac('sha256', signingKey).update(stringToSign, 'utf8').digest('hex');
+    const signedUrl = `${url.origin}${url.pathname}?${canonicalQuery}&${uriEncode('X-Amz-Signature')}=${signature}`;
+    const res = await fetch(signedUrl, {
+      method: 'PUT',
+      headers: { 'content-type': input.contentType },
+      body: new Uint8Array(input.body),
+    });
+    if (!res.ok) {
+      throw new Error(`object put failed with status ${res.status}`);
+    }
+    return { key: input.key, byteLength: input.body.byteLength };
+  }
+
+  /**
    * Stable public URL for objects under a public-read prefix (CDN). Used
    * for genuinely public assets — blog cover images embedded in feeds,
    * where per-request signing is impossible.

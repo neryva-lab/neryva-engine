@@ -245,6 +245,18 @@ export class InvitesService {
       throw ApiError.forbidden('This invitation was sent to a different email address');
     }
 
+    // Membership FIRST, claim second (AUTH-4.1): addMember may legitimately
+    // refuse (seat_limit_reached / member cap) — the invite must stay usable
+    // so the org can buy seats and retry, not burn. addMember is an upsert on
+    // (account, org), so a concurrent double-redeem is idempotent; the
+    // single-use claim below still guarantees exactly one acceptance path.
+    await this.memberships.addMember({
+      orgId: invite.orgId,
+      accountId: input.accountId,
+      role: invite.role as never,
+      invitedBy: invite.invitedBy,
+    });
+
     // Single-use guard: the claim only lands on a still-unclaimed row.
     const claimed = await this.db.root
       .update(orgInvites)
@@ -255,12 +267,6 @@ export class InvitesService {
       throw ApiError.conflict('Invitation is no longer usable');
     }
 
-    await this.memberships.addMember({
-      orgId: invite.orgId,
-      accountId: input.accountId,
-      role: invite.role as never,
-      invitedBy: invite.invitedBy,
-    });
     await this.audit.add({
       action: 'org.invite_accepted',
       resourceType: 'org_invite',

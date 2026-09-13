@@ -7,6 +7,8 @@ import { QueueService } from './infra/queue.service';
 import { StorageService } from './infra/storage/storage.service';
 import { JwksService } from './auth/jwks.service';
 import { AuthGuard } from './auth/auth.guard';
+import { PlatformStaffDirectoryService } from './auth/platform-staff.directory';
+import { PLATFORM_STAFF_DIRECTORY_PORT } from './auth/ports';
 import { AuditService } from './audit/audit.service';
 import { AllExceptionsFilter } from './http/all-exceptions.filter';
 import { RequestIdMiddleware } from './http/request-id.middleware';
@@ -41,6 +43,12 @@ import { MetricsController } from './observability/metrics.controller';
     AuditService,
     EventBus,
     HealthRegistry,
+    // AUTH-1.2 (auth_plan.md D1, justified in ADR-014): the staff directory is
+    // kernel-level because PlatformStaffGuard is hosted by several modules
+    // (staff, satellites, billing) and every context must resolve the same
+    // authority. Grant/revoke/bootstrap stay in the staff module.
+    PlatformStaffDirectoryService,
+    { provide: PLATFORM_STAFF_DIRECTORY_PORT, useExisting: PlatformStaffDirectoryService },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
     { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
   ],

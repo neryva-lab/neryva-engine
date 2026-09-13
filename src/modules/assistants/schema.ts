@@ -64,6 +64,8 @@ export const assistantVersions = pgTable(
     instructions: text('instructions'),
     /** Schema v2: provider-neutral generation params (temperature, max_output_tokens, top_p, reasoning_effort). */
     modelParams: jsonb('model_params'),
+    /** FL-1.2: pinned RunBudgets authority (tokens/cost/wall-clock/tool+model caps). */
+    budgetPolicy: jsonb('budget_policy'),
     /** When set, this version restores payload from that version's id. */
     rollbackOf: uuid('rollback_of'),
     /** Stable digest of the canonical JSON (sorted keys) for duplicate detection + export parity. */
@@ -111,6 +113,8 @@ export const policySnapshots = pgTable(
     /** Schema v2: mirrors assistant_versions.instructions — snapshot is the run-time pin. */
     instructions: text('instructions'),
     modelParams: jsonb('model_params'),
+    /** FL-1.2: mirrors assistant_versions.budget_policy — snapshot is the run-time pin. */
+    budgetPolicy: jsonb('budget_policy'),
     /** Canonical hash of the policy set — equals the source version's `hash`. */
     hash: varchar('hash', { length: 64 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -122,6 +126,40 @@ export const policySnapshots = pgTable(
 );
 
 export type PolicySnapshot = typeof policySnapshots.$inferSelect;
+
+/**
+ * FL-3.12 — A/B / canary traffic split beside the atomic publish pointer.
+ * One ACTIVE rollout per assistant (`uq_rollouts_active_per_assistant`);
+ * `versions` is an ordered list of {version_id, weight} with weights summing
+ * to 100. Assignment is sticky per conversation (consistent hash of the
+ * conversation id in the service layer) — a conversation never flips variants
+ * mid-flight, and every run still PINS its version + snapshot at acceptance.
+ */
+export const assistantRollouts = pgTable(
+  'assistant_rollouts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id').notNull(),
+    assistantId: uuid('assistant_id')
+      .notNull()
+      .references(() => assistants.id, { onDelete: 'cascade' }),
+    /** active | paused */
+    state: varchar('state', { length: 16 }).notNull().default('active'),
+    versions: jsonb('versions').notNull(),
+    createdBy: varchar('created_by', { length: 128 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('ix_rollouts_org_assistant').on(t.organizationId, t.assistantId),
+  ],
+);
+
+export type AssistantRollout = typeof assistantRollouts.$inferSelect;
+export interface RolloutVariant {
+  version_id: string;
+  weight: number;
+}
 
 export const ASSISTANT_STATUSES = ['DRAFT', 'VALIDATING', 'VALID', 'PUBLISHED', 'RETIRED', 'ROLLED_BACK'] as const;
 export type AssistantStatus = (typeof ASSISTANT_STATUSES)[number];
@@ -138,6 +176,7 @@ export interface AssistantVersionExport {
   schema_version: number;
   instructions?: string | null;
   model_params?: unknown;
+  budget_policy?: unknown;
   model_policy: unknown;
   context_policy: unknown;
   tool_policy: unknown;

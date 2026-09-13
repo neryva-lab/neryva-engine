@@ -82,9 +82,8 @@ export class AccountsService {
     await this.db.root.update(accounts).set({ emailVerifiedAt: new Date().toISOString() }).where(eq(accounts.id, accountId));
   }
 
-  async updatePasswordHash(accountId: string, passwordHash: string): Promise<void> {
-    await this.db.root.update(accounts).set({ passwordHash, updatedAt: new Date().toISOString() }).where(eq(accounts.id, accountId));
-  }
+  // AUTH-3.2: updatePasswordHash was removed — password material lives only
+  // in account_credentials (kind='password') via CredentialsService.setPasswordHash.
 
   async updateDisplayName(accountId: string, displayName: string): Promise<void> {
     await this.db.root.update(accounts).set({ displayName, updatedAt: new Date().toISOString() }).where(eq(accounts.id, accountId));

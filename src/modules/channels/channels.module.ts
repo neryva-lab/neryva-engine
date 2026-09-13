@@ -6,7 +6,10 @@ import { WidgetController } from './widget.controller';
 import { WidgetService } from './widget.service';
 import { ChannelIngestConsumer, ChannelIngestService } from './ingest.service';
 import { ChannelOutboundService } from './outbound.service';
-import { WhatsAppSender, MessengerSender, TelegramSender, WebSender } from './senders';
+import { WhatsAppSender, MessengerSender, TelegramSender, WebSender, InstagramSender, XSender, EmailSender } from './senders';
+import { VoiceService } from './voice.service';
+import { ChannelTemplatesService } from './templates.service';
+import { ChannelTemplatesController } from './templates.controller';
 import { ConversationsModule } from '../conversations/conversations.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 
@@ -18,7 +21,7 @@ import { OrganizationsModule } from '../organizations/organizations.module';
  */
 @Module({
   imports: [ConversationsModule, OrganizationsModule],
-  controllers: [ChannelsController, ChannelsWebhookController, WidgetController],
+  controllers: [ChannelsController, ChannelsWebhookController, WidgetController, ChannelTemplatesController],
   providers: [
     ChannelsService,
     ChannelIngestService,
@@ -28,6 +31,11 @@ import { OrganizationsModule } from '../organizations/organizations.module';
     MessengerSender,
     TelegramSender,
     WebSender,
+    InstagramSender,
+    XSender,
+    EmailSender,
+    VoiceService,
+    ChannelTemplatesService,
     WidgetService,
   ],
   exports: [ChannelsService, ChannelIngestConsumer, ChannelOutboundService],

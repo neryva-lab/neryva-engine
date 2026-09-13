@@ -1,4 +1,4 @@
-import { boolean, index, jsonb, pgTable, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 
 /**
  * Tool catalog — org-scoped, versioned tool definitions (ai_harness_plan.md
@@ -23,6 +23,12 @@ export const toolCatalog = pgTable(
     approvalRequirement: varchar('approval_requirement', { length: 16 }).notNull().default('NONE'),
     /** Advisory MCP-aligned hints: {read_only, destructive, idempotent, open_world}. */
     annotations: jsonb('annotations').notNull().default({}),
+    /** FL-2.10: customer HTTP endpoint binding {url, method, timeout_ms, header_name}. */
+    httpBinding: jsonb('http_binding'),
+    /** FL-2.10: envelope-sealed (enc:v1:) per-tool credential — never in the manifest. */
+    credentialSealed: text('credential_sealed'),
+    /** FL-2.10: max executions per run (default platform cap when null). */
+    rateLimitPerRun: integer('rate_limit_per_run'),
     /** Canonical sha256 of the tool definition — the publish pin target. */
     hash: varchar('hash', { length: 64 }).notNull(),
     enabled: boolean('enabled').notNull().default(true),

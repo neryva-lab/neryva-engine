@@ -7,6 +7,35 @@ export const modelParamsSchema = z
     max_output_tokens: z.number().int().min(1).max(200_000).optional(),
     top_p: z.number().gt(0).max(1).optional(),
     reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
+    /** FL-2.14: JSON Schema (2020-12) for structured output - bounded text. */
+    output_schema: z
+      .string()
+      .max(16_384)
+      .refine((v) => {
+        try {
+          const parsed = JSON.parse(v) as unknown;
+          return typeof parsed === 'object' && parsed !== null;
+        } catch {
+          return false;
+        }
+      }, 'must be a JSON object schema')
+      .optional(),
+  })
+  .strict();
+
+/**
+ * FL-1.2: the Engine-authoritative RunBudgets set. Absent dimensions fall
+ * back to the manifest defaults; Studio enforces what the manifest serves.
+ * Caps keep a single tenant from pinning the fleet (2M tokens, 24h wall
+ * clock, 1k tool calls per run).
+ */
+export const budgetPolicySchema = z
+  .object({
+    max_total_tokens: z.number().int().min(1000).max(2_000_000).optional(),
+    max_cost_micros: z.number().int().min(0).max(1_000_000_000_000).optional(),
+    wall_clock_seconds: z.number().int().min(0).max(86_400).optional(),
+    max_tool_calls: z.number().int().min(0).max(1000).optional(),
+    max_model_calls: z.number().int().min(1).max(200).optional(),
   })
   .strict();
 
@@ -16,6 +45,7 @@ export const assistantPayloadSchema = z.object({
   // (a published assistant without instructions cannot execute).
   instructions: z.string().min(1).max(32_768).optional(),
   model_params: modelParamsSchema.optional(),
+  budget_policy: budgetPolicySchema.optional(),
   model_policy: z.object({
     allowed_models: z.array(z.string().min(1)).min(1).max(20),
     fallback_enabled: z.boolean().optional().default(false),
@@ -24,7 +54,7 @@ export const assistantPayloadSchema = z.object({
     history_limit: z.number().int().min(1).max(100).default(30),
     summary_enabled: z.boolean().optional().default(true),
     knowledge_sources: z.array(z.string()).optional().default([]),
-    memory_scope: z.enum(['user', 'organization', 'conversation']).optional().default('user'),
+    memory_scope: z.enum(['user', 'organization', 'conversation', 'none']).optional().default('user'),
   }),
   tool_policy: z.object({
     tools: z

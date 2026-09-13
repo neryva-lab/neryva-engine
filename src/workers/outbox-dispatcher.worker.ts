@@ -2,7 +2,12 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@ne
 import { OutboxDispatcher } from '../common/infra/outbox/dispatcher';
 import { DbService } from '../common/infra/db/db.service';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
+import { RunCancelConsumer } from './run-cancel.consumer';
+import { AnalyticsRollupConsumer } from './analytics-rollup.consumer';
+import { LifecycleWebhookConsumer } from './lifecycle-webhook.consumer';
+import { MemoryProposerConsumer } from './memory-proposer.consumer';
 import { UsageLedgerConsumer } from './usage-ledger.consumer';
+import { LlmJudgeConsumer } from './llm-judge.consumer';
 import { purgeExpiredIdempotencyRecords } from '../common/http/idempotency-records';
 import type { OutboxConsumer } from '../common/infra/outbox/consumer';
 import type { ChannelIngestConsumer } from '../modules/channels/ingest.service';
@@ -29,12 +34,17 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly db: DbService,
     runDispatch: RunDispatchConsumer,
+    runCancel: RunCancelConsumer,
+    analyticsRollup: AnalyticsRollupConsumer,
+    lifecycleWebhook: LifecycleWebhookConsumer,
+    memoryProposer: MemoryProposerConsumer,
     usageLedger: UsageLedgerConsumer,
+    llmJudge: LlmJudgeConsumer,
     // Channel-plane consumers join the dispatcher only when MODULES__CHANNELS_ENABLED.
     @Optional() channelIngest?: ChannelIngestConsumer,
     @Optional() channelOutbound?: ChannelOutboundService,
   ) {
-    const consumers: OutboxConsumer[] = [runDispatch, usageLedger];
+    const consumers: OutboxConsumer[] = [runDispatch, runCancel, analyticsRollup, lifecycleWebhook, memoryProposer, usageLedger, llmJudge];
     if (channelIngest) {
       consumers.push(channelIngest);
     }

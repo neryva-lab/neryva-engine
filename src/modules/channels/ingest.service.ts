@@ -11,8 +11,9 @@ import { sha256Hex } from '../../common/infra/crypto/envelope';
 import type { RedisService } from '../../common/infra/redis.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
-import { channelAccounts, channelEvents, channelIdentities, channelMessageLinks, ChannelAccount } from './schema';
+import { channelAccounts, channelEvents, channelIdentities, channelMessageLinks, messageReceipts, ChannelAccount } from './schema';
 import { normalizeFor, NormalizedEvent, STALE_EVENT_MS } from './normalize';
+import { VoiceService } from './voice.service';
 
 /**
  * Channel ingest — Phase C2. Two halves:
@@ -44,6 +45,7 @@ export class ChannelIngestService {
     private readonly db: DbService,
     private readonly conversations: ConversationsService,
     private readonly purge: RetentionPurgeService,
+    private readonly voice: VoiceService,
     private readonly redis?: RedisService,
   ) {}
 
@@ -117,6 +119,7 @@ export class ChannelIngestConsumer implements OutboxConsumer {
     private readonly db: DbService,
     private readonly conversations: ConversationsService,
     private readonly purge: RetentionPurgeService,
+    private readonly voice: VoiceService,
   ) {}
 
   async handle(event: OutboxEvent): Promise<void> {
@@ -149,11 +152,14 @@ export class ChannelIngestConsumer implements OutboxConsumer {
         case 'message':
           await this.handleMessage(account, normalized, raw);
           break;
+        case 'media':
+          await this.handleMedia(account, normalized, raw);
+          break;
         case 'status':
           await this.handleStatus(account, normalized);
           break;
         case 'unsupported':
-          // Normal, quiet: read receipts and non-message updates.
+          // Normal, quiet: typing echoes and non-message updates.
           break;
       }
       await this.settle(stored.id, 'processed');
@@ -174,7 +180,57 @@ export class ChannelIngestConsumer implements OutboxConsumer {
     }
   }
 
-  private async handleMessage(account: ChannelAccount, event: Extract<NormalizedEvent, { kind: 'message' }>, raw: string): Promise<void> {
+  /**
+   * FL-3.1 — inbound media (voice note / audio): bounded download → ASR port
+   * → the ONE message entry point with a `voice` provenance part. Images and
+   * documents are recorded but not answered (v1). A missing ASR port or a
+   * failed transcription is QUIET — text messaging never degrades with it.
+   */
+  private async handleMedia(account: ChannelAccount, event: Extract<NormalizedEvent, { kind: 'media' }>, raw: string): Promise<void> {
+    if (!event.externalUserId) {
+      return; // nothing addressable — recorded on channel_events, not answered
+    }
+    if (event.mediaFamily !== 'audio') {
+      ChannelIngestConsumer.logger.debug(`channel ${account.id}: ${event.mediaFamily} media recorded without reply (v1)`);
+      return;
+    }
+    const bytes = await this.voice.downloadMedia({
+      account,
+      mediaFamily: event.mediaFamily,
+      mediaId: event.mediaId,
+      ...(event.mediaUrl !== undefined ? { mediaUrl: event.mediaUrl } : {}),
+      ...(event.mimeType !== undefined ? { mimeType: event.mimeType } : {}),
+    });
+    if (!bytes) {
+      return;
+    }
+    const transcript = await this.voice.transcribe(bytes, event.mimeType ?? 'audio/mpeg');
+    if (!transcript) {
+      ChannelIngestConsumer.logger.debug(`channel ${account.id}: voice note recorded without transcript (no ASR port or empty result)`);
+      return;
+    }
+    await this.handleMessage(
+      account,
+      {
+        kind: 'message',
+        externalEventId: event.externalEventId,
+        externalMessageId: event.externalMessageId,
+        externalUserId: event.externalUserId,
+        text: transcript,
+        timestampMs: event.timestampMs,
+        ...(event.profileName !== undefined ? { profileName: event.profileName } : {}),
+      },
+      raw,
+      { transcribed: true },
+    );
+  }
+
+  private async handleMessage(
+    account: ChannelAccount,
+    event: Extract<NormalizedEvent, { kind: 'message' }>,
+    raw: string,
+    voice?: { transcribed: boolean },
+  ): Promise<void> {
     if (!event.externalUserId) {
       throw new PermanentConsumerError('channel message without external user id');
     }
@@ -198,7 +254,7 @@ export class ChannelIngestConsumer implements OutboxConsumer {
 
     await this.db.withBypass(async (tx) => {
       // 1. Identity upsert + 24h messaging window (Meta platforms only).
-      const hasWindow = account.platform === 'whatsapp' || account.platform === 'messenger';
+      const hasWindow = account.platform === 'whatsapp' || account.platform === 'messenger' || account.platform === 'instagram';
       const now = new Date().toISOString();
       const windowExpires = hasWindow ? new Date(Date.now() + 24 * 3600 * 1000).toISOString() : null;
       await tx
@@ -264,7 +320,11 @@ export class ChannelIngestConsumer implements OutboxConsumer {
         orgId: account.organizationId,
         principalId: `channel:${account.id}`,
         conversationId,
-        content: { text: event.text, channel: { platform: account.platform } },
+        content: {
+          text: event.text,
+          channel: { platform: account.platform },
+          ...(voice?.transcribed ? { voice: { transcribed: true } } : {}),
+        },
         idempotencyKey: `channel:${account.id}:${event.externalMessageId || sha256Hex(raw).slice(0, 32)}`,
       });
 
@@ -291,6 +351,12 @@ export class ChannelIngestConsumer implements OutboxConsumer {
       return;
     }
     await this.db.withOrg(account.organizationId, async (tx) => {
+      const links = await tx
+        .select({ messageId: channelMessageLinks.messageId, conversationId: channelMessageLinks.conversationId, direction: channelMessageLinks.direction })
+        .from(channelMessageLinks)
+        .where(and(eq(channelMessageLinks.channelAccountId, account.id), eq(channelMessageLinks.externalMessageId, event.externalMessageId)))
+        .limit(1);
+      const link = links[0];
       await tx
         .update(channelMessageLinks)
         .set({
@@ -299,6 +365,23 @@ export class ChannelIngestConsumer implements OutboxConsumer {
           updatedAt: new Date().toISOString(),
         })
         .where(and(eq(channelMessageLinks.channelAccountId, account.id), eq(channelMessageLinks.externalMessageId, event.externalMessageId)));
+      // FL-3.19 — delivery/read receipts for OUTBOUND messages, upserted per
+      // (message, account, state); the first platform report wins.
+      if (link && link.direction === 'outbound' && (event.status === 'delivered' || event.status === 'read')) {
+        await tx
+          .insert(messageReceipts)
+          .values({
+            id: uuidv7(),
+            organizationId: account.organizationId,
+            conversationId: link.conversationId,
+            messageId: link.messageId,
+            channelAccountId: account.id,
+            platform: account.platform,
+            state: event.status,
+            occurredAt: event.occurredAtMs ? new Date(event.occurredAtMs).toISOString() : new Date().toISOString(),
+          })
+          .onConflictDoNothing();
+      }
     });
   }
 

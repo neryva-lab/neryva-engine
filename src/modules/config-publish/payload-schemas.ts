@@ -124,6 +124,8 @@ const modelEntry = z
     enabled: z.boolean().default(true),
     cost_ceiling_per_1k: z.number().min(0).max(10_000).default(0),
     fallback_order: z.number().int().min(0).max(1_000).default(0),
+    /** FL-2.19: residency regions this deployment serves ('eu'|'us'|...). */
+    regions: z.array(z.enum(['default', 'eu', 'us'])).min(1).default(['default']),
   })
   .strict();
 
@@ -148,11 +150,33 @@ const modelCatalogSchema = z
     }
   });
 
+// -- knowledge_config -------------------------------------------------------
+// FL-2.3: per-org embedding + chunking controls honored by the ingestion
+// pipeline. embedding_model tags every vector the pipeline writes (a real
+// per-org provider lands with BYOK, FL-2.18); the re-embed worker re-indexes
+// documents whose active vectors were computed with a different model.
+
+const knowledgeConfigSchema = z
+  .object({
+    embedding_model: z.string().min(1).max(64).default('local-lexical-v1'),
+    /** FL-2.19: residency pin — model routing must honor it at publish. */
+    residency: z.enum(['default', 'eu', 'us']).default('default'),
+    chunk_size: z.number().int().min(200).max(8000).default(1000),
+    chunk_overlap: z.number().int().min(0).max(1000).default(0),
+  })
+  .strict()
+  .superRefine((cfg, ctx) => {
+    if (cfg.chunk_overlap >= cfg.chunk_size) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['chunk_overlap'], message: 'chunk_overlap must be smaller than chunk_size' });
+    }
+  });
+
 const SCHEMAS: Record<ConfigScope, z.ZodTypeAny> = {
   policy_set: policySetSchema,
   guardrail_profile: guardrailProfileSchema,
   quota_profile: quotaProfileSchema,
   model_catalog: modelCatalogSchema,
+  knowledge_config: knowledgeConfigSchema,
 };
 
 /**

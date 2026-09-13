@@ -8,8 +8,9 @@ import { randomToken, sha256Hex } from '../../common/infra/crypto/envelope';
 import type { RedisService } from '../../common/infra/redis.service';
 import { verifyTurnstile } from '../../common/http/turnstile';
 import { ConversationsService } from '../conversations/conversations.service';
+import { EscalationsService } from '../conversations/escalations.service';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
-import { channelSessions, channelIdentities, ChannelAccount, ChannelSession, ChannelConfig } from './schema';
+import { channelSessions, channelIdentities, messageReceipts, ChannelAccount, ChannelSession, ChannelConfig } from './schema';
 
 /**
  * Website widget plane (Phase C4). The public, unauthenticated surface — the
@@ -32,6 +33,7 @@ export class WidgetService {
   constructor(
     private readonly db: DbService,
     private readonly conversations: ConversationsService,
+    private readonly escalations: EscalationsService,
     private readonly purge: RetentionPurgeService,
     @Optional() private readonly redis?: RedisService,
   ) {}
@@ -138,7 +140,7 @@ export class WidgetService {
 
   // ── Messaging ─────────────────────────────────────────────────────────────
 
-  async sendMessage(ctx: WidgetSessionContext, input: { text: string; idempotencyKey?: string }): Promise<{ message_id: string; run_id: string; conversation_id: string }> {
+  async sendMessage(ctx: WidgetSessionContext, input: { text: string; idempotencyKey?: string }): Promise<{ message_id: string; run_id: string | null; conversation_id: string }> {
     const text = input.text?.trim() ?? '';
     if (!text) {
       throw ApiError.validation({ text: 'must not be empty' });
@@ -164,7 +166,19 @@ export class WidgetService {
       content: { text, channel: { platform: 'web' } },
       idempotencyKey: input.idempotencyKey ? `widget:${ctx.session.id}:${input.idempotencyKey}` : undefined,
     });
-    return { message_id: result.message_id, run_id: result.run_id, conversation_id: conversationId };
+    return { message_id: result.message_id, run_id: result.run_id ?? null, conversation_id: conversationId };
+  }
+
+  /** FL-1.7b - user-facing escalation from the widget. */
+  async escalate(ctx: WidgetSessionContext, reason?: string): Promise<{ escalation_id: string; state: string }> {
+    const conversationId = await this.sessionConversationId(ctx);
+    const escalation = await this.escalations.escalate({
+      orgId: ctx.account.organizationId,
+      conversationId,
+      reason: reason && reason.trim() ? reason.trim().slice(0, 128) : 'user_request',
+      actor: `widget:${ctx.session.id}`,
+    });
+    return { escalation_id: escalation.id, state: escalation.state };
   }
 
   /** Resolve (or lazily create) the session's single conversation. */
@@ -218,6 +232,45 @@ export class WidgetService {
   /** The session's single conversation id (creating it lazily if needed). */
   async sessionConversationId(ctx: WidgetSessionContext): Promise<string> {
     return this.ensureConversation(ctx);
+  }
+
+  /**
+   * FL-3.19 — the end user's read marker: mark recent OUTBOUND assistant
+   * messages in the session's conversation as `read`. Upsert per
+   * (message, account, state); returns the number of rows this call added.
+   */
+  async markSessionRead(ctx: WidgetSessionContext, account: ChannelAccount): Promise<number> {
+    const conversationId = await this.ensureConversation(ctx);
+    return this.db.withOrg(account.organizationId, async (tx) => {
+      const rows = await tx.execute(sql`
+        select id from messages
+        where conversation_id = ${conversationId}::uuid
+          and organization_id = ${account.organizationId}::uuid
+          and role = 'assistant'
+          and superseded_by is null
+        order by sequence desc
+        limit 50
+      `);
+      let added = 0;
+      for (const row of rows.rows as Array<{ id: string }>) {
+        const inserted = await tx
+          .insert(messageReceipts)
+          .values({
+            id: uuidv7(),
+            organizationId: account.organizationId,
+            conversationId,
+            messageId: row.id,
+            channelAccountId: account.id,
+            platform: 'web',
+            state: 'read',
+            occurredAt: new Date().toISOString(),
+          })
+          .onConflictDoNothing()
+          .returning({ id: messageReceipts.id });
+        added += inserted.length;
+      }
+      return added;
+    });
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

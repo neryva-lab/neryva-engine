@@ -96,6 +96,82 @@ export class WidgetController {
     reply.send(result);
   }
 
+  /** FL-1.7b - end user asks for a human agent; pauses the auto-responder. */
+  @Post(':publicKey/escalate')
+  @HttpCode(200)
+  @Public()
+  async escalate(@Param('publicKey') publicKey: string, @Req() request: FastifyRequest, @Body() body: { reason?: string } | undefined, @Res() reply: FastifyReply): Promise<void> {
+    const account = (await this.channels.getByPublicKey(publicKey)) ?? throw404();
+    const ctx = await this.widget.resolveSession(account, this.sessionToken(request));
+    const origin = request.headers.origin ?? null;
+    this.applyCors(reply, account, origin);
+    const result = await this.widget.escalate(ctx, typeof body?.reason === 'string' ? body.reason : undefined);
+    reply.send(result);
+  }
+
+  /** FL-2.8 - CSAT: thumbs feedback on a message, bound to the session. */
+  @Post(':publicKey/feedback')
+  @HttpCode(200)
+  @Public()
+  async feedback(
+    @Param('publicKey') publicKey: string,
+    @Req() request: FastifyRequest,
+    @Body() body: { message_id?: string; rating?: string },
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const account = (await this.channels.getByPublicKey(publicKey)) ?? throw404();
+    const ctx = await this.widget.resolveSession(account, this.sessionToken(request));
+    const origin = request.headers.origin ?? null;
+    this.applyCors(reply, account, origin);
+    if (!body || typeof body.message_id !== 'string' || (body.rating !== 'up' && body.rating !== 'down')) {
+      reply.code(400).send({ error: { message: 'message_id and rating (up|down) are required' } });
+      return;
+    }
+    const conversationId = await this.widget.sessionConversationId(ctx);
+    const idempotency = request.headers['idempotency-key'];
+    await this.conversations.recordFeedback({
+      orgId: account.organizationId,
+      conversationId,
+      messageId: body.message_id,
+      accountId: ctx.session.id,
+      rating: body.rating,
+    });
+    reply.send({ received: true });
+  }
+
+  /**
+   * FL-3.19 — end-user typing indicator. EPHEMERAL by design (invariant 8):
+   * nothing is persisted — the 204 is the signal, and console dashboards
+   * surface it via their own short-poll. The session check IS the auth.
+   */
+  @Post(':publicKey/typing')
+  @HttpCode(204)
+  @Public()
+  async typing(@Param('publicKey') publicKey: string, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const account = (await this.channels.getByPublicKey(publicKey)) ?? throw404();
+    await this.widget.resolveSession(account, this.sessionToken(request));
+    const origin = request.headers.origin ?? null;
+    this.applyCors(reply, account, origin);
+    reply.code(204).send();
+  }
+
+  /**
+   * FL-3.19 — end-user read marker: the session's conversation marks recent
+   * OUTBOUND assistant messages as `read` (durable receipts, one row per
+   * message×state). Bounded to the last 50 messages per call.
+   */
+  @Post(':publicKey/read')
+  @HttpCode(200)
+  @Public()
+  async markRead(@Param('publicKey') publicKey: string, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const account = (await this.channels.getByPublicKey(publicKey)) ?? throw404();
+    const ctx = await this.widget.resolveSession(account, this.sessionToken(request));
+    const origin = request.headers.origin ?? null;
+    this.applyCors(reply, account, origin);
+    const count = await this.widget.markSessionRead(ctx, account);
+    reply.send({ marked_read: count });
+  }
+
   /**
    * Session-conversation message history (cursor = message sequence).
    * The final assistant TEXT lives here, not in terminal run-event
@@ -115,13 +191,20 @@ export class WidgetController {
       limit: 100,
     });
     reply.send({
-      messages: page.messages.map((m) => ({
-        id: m.id,
-        sequence: m.sequence,
-        role: m.role,
-        text: typeof (m.content as { text?: unknown }).text === 'string' ? String((m.content as { text?: unknown }).text) : '',
-        created_at: m.createdAt,
-      })),
+      messages: page.messages.map((m) => {
+        const content = (m.content ?? {}) as { text?: unknown; citations?: unknown; suggested_followups?: unknown; generated_media?: unknown };
+        return {
+          id: m.id,
+          sequence: m.sequence,
+          role: m.role,
+          text: typeof content.text === 'string' ? String(content.text) : '',
+          pinned: m.pinnedAt !== null,
+          ...(content.citations !== undefined ? { citations: content.citations } : {}),
+          ...(Array.isArray(content.suggested_followups) ? { suggested_followups: content.suggested_followups.map(String).slice(0, 4) } : {}),
+          ...(Array.isArray(content.generated_media) ? { generated_media: content.generated_media.slice(0, 4) } : {}),
+          created_at: m.createdAt,
+        };
+      }),
       next_cursor: page.next_cursor,
     });
   }

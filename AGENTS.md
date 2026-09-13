@@ -178,6 +178,7 @@ When a doc references `@docs/architecture/...`, use your `Read` tool on that pat
 
 - Architecture conflict → `docs/architecture/main.md:237` (Engine–Studio boundary) then `docs/architecture/engine/decisions/*.md`.
 - Transaction / RLS doubt → `engine_data_and_lifecycle.md:430` consistency summary + `engine_architecture.md:263` tenancy model.
+- Identity / staff / membership design → `docs/dev/auth_plan.md` (design authority, D1–D6) + `docs/dev/auth_ledger.md` (AUTH-x.y execution order); end-user boundary in `decisions/adr-014-enduser-identity-boundary.md`.
 - Skill-specific procedure → call `skill({ name: "<skill-name>" })` — see `opencode.json:skills` and `.agents/skills/*/SKILL.md`.
 
 This file is committed to Git. Other contributors and CI rely on it. Keep it under 500 lines; link to detailed specs instead of inlining them.

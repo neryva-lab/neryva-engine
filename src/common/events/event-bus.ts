@@ -79,6 +79,7 @@ export const EngineEvents = {
   IdentityRevocation: 'identity.revocation',
   KeyRevoked: 'keys.revoked',
   /** Org lifecycle signals (notifications subscribe). */
+  OrgCreated: 'org.created',
   OrgOwnershipTransferred: 'org.ownership_transferred',
   OrgRoleChanged: 'org.role_changed',
   OrgDeletionRequested: 'org.deletion_requested',

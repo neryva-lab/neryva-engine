@@ -1,8 +1,14 @@
 import { Module } from '@nestjs/common';
 import { OutboxDispatcherWorker } from './outbox-dispatcher.worker';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
+import { RunCancelConsumer } from './run-cancel.consumer';
 import { UsageLedgerConsumer } from './usage-ledger.consumer';
 import { AcceptedRunSweepWorker } from './accepted-run-sweep.worker';
+import { ReEmbedWorker } from './reembed.worker';
+import { MemoryProposerConsumer } from './memory-proposer.consumer';
+import { LlmJudgeConsumer } from './llm-judge.consumer';
+import { LifecycleWebhookConsumer } from './lifecycle-webhook.consumer';
+import { AnalyticsRollupConsumer } from './analytics-rollup.consumer';
 import { ModuleFlags } from '../common/config/feature-flags';
 import { ChannelsModule } from '../modules/channels/channels.module';
 
@@ -16,7 +22,7 @@ import { ChannelsModule } from '../modules/channels/channels.module';
   // the channel plane is enabled — the worker registry is the composition
   // point for every outbox consumer.
   imports: [...(ModuleFlags.channels ? [ChannelsModule] : [])],
-  providers: [RunDispatchConsumer, UsageLedgerConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker],
+  providers: [RunDispatchConsumer, RunCancelConsumer, UsageLedgerConsumer, AnalyticsRollupConsumer, LifecycleWebhookConsumer, MemoryProposerConsumer, LlmJudgeConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker, ReEmbedWorker],
   exports: [OutboxDispatcherWorker],
 })
 export class WorkersModule {}

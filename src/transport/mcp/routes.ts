@@ -23,6 +23,7 @@ import {
   CheckpointBodySchema,
   PolicyBodySchema,
   UsageBodySchema,
+  MediaBodySchema,
   type RequestContext,
   type AcquireOrRenewRunLeaseRequest,
   type ReleaseRunLeaseRequest,
@@ -33,6 +34,11 @@ import {
   type SearchKnowledgeRequest,
   type SaveConversationSummaryRequest,
   type CreateApprovalRequest,
+  type GetApprovalStateRequest,
+  type RequestHumanHandoffRequest,
+  type PutRunArtifactRequest,
+  type GetLatestCheckpointRequest,
+  type GetToolCredentialRequest,
   type SubmitMemoryProposalRequest,
   type AuthorizeToolCallRequest,
   type RecordToolOutcomeRequest,
@@ -78,6 +84,7 @@ const BODY_SCHEMAS: Record<string, DescMessage> = {
   checkpoint: CheckpointBodySchema,
   policy: PolicyBodySchema,
   usage: UsageBodySchema,
+  media: MediaBodySchema,
 };
 
 interface CtxFields {
@@ -226,6 +233,10 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
               totalTokens: Number(req.usage.totalTokens ?? 0n),
             }
           : undefined,
+        // v1.2 (FL-3.4) — bounded follow-ups recorded with the terminal commit.
+        ...(req.suggestedFollowups && req.suggestedFollowups.length > 0
+          ? { suggestedFollowups: [...req.suggestedFollowups] }
+          : {}),
       });
       const run = await authority.getRun(c.organizationId, c.runId);
       return { run: toWireRun(run), messageId: result.message_id };
@@ -377,6 +388,127 @@ export function registerMcpRoutes(router: ConnectRouter, deps: McpRouteDeps): vo
           state: ApprovalState.PENDING,
           expiresAt: toTimestamp(expiresAt.toISOString())!,
         }),
+      };
+    }),
+
+    // v1.3 — claim-check write (FL-2.13/2.17): bounded checkpoint/tool-result
+    // artifacts through the Engine; returns the claim-check ref.
+    putRunArtifact: connectHandler(async (req: PutRunArtifactRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'artifact', c, c.capabilityId);
+      const purpose =
+        req.purpose === 'CHECKPOINT' || req.purpose === 'TOOL_RESULT' || req.purpose === 'GENERATED_MEDIA' ? req.purpose : '';
+      if (!purpose) {
+        throw new ConnectError('purpose must be CHECKPOINT, TOOL_RESULT or GENERATED_MEDIA', Code.InvalidArgument);
+      }
+      if (!req.mediaType) {
+        throw new ConnectError('media_type is required', Code.InvalidArgument);
+      }
+      const result = await authority.putRunArtifact({
+        orgId: c.organizationId,
+        runId: c.runId,
+        purpose,
+        mediaType: req.mediaType,
+        data: Buffer.from(req.data ?? new Uint8Array()),
+      });
+      return {
+        artifact: {
+          artifactId: result.artifactId,
+          uri: `neryva-mcp://org/${c.organizationId}/artifact/${result.artifactId}`,
+          purpose,
+          mediaType: req.mediaType,
+          byteLength: BigInt(result.byteLength),
+          sha256: new Uint8Array(result.sha256),
+          encryptionKeyId: '',
+        },
+      };
+    }),
+
+    // v1.3 — scoped tool-credential disclosure for the HTTP executor (FL-2.10).
+    getToolCredential: connectHandler(async (req: GetToolCredentialRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'tool', c, c.capabilityId);
+      if (!req.toolName) {
+        throw new ConnectError('tool_name is required', Code.InvalidArgument);
+      }
+      const result = await authority.getToolCredential({
+        orgId: c.organizationId,
+        runId: c.runId,
+        toolName: req.toolName,
+      });
+      return { credential: result.credential, credentialHeader: result.credentialHeader };
+    }),
+
+    // v1.3 — latest checkpoint read for resume-from-checkpoint (FL-2.17).
+    getLatestCheckpoint: connectHandler(async (req: GetLatestCheckpointRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'checkpoint', c, c.capabilityId);
+      const result = await authority.getLatestCheckpoint({ orgId: c.organizationId, runId: c.runId });
+      if (!result) {
+        return { checkpointRef: '', checkpointVersion: 0n, artifact: undefined };
+      }
+      return {
+        checkpointRef: result.checkpointRef,
+        checkpointVersion: BigInt(result.checkpointVersion),
+        artifact: result.artifact
+          ? {
+              artifactId: result.artifact.artifactId,
+              organizationId: c.organizationId,
+              runId: c.runId,
+              purpose: result.artifact.purpose,
+              mediaType: result.artifact.mediaType,
+              byteLength: BigInt(result.artifact.byteLength),
+              sha256: new Uint8Array(result.artifact.sha256),
+              encryptionKeyId: '',
+            }
+          : undefined,
+      };
+    }),
+
+    // v1.2 — human handoff (FL-1.7c): the built-in `request_human_handoff`
+    // tool lands here; Engine opens the escalation in one TX.
+    requestHumanHandoff: connectHandler(async (req: RequestHumanHandoffRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'escalation', c, c.capabilityId);
+      if (!req.reason) {
+        throw new ConnectError('reason is required', Code.InvalidArgument);
+      }
+      const result = await authority.requestHumanHandoff({
+        orgId: c.organizationId,
+        runId: c.runId,
+        reason: req.reason,
+        note: req.note || undefined,
+      });
+      return {
+        escalationId: result.escalationId,
+        state: result.state,
+        conversationStatus: result.conversationStatus,
+      };
+    }),
+
+    // v1.2 — approval observation: Studio reads the durable decision for an
+    // approval it proposed (park/resume loop). Run-bound safe read.
+    getApprovalState: connectHandler(async (req: GetApprovalStateRequest, context: HandlerContext) => {
+      const c = readCtx(req.ctx);
+      assertCapability(context, 'approval', c, c.capabilityId);
+      if (!req.approvalRef) {
+        throw new ConnectError('approval_ref is required', Code.InvalidArgument);
+      }
+      const result = await authority.getApprovalState({
+        orgId: c.organizationId,
+        runId: c.runId,
+        approvalRef: req.approvalRef,
+      });
+      return {
+        approvalId: result.approvalId ?? '',
+        approvalRef: req.approvalRef,
+        state: result.state,
+        decisionId: result.decisionId ?? '',
+        decidedBy: result.decidedBy ?? '',
+        decidedAt:
+          result.decidedAt !== undefined
+            ? (toTimestamp(result.decidedAt) ?? undefined)
+            : undefined,
       };
     }),
 

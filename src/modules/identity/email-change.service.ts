@@ -49,8 +49,9 @@ export class EmailChangeService {
     // Re-auth mirrors account deletion: password when one exists, always
     // the second factor when TOTP is enrolled.
     let confirmed = false;
-    if (account.passwordHash) {
-      if (!input.password || !(await this.credentials.verifyPassword(account.passwordHash, input.password))) {
+    const storedHash = await this.credentials.getPasswordHash(input.accountId);
+    if (storedHash) {
+      if (!input.password || !(await this.credentials.verifyPassword(storedHash, input.password))) {
         await this.audit.add({
           action: 'email.change_failed',
           resourceType: 'account',

@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { OrgLifecycleService } from './org-lifecycle.service';
 
 /**
@@ -31,7 +31,7 @@ export class OrgPurgeWorker implements OnModuleInit, OnModuleDestroy {
     });
 
     this.worker = new Worker(
-      'organizations:default',
+      bullQueueName('organizations'),
       async (job: Job) => {
         if (job.name === 'organizations.purge_scan') {
           const purged = await this.lifecycle.purgeDue();

@@ -564,6 +564,26 @@
       "since": "eng-0043",
       "note": "AUTH-1.1: platform staff binding (super_admin/tenant_admin/operator/auditor) — the authority for the staff axis; platform-plane, no RLS (accounts posture); JWT claim is an optimization only."
     },
+    "assistant_templates": {
+      "owner": "engine-ts",
+      "since": "eng-0048",
+      "note": "TPL-1.1: global template registry mirror (one row per released slug@version); seeded by release-job upsert, never by DDL. No org column, no RLS (price_catalog posture)."
+    },
+    "assistant_installs": {
+      "owner": "engine-ts",
+      "since": "eng-0048",
+      "note": "TPL-1.1: per-org install record (slug@version + assistant FK); copy provenance, never a live link. RLS org-scoped."
+    },
+    "run_manifests": {
+      "owner": "engine-ts",
+      "since": "eng-0049",
+      "note": "TPL-5.6: per-run execution manifest written in the acceptance TX (snapshot/binding refs + conversation/message/channel/release pointer). RLS org-scoped."
+    },
+    "control_blocks": {
+      "owner": "engine-ts",
+      "since": "eng-0049",
+      "note": "TPL-6.4: operator kill switches (assistant/version/tool/template/capability) with expiry, evaluated at check time. RLS org-scoped."
+    },
     "org_memberships.uq_one_active_owner_per_org": {
       "owner": "engine-ts",
       "since": "eng-0044",

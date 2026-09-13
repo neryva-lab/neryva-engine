@@ -12,6 +12,8 @@ import { ChannelTemplatesService } from './templates.service';
 import { ChannelTemplatesController } from './templates.controller';
 import { ConversationsModule } from '../conversations/conversations.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
+import { AssistantsModule } from '../assistants/assistants.module';
+import { LifecycleModule } from '../lifecycle/lifecycle.module';
 
 /**
  * Channel plane (Phase C — docs/architecture/engine/channel_integrations_plan.md).
@@ -20,7 +22,7 @@ import { OrganizationsModule } from '../organizations/organizations.module';
  * see WorkersModule.
  */
 @Module({
-  imports: [ConversationsModule, OrganizationsModule],
+  imports: [ConversationsModule, OrganizationsModule, AssistantsModule, LifecycleModule],
   controllers: [ChannelsController, ChannelsWebhookController, WidgetController, ChannelTemplatesController],
   providers: [
     ChannelsService,

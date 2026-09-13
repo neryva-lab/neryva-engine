@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { AnomalyService } from './anomaly.service';
 import { BillingCreditsService } from './billing-credits.service';
 import { BillingCycleService } from './billing-cycle.service';
@@ -55,7 +55,7 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     await queue.add('billing.quota_reconcile', {}, { repeat: { pattern: env.BILLING_QUOTA_RECONCILE_CRON }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
 
     this.worker = new Worker(
-      'billing:default',
+      bullQueueName('billing'),
       async (job: Job) => {
         if (job.name === 'billing.cycle_draft') {
           const result = await this.cycle.runForPreviousMonth();

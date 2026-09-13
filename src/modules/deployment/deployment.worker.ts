@@ -3,7 +3,7 @@ import { and, eq, lt } from 'drizzle-orm';
 import type { Job } from 'bullmq';
 import { Worker } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EntitlementsService } from '../organizations/entitlements.service';
@@ -56,7 +56,7 @@ export class DeploymentWorker implements OnModuleInit, OnModuleDestroy {
     await queue.add('deployment.secrets_scan', {}, { repeat: { pattern: '40 6 * * *' }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
 
     this.worker = new Worker(
-      'deployment:default',
+      bullQueueName('deployment'),
       async (job: Job) => {
         switch (job.name) {
           case 'deployment.run':

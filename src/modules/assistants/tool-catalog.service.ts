@@ -145,6 +145,43 @@ export const BUILT_IN_TOOLS: ReadonlyMap<
       },
     },
   ],
+  [
+    // TPL-2.3/§6 — platform-implemented retrieval. ACL-before-scoring
+    // retrieval runs inside GetAuthorizedRunContext (Engine) and the
+    // SearchKnowledge RPC; a per-org catalog row with an httpBinding would be
+    // meaningless, so these resolve by name everywhere pins are checked
+    // (publish, install, provisioning, authorize, context, credential).
+    'search_knowledge',
+    {
+      effectClass: 'READ_ONLY' as const,
+      approvalRequirement: 'NONE' as const,
+      description: 'Search the organization knowledge corpus (ACL-filtered before scoring). Returns cited chunks.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Retrieval query', maxLength: 2000 },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  ],
+  [
+    'search_memory',
+    {
+      effectClass: 'READ_ONLY' as const,
+      approvalRequirement: 'NONE' as const,
+      description: 'Search approved long-term memory items in scope. Returns provenance-tagged memories.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Memory query', maxLength: 2000 },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  ],
 ]);
 
 /**

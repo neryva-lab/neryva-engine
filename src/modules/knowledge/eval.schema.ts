@@ -54,6 +54,18 @@ export const evalRuns = pgTable(
     startedBy: varchar('started_by', { length: 128 }).notNull(),
     startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
+    /**
+     * TPL-7.4 — EvaluationRun provenance: template slug@version + definition
+     * hash, dataset content hash, evaluator versions, model + catalog refs,
+     * tool-catalog snapshot hash, knowledge pins, guardrail ref, compiler
+     * version, environment, seed, attempts_per_case, decision inputs.
+     * Score-only provenance is a bug — this column is the fix.
+     */
+    provenance: jsonb('provenance'),
+    /** TPL-6.1/7.3 — PASS | WARN | BLOCK (null = undecided, e.g. legacy runs). */
+    decision: varchar('decision', { length: 16 }),
+    /** Release policy version the decision was computed under (null when ad-hoc). */
+    releasePolicyVersion: integer('release_policy_version'),
   },
   (t) => [index('ix_eval_runs_org_dataset').on(t.organizationId, t.datasetId, t.startedAt)],
 );

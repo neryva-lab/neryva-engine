@@ -121,12 +121,17 @@ export function validateFlagMatrix(): void {
     throw new Error('MODULES__STAFF_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__BILLING_ENABLED (org lookup, audit, usage)');
   }
   // Assistants need organizations (+ console for manifest/product checks when publishing).
-  if (ModuleFlags.assistants && !ModuleFlags.organizations) {
-    throw new Error('MODULES__ASSISTANTS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED (assistant tenancy)');
+  // The evaluate route calls EvalService, so knowledge is a hard requirement too.
+  if (ModuleFlags.assistants && !(ModuleFlags.organizations && ModuleFlags.knowledge)) {
+    throw new Error('MODULES__ASSISTANTS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__KNOWLEDGE_ENABLED (assistant tenancy; version evaluation)');
   }
   // Conversations pin the assistant's active published version + policy snapshot at acceptance.
-  if (ModuleFlags.conversations && !(ModuleFlags.organizations && ModuleFlags.assistants)) {
-    throw new Error('MODULES__CONVERSATIONS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED and MODULES__ASSISTANTS_ENABLED (runs pin assistant versions)');
+  // McpAuthorityService (provided here for RunsController) needs RetrievalService
+  // (knowledge) + UsageLedgerService (billing) at construction — hence the two
+  // extra requirements below. There is no degraded mode: context assembly
+  // without retrieval and commits without usage recording are not offered.
+  if (ModuleFlags.conversations && !(ModuleFlags.organizations && ModuleFlags.assistants && ModuleFlags.knowledge && ModuleFlags.billing)) {
+    throw new Error('MODULES__CONVERSATIONS_ENABLED requires MODULES__ORGANIZATIONS_ENABLED, MODULES__ASSISTANTS_ENABLED, MODULES__KNOWLEDGE_ENABLED and MODULES__BILLING_ENABLED (runs pin assistant versions; authority needs retrieval + usage ledger)');
   }
   // The MCP authority surface serves runs; identity issues the workload identities.
   if (ModuleFlags.mcp && !(ModuleFlags.conversations && ModuleFlags.identity)) {

@@ -30,7 +30,8 @@
     "test:property": "vitest run --config vitest.property.config.ts",
     "test:chaos": "vitest run --config vitest.chaos.config.ts",
     "test:load": "vitest run --config vitest.load.config.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "templates:sync": "tsx src/scripts/sync-template-registry.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.14.1",

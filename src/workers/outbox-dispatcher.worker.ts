@@ -1,17 +1,23 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional, Inject } from '@nestjs/common';
 import { OutboxDispatcher } from '../common/infra/outbox/dispatcher';
 import { DbService } from '../common/infra/db/db.service';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
+import { TemplateProvisioningConsumer } from './template-provisioning.consumer';
 import { RunCancelConsumer } from './run-cancel.consumer';
 import { AnalyticsRollupConsumer } from './analytics-rollup.consumer';
-import { LifecycleWebhookConsumer } from './lifecycle-webhook.consumer';
 import { MemoryProposerConsumer } from './memory-proposer.consumer';
-import { UsageLedgerConsumer } from './usage-ledger.consumer';
 import { LlmJudgeConsumer } from './llm-judge.consumer';
+// Domain-owned consumers join via explicit @Inject tokens (never bare
+// `import type` optionals — those emit a Function placeholder Nest cannot
+// resolve, silently dropping the consumer). Each lives in its feature
+// module, so flag-disabled deployments simply lack the provider and the
+// @Optional() yields undefined.
+import { UsageLedgerConsumer } from './usage-ledger.consumer';
+import { LifecycleWebhookConsumer } from './lifecycle-webhook.consumer';
+import { ChannelIngestConsumer } from '../modules/channels/ingest.service';
+import { ChannelOutboundService } from '../modules/channels/outbound.service';
 import { purgeExpiredIdempotencyRecords } from '../common/http/idempotency-records';
 import type { OutboxConsumer } from '../common/infra/outbox/consumer';
-import type { ChannelIngestConsumer } from '../modules/channels/ingest.service';
-import type { ChannelOutboundService } from '../modules/channels/outbound.service';
 import { env } from '../common/config/env';
 
 /**
@@ -34,17 +40,26 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly db: DbService,
     runDispatch: RunDispatchConsumer,
+    templateProvisioning: TemplateProvisioningConsumer,
     runCancel: RunCancelConsumer,
     analyticsRollup: AnalyticsRollupConsumer,
-    lifecycleWebhook: LifecycleWebhookConsumer,
     memoryProposer: MemoryProposerConsumer,
-    usageLedger: UsageLedgerConsumer,
     llmJudge: LlmJudgeConsumer,
+    // Domain-owned consumers join only when their feature module is loaded
+    // (billing/webhooks flags) — same pattern as the channel consumers below.
+    @Optional() @Inject(UsageLedgerConsumer) usageLedger?: UsageLedgerConsumer,
+    @Optional() @Inject(LifecycleWebhookConsumer) lifecycleWebhook?: LifecycleWebhookConsumer,
     // Channel-plane consumers join the dispatcher only when MODULES__CHANNELS_ENABLED.
-    @Optional() channelIngest?: ChannelIngestConsumer,
-    @Optional() channelOutbound?: ChannelOutboundService,
+    @Optional() @Inject(ChannelIngestConsumer) channelIngest?: ChannelIngestConsumer,
+    @Optional() @Inject(ChannelOutboundService) channelOutbound?: ChannelOutboundService,
   ) {
-    const consumers: OutboxConsumer[] = [runDispatch, runCancel, analyticsRollup, lifecycleWebhook, memoryProposer, usageLedger, llmJudge];
+    const consumers: OutboxConsumer[] = [runDispatch, templateProvisioning, runCancel, analyticsRollup, memoryProposer, llmJudge];
+    if (usageLedger) {
+      consumers.push(usageLedger);
+    }
+    if (lifecycleWebhook) {
+      consumers.push(lifecycleWebhook);
+    }
     if (channelIngest) {
       consumers.push(channelIngest);
     }

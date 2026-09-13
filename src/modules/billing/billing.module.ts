@@ -23,6 +23,8 @@ import { StripeWebhookController } from './stripe.controller';
 import { TrialExpiryService } from './trial-expiry.service';
 import { UsageController } from './usage.controller';
 import { UsageQueryService } from './usage-query.service';
+import { UsageLedgerConsumer } from '../../workers/usage-ledger.consumer';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 /**
  * The billing & metering module (ledger billing-metering B-1…B-3, B-5):
@@ -39,10 +41,14 @@ import { UsageQueryService } from './usage-query.service';
 // forwardRef: console ↔ billing reference each other (manifest registry ⇄
 // quota views); the deferred callback also breaks the CJS load-cycle TDZ.
 @Module({
-  imports: [forwardRef(() => ConsoleModule), OrganizationsModule],
+  imports: [forwardRef(() => ConsoleModule), OrganizationsModule, NotificationsModule],
   controllers: [MeteringController, UsageController, BillingController, PriceCatalogController, StripeWebhookController],
   providers: [
     SpendIngestService,
+    UsageLedgerService,
+    BillingReconciliationService,
+    BillingCreditsService,
+    BillingCycleService,
     UsageQueryService,
     InvoicesService,
     QuotaService,
@@ -52,8 +58,12 @@ import { UsageQueryService } from './usage-query.service';
     TrialExpiryService,
     PlanChangeService,
     StripeService,
+    // The usage consumer lives here (not in WorkersModule): it needs
+    // UsageLedgerService, and the dispatcher takes it @Optional() so a
+    // billing-disabled deployment simply has no usage consumer.
+    UsageLedgerConsumer,
   ],
-  exports: [UsageLedgerService, BillingReconciliationService,UsageQueryService, QuotaService, SpendIngestService, PriceCatalogService],
+  exports: [UsageLedgerService, BillingReconciliationService,UsageQueryService, QuotaService, SpendIngestService, PriceCatalogService, UsageLedgerConsumer],
 })
 export class BillingModule {
   constructor(db: DbService, healthRegistry: HealthRegistry) {

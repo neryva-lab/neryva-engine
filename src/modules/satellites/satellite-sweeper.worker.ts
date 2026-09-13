@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { Worker, type Job } from 'bullmq';
 import { eq, lt, sql } from 'drizzle-orm';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
@@ -57,7 +57,7 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
     );
 
     this.worker = new Worker(
-      'satellites:default',
+      bullQueueName('satellites'),
       async (job: Job) => {
         if (job.name === 'satellites.sweep') {
           const report = await this.sweep();

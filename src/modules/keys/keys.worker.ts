@@ -2,7 +2,7 @@ import { OnModuleDestroy, OnModuleInit, Injectable, Logger } from '@nestjs/commo
 import { Worker } from 'bullmq';
 import type { Job } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { KeysService } from './keys.service';
 
 /**
@@ -26,7 +26,7 @@ export class KeysWorker implements OnModuleInit, OnModuleDestroy {
     await queue.add('keys.expiring_scan', {}, { repeat: { pattern: '0 6 * * *' }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
 
     this.worker = new Worker(
-      'keys:default',
+      bullQueueName('keys'),
       async (job: Job) => {
         if (job.name === 'keys.expiring_scan') {
           const sent = await this.keys.notifyExpiringKeys(14);

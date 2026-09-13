@@ -7,6 +7,8 @@ import { env, isProduction } from '../../common/config/env';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { envelopeDecrypt, envelopeEncrypt, randomToken, constantTimeEquals } from '../../common/infra/crypto/envelope';
 import { EntitlementsService } from '../organizations/entitlements.service';
+import { TemplatesService as AssistantTemplatesService } from '../assistants/templates.service';
+import { assistants } from '../assistants/schema';
 import { channelAccounts, channelSessions, ChannelAccount, ChannelConfig, CHANNEL_PLATFORMS } from './schema';
 import { assertAllowedDomainFormat, assertCredentialsShape, isUuid, META_GRAPH_VERSION, NK_KEY_PREFIX } from './dto';
 
@@ -24,6 +26,7 @@ export class ChannelsService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly entitlements: EntitlementsService,
+    private readonly assistantTemplates: AssistantTemplatesService,
   ) {}
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -40,6 +43,7 @@ export class ChannelsService {
     if (!config.default_assistant_id || !isUuid(config.default_assistant_id)) {
       throw ApiError.validation({ config: 'default_assistant_id is required — channel conversations pin the account assistant' });
     }
+    await this.assertAssistantRoutable(input.orgId, input.platform, config.default_assistant_id);
 
     // Entitlement overlay: an explicit `channels` entitlement governs caps;
     // otherwise the env default applies. Denials are deterministic (no
@@ -124,7 +128,10 @@ export class ChannelsService {
 
   async update(input: { orgId: string; accountId: string; displayName?: string; status?: 'active' | 'suspended'; config?: Record<string, unknown>; actor: string }): Promise<ChannelAccount> {
     assertUuid2(input.orgId, input.accountId);
-    const config = input.config !== undefined ? this.sanitizeConfigForUpdate(input.orgId, input.accountId, input.config) : undefined;
+    const config = input.config !== undefined ? await this.sanitizeConfigForUpdate(input.orgId, input.accountId, input.config) : undefined;
+    if (config?.config.default_assistant_id) {
+      await this.assertAssistantRoutable(input.orgId, config.platform, config.config.default_assistant_id);
+    }
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx
         .update(channelAccounts)
@@ -421,13 +428,47 @@ export class ChannelsService {
   }
 
   /** Merge-patch config on update, re-validating the platform-specific shape. */
-  private async sanitizeConfigForUpdate(orgId: string, accountId: string, patch: Record<string, unknown>): Promise<ChannelConfig> {
+  private async sanitizeConfigForUpdate(
+    orgId: string,
+    accountId: string,
+    patch: Record<string, unknown>,
+  ): Promise<{ platform: string; config: ChannelConfig }> {
     const account = await this.get(orgId, accountId);
     if (!account) {
       throw ApiError.notFound('channel account');
     }
     const merged = { ...((account.config ?? {}) as ChannelConfig), ...(patch as ChannelConfig) };
-    return this.sanitizeConfig(account.platform, merged as Record<string, unknown>);
+    return { platform: account.platform, config: this.sanitizeConfig(account.platform, merged as Record<string, unknown>) };
+  }
+
+  /**
+   * TPL-9.2 — channel↔assistant routability. Two independent gates:
+   *  1. Ownership: the assistant must exist IN THIS ORG. An account pointing
+   *     at a foreign org's assistant would route that org's conversations
+   *     into another tenant's agent — refused as cross-tenant access.
+   *  2. Template binding: a template-installed assistant whose template
+   *     declares a non-empty channels list serves ONLY those channels
+   *     (template channel names map to account platforms below; unmapped
+   *     platforms and undeclared/manual assistants are unconstrained).
+   */
+  private async assertAssistantRoutable(orgId: string, platform: string, assistantId: string): Promise<void> {
+    const rows = await this.db.withOrg(orgId, (tx) => tx.select({ id: assistants.id }).from(assistants).where(eq(assistants.id, assistantId)).limit(1));
+    if (rows.length === 0) {
+      throw ApiError.validation({ 'config.default_assistant_id': 'assistant does not exist in this organization' });
+    }
+    const binding = await this.assistantTemplates.resolveAssistantChannels(orgId, assistantId);
+    if (!binding) {
+      return;
+    }
+    const mapped = CHANNEL_TO_PLATFORM[platform];
+    if (!mapped) {
+      return;
+    }
+    if (!binding.channels.includes(mapped)) {
+      throw ApiError.validation({
+        'config.default_assistant_id': `assistant's template serves [${binding.channels.join(', ')}] — not ${mapped} (platform ${platform})`,
+      });
+    }
   }
 
   private async fetchWithDeadline(url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ ok: boolean; status: number; body: unknown }> {
@@ -448,6 +489,18 @@ export class ChannelsService {
     }
   }
 }
+
+/** TPL-9.2 — account platform → template channel name (CHANNEL_PLATFORMS →
+ *  bindings/channels.json vocabulary; `assertAssistantRoutable` looks up by
+ *  ACCOUNT platform). Platforms without a template channel (instagram/x/email)
+ *  and template channels without a platform (voice) are unmapped: binding
+ *  checks skip them (cannot judge), ownership checks still apply. */
+const CHANNEL_TO_PLATFORM: Record<string, string> = {
+  web: 'web-widget',
+  whatsapp: 'whatsapp',
+  messenger: 'messenger',
+  telegram: 'telegram',
+};
 
 function assertUuid2(orgId: string, accountId: string): void {
   if (!isUuid(orgId)) {

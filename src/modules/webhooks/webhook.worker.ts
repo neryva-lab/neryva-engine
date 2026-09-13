@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { webhooksDelivered } from '../../common/observability/metrics';
 import { WebhooksService } from './webhooks.service';
 
@@ -23,7 +23,7 @@ export class WebhookWorker implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     this.worker = new Worker(
-      'webhooks:default',
+      bullQueueName('webhooks'),
       async (job: Job<{ deliveryId: string }>) => {
         if (job.name !== 'webhook.deliver' || !job.data?.deliveryId) {
           WebhookWorker.logger.warn(`unknown webhooks job "${job.name}" — discarding`);

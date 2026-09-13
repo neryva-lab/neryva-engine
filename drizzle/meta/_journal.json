@@ -330,6 +330,20 @@
       "when": 1761246300017,
       "tag": "0047_credentials_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1761246300018,
+      "tag": "0048_assistant_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1761246300019,
+      "tag": "0049_release_governance",
+      "breakpoints": true
     }
   ]
 }

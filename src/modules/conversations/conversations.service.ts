@@ -36,8 +36,21 @@ const SSE_EVENT_NAMES: Record<string, string> = {
   '12': 'thinking', // EVENT_TYPE_THINKING (FL-3.6) // EVENT_TYPE_TERMINAL
 };
 
+/**
+ * TPL-5.6 — which release pointer chose a run's version. Persisted into
+ * run_manifests at every run-creation site (accept, regenerate, edit).
+ */
+export interface ReleasePointer {
+  type: 'rollout' | 'active_pointer';
+  rollout_id?: string;
+  environment?: string;
+  channel?: string;
+}
+
 import { assertRunTransition, isRunState, isTerminalRun } from './state-machine';
 import { EscalationsService } from './escalations.service';
+import { assistants, policySnapshots, runManifests } from '../assistants/schema';
+import { ControlBlocksService } from '../assistants/control-blocks.service';
 import { env } from '../../common/config/env';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { usageLedgerEntries } from '../billing/usage-ledger.schema';
@@ -251,10 +264,18 @@ export class ConversationsService {
     // NO run is created — the auto-responder is paused. Resolve resumes it.
     const escalated = conversation.status === 'escalated';
 
-    // Pin the assistant's active published version + policy snapshot at acceptance.
-    let pin: { version_id: string; snapshot_id: string } | null = null;
+    // TPL-6.3 kill level 1 — a disabled assistant, or one under an active
+    // assistant block, accepts NO new runs. In-flight runs are untouched
+    // here (they fail closed at their next tool authorization instead —
+    // pinning stays immutable even for killed assistants).
     if (!escalated) {
-      pin = await this.pickVersionPin(tx, conversation.assistantId, conversation.id);
+      await this.assertAssistantRunnable(tx, input.orgId, conversation.assistantId);
+    }
+
+    // Pin the assistant's active published version + policy snapshot at acceptance.
+    let pin: { version_id: string; snapshot_id: string; release: ReleasePointer } | null = null;
+    if (!escalated) {
+      pin = await this.pickVersionPin(tx, conversation.assistantId, conversation.id, conversationReleaseChannel(conversation.channelBinding));
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
@@ -285,7 +306,7 @@ export class ConversationsService {
     });
 
     if (!escalated) {
-      const activePin = pin as { version_id: string; snapshot_id: string };
+      const activePin = pin as { version_id: string; snapshot_id: string; release: ReleasePointer };
       try {
         await tx.insert(runs).values({
           id: runId,
@@ -303,6 +324,18 @@ export class ConversationsService {
         throw err;
       }
 
+      // TPL-5.6 — manifest commits atomically with the run: no run without it.
+      const manifestHash = await this.insertRunManifest(tx, {
+        orgId: input.orgId,
+        runId,
+        versionId: activePin.version_id,
+        snapshotId: activePin.snapshot_id,
+        conversationId: input.conversationId,
+        messageId,
+        channel: (conversation.channelBinding ?? null) as unknown,
+        release: activePin.release,
+      });
+
       await recordOutboxEvent(tx, {
         aggregateType: 'run',
         aggregateId: runId,
@@ -315,6 +348,7 @@ export class ConversationsService {
           message_id: messageId,
           assistant_version_id: activePin.version_id,
           policy_snapshot_id: activePin.snapshot_id,
+          manifest_hash: manifestHash,
         },
         traceId: input.traceId,
       });
@@ -336,13 +370,23 @@ export class ConversationsService {
    * conversation never flips variants mid-flight. A rollout variant without a
    * policy snapshot (or not PUBLISHED) is never selected — fail-closed to the
    * assistant's default active version.
+   *
+   * TPL-5.6/6.2 — the returned release pointer records WHICH pointer chose
+   * the version (rollout id + environment + channel, or the active pointer)
+   * and is persisted into run_manifests at every run-creation site.
+   * Selection is channel-aware: for a conversation arriving on a channel, a
+   * pointer addressed to that channel (production + channel label) wins over
+   * the (production, default) pointer — "a dedicated channel holds v18 while
+   * prod moves on" (plan §7.4). Fallback order: (production, channel) →
+   * (production, default) → newest active row of any address.
    */
   private async pickVersionPin(
     tx: NodePgDatabase,
     assistantId: string,
     conversationId: string,
-  ): Promise<{ version_id: string; snapshot_id: string } | null> {
-    const byVersionId = (versionId: string): Promise<{ version_id: string; snapshot_id: string } | null> =>
+    channelLabel?: string,
+  ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> {
+    const byVersionId = (versionId: string, release: ReleasePointer): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> =>
       tx
         .execute(sql`
           select av.id as version_id, ps.id as snapshot_id
@@ -351,16 +395,28 @@ export class ConversationsService {
           where av.id = ${versionId}::uuid and av.status = 'PUBLISHED'
           limit 1
         `)
-        .then((r) => (r.rows[0] as { version_id: string; snapshot_id: string } | undefined) ?? null);
+        .then((r) => {
+          const row = r.rows[0] as { version_id: string; snapshot_id: string } | undefined;
+          return row ? { ...row, release } : null;
+        });
 
     const rolloutRows = await tx.execute(sql`
-      select versions from assistant_rollouts
+      select id, versions, environment, channel from assistant_rollouts
       where assistant_id = ${assistantId}::uuid and state = 'active'
       order by created_at desc
-      limit 1
+      limit 20
     `);
-    if (rolloutRows.rows.length > 0) {
-      const raw = (rolloutRows.rows[0] as { versions: unknown }).versions;
+    const rollouts = rolloutRows.rows as Array<{ id: string; versions: unknown; environment: string; channel: string }>;
+    const preferred =
+      // 1. the conversation's own channel (operator-addressed release)
+      (channelLabel ? rollouts.find((r) => r.environment === 'production' && r.channel === channelLabel) : undefined) ??
+      // 2. the default production address
+      rollouts.find((r) => r.environment === 'production' && r.channel === 'default') ??
+      // 3. back-compat: the newest active row of any address
+      rollouts[0];
+    if (preferred) {
+      const rollout = preferred;
+      const raw = rollout.versions;
       if (Array.isArray(raw)) {
         const variants: Array<{ version_id: string; weight: number }> = [];
         for (const v of raw) {
@@ -371,7 +427,12 @@ export class ConversationsService {
         }
         if (variants.length > 0) {
           const chosen = pickStickyVariant(conversationId, variants);
-          const pin = await byVersionId(chosen);
+          const pin = await byVersionId(chosen, {
+            type: 'rollout',
+            rollout_id: rollout.id,
+            environment: rollout.environment,
+            channel: rollout.channel,
+          });
           if (pin) {
             return pin;
           }
@@ -386,7 +447,75 @@ export class ConversationsService {
       where a.id = ${assistantId}::uuid
       limit 1
     `);
-    return (active.rows[0] as { version_id: string; snapshot_id: string } | undefined) ?? null;
+    const row = active.rows[0] as { version_id: string; snapshot_id: string } | undefined;
+    return row ? { ...row, release: { type: 'active_pointer' } } : null;
+  }
+
+  /**
+   * TPL-6.3 — run-acceptance kill gate, shared by accept/regenerate/edit.
+   * Disabled flag or active assistant block refuses NEW runs with a typed
+   * conflict; in-flight runs are never touched here.
+   */
+  private async assertAssistantRunnable(tx: NodePgDatabase, orgId: string, assistantId: string): Promise<void> {
+    const assistantRows = await tx.select({ id: assistants.id, disabledAt: assistants.disabledAt }).from(assistants).where(eq(assistants.id, assistantId)).limit(1);
+    if (assistantRows.length === 0) {
+      throw ApiError.notFound('assistant');
+    }
+    if (assistantRows[0].disabledAt) {
+      throw ApiError.conflict('assistant is disabled — enable it before accepting runs', { assistant_id: assistantId });
+    }
+    const blocked = await ControlBlocksService.findActiveBlock(tx, orgId, 'assistant', assistantId);
+    if (blocked) {
+      throw ApiError.conflict(`assistant is blocked (${blocked.reason}) — clear the block before accepting runs`, {
+        assistant_id: assistantId,
+      });
+    }
+  }
+
+  /**
+   * TPL-5.6 — RunManifest writer. Called in the SAME transaction as the runs
+   * insert at every run-creation site (accept, regenerate, edit): no run
+   * exists without its manifest. Returns the manifest hash for the outbox
+   * payload. The manifest references the snapshot (which owns the heavy
+   * resolved set) and records the run-scoped refs + release pointer.
+   */
+  private async insertRunManifest(
+    tx: NodePgDatabase,
+    input: {
+      orgId: string;
+      runId: string;
+      versionId: string;
+      snapshotId: string;
+      conversationId: string;
+      messageId: string;
+      channel: unknown;
+      release: ReleasePointer;
+    },
+  ): Promise<string> {
+    const snapRows = await tx
+      .select({ manifestHash: policySnapshots.manifestHash })
+      .from(policySnapshots)
+      .where(eq(policySnapshots.id, input.snapshotId))
+      .limit(1);
+    const manifest = {
+      assistant_version_id: input.versionId,
+      policy_snapshot_id: input.snapshotId,
+      snapshot_manifest_hash: snapRows[0]?.manifestHash ?? null,
+      conversation_id: input.conversationId,
+      input_message_id: input.messageId,
+      channel: input.channel ?? null,
+      release: input.release,
+    };
+    const manifestHash = canonicalHash(manifest);
+    await tx.insert(runManifests).values({
+      runId: input.runId,
+      organizationId: input.orgId,
+      assistantVersionId: input.versionId,
+      policySnapshotId: input.snapshotId,
+      manifest,
+      manifestHash,
+    });
+    return manifestHash;
   }
 
   /**
@@ -473,10 +602,11 @@ export class ConversationsService {
         throw ApiError.conflict('no user message precedes the assistant reply');
       }
 
-      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id);
+      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id, conversationReleaseChannel(conv[0].channelBinding));
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
+      await this.assertAssistantRunnable(tx, input.orgId, conv[0].assistantId);
       const runId = uuidv7();
       try {
         await tx.insert(runs).values({
@@ -495,6 +625,16 @@ export class ConversationsService {
         }
         throw err;
       }
+      const manifestHash = await this.insertRunManifest(tx, {
+        orgId: input.orgId,
+        runId,
+        versionId: pin.version_id,
+        snapshotId: pin.snapshot_id,
+        conversationId: input.conversationId,
+        messageId: userMessage.id,
+        channel: (conv[0].channelBinding ?? null) as unknown,
+        release: pin.release,
+      });
       await recordOutboxEvent(tx, {
         aggregateType: 'run',
         aggregateId: runId,
@@ -507,6 +647,7 @@ export class ConversationsService {
           message_id: userMessage.id,
           assistant_version_id: pin.version_id,
           policy_snapshot_id: pin.snapshot_id,
+          manifest_hash: manifestHash,
           regenerated_message_id: target.id,
         },
       });
@@ -606,10 +747,11 @@ export class ConversationsService {
         throw ApiError.conflict('only the latest user message can be edited');
       }
 
-      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id);
+      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id, conversationReleaseChannel(conv[0].channelBinding));
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
+      await this.assertAssistantRunnable(tx, input.orgId, conv[0].assistantId);
       const sequence = await nextMessageSequence(tx, input.conversationId);
       const messageId = uuidv7();
       const runId = uuidv7();
@@ -655,6 +797,16 @@ export class ConversationsService {
         }
         throw err;
       }
+      const manifestHash = await this.insertRunManifest(tx, {
+        orgId: input.orgId,
+        runId,
+        versionId: pin.version_id,
+        snapshotId: pin.snapshot_id,
+        conversationId: input.conversationId,
+        messageId,
+        channel: (conv[0].channelBinding ?? null) as unknown,
+        release: pin.release,
+      });
       await recordOutboxEvent(tx, {
         aggregateType: 'run',
         aggregateId: runId,
@@ -667,6 +819,7 @@ export class ConversationsService {
           message_id: messageId,
           assistant_version_id: pin.version_id,
           policy_snapshot_id: pin.snapshot_id,
+          manifest_hash: manifestHash,
         },
       });
       const nextVersion = conv[0].version + 1;
@@ -1500,6 +1653,28 @@ function pickStickyVariant(conversationId: string, variants: Array<{ version_id:
     }
   }
   return variants[variants.length - 1].version_id;
+}
+
+/**
+ * TPL-6.2 — the release-channel label a conversation is served under: the
+ * template channel name for the binding platform (web → web-widget), else the
+ * raw platform string. Rollout channels are operator-labeled; both the
+ * template-channel and platform-name conventions resolve deterministically
+ * from the binding. Undefined for org-console conversations (no channel) —
+ * the (production, default) pointer serves them.
+ */
+function conversationReleaseChannel(channelBinding: unknown): string | undefined {
+  const platform = (channelBinding as { platform?: unknown } | null | undefined)?.platform;
+  if (typeof platform !== 'string' || platform.length === 0) {
+    return undefined;
+  }
+  const RELEASE_CHANNEL_BY_PLATFORM: Record<string, string> = {
+    web: 'web-widget',
+    whatsapp: 'whatsapp',
+    messenger: 'messenger',
+    telegram: 'telegram',
+  };
+  return RELEASE_CHANNEL_BY_PLATFORM[platform] ?? platform;
 }
 
 /** FL-3.4 — bounded, trimmed follow-up suggestions (max 4 × 200 chars). */

@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { ContentService } from './content.service';
 import { NewsletterService } from './newsletter.service';
 
@@ -35,7 +35,7 @@ export class CorporateWorker implements OnModuleInit, OnModuleDestroy {
     );
 
     this.worker = new Worker(
-      'corporate:default',
+      bullQueueName('corporate'),
       async (job: Job) => {
         if (job.name !== 'corporate.maintenance') {
           CorporateWorker.logger.warn(`unknown corporate job "${job.name}" — discarding`);

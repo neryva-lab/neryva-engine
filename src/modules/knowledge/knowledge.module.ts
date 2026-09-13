@@ -13,7 +13,9 @@ import { EvalService } from './eval.service';
 import { AnalyticsQueryService } from './analytics.query.service';
 import { ConnectorsService } from './connectors.service';
 import { ConnectorSyncWorker } from './connectors.worker';
+import { ReEmbedWorker } from '../../workers/reembed.worker';
 import { ConfigPublishModule } from '../config-publish/config-publish.module';
+import { OrganizationsModule } from '../organizations/organizations.module';
 
 /**
  * Knowledge plane module — Phase 7. The ingestion worker is provided here
@@ -22,9 +24,9 @@ import { ConfigPublishModule } from '../config-publish/config-publish.module';
  * malware scanner service is configured.
  */
 @Module({
-  imports: [ConfigPublishModule],
+  imports: [ConfigPublishModule, OrganizationsModule],
   controllers: [KnowledgeController, ConnectorsController, HarnessParityController],
-  providers: [ArtifactsService, MemoryService, RetrievalService, EmbeddingService, RerankerService, QueryRewriteService, DefaultScanner, KnowledgeIngestionWorker, ConnectorsService, ConnectorSyncWorker, EvalService, AnalyticsQueryService],
-  exports: [ArtifactsService, MemoryService, RetrievalService, KnowledgeIngestionWorker],
+  providers: [ArtifactsService, MemoryService, RetrievalService, EmbeddingService, RerankerService, QueryRewriteService, DefaultScanner, KnowledgeIngestionWorker, ConnectorsService, ConnectorSyncWorker, EvalService, AnalyticsQueryService, ReEmbedWorker],
+  exports: [ArtifactsService, MemoryService, RetrievalService, KnowledgeIngestionWorker, EvalService],
 })
 export class KnowledgeModule {}

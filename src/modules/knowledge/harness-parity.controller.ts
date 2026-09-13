@@ -122,6 +122,40 @@ export class HarnessParityController {
     return { run: await this.evalService.completeRun({ orgId, evalRunId, results: dto.results, actor: 'eval-worker' }) };
   }
 
+  // ── TPL-8.2 candidate promotion (reviewer/approver roles only) ─────────────
+
+  @Post('eval/datasets/:datasetId/candidates/:caseId/promote')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async promoteCandidate(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Param('caseId') caseId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    assertUuid(caseId, 'caseId');
+    return await this.evalService.promoteCandidateCase({ orgId, datasetId, caseId, actor: principal.id });
+  }
+
+  @Post('eval/datasets/:datasetId/candidates/:caseId/reject')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async rejectCandidate(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Param('caseId') caseId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    assertUuid(caseId, 'caseId');
+    return await this.evalService.rejectCandidateCase({ orgId, datasetId, caseId, actor: principal.id });
+  }
+
   // ── FL-2.24 analytics queries ─────────────────────────────────────────────
 
   /** FL-3.8 — retrieval recall@k over a dataset (live hybrid retrieval). */

@@ -1,4 +1,4 @@
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import { index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 
 /**
  * Assistants — the stable identity for an organization-branded assistant.
@@ -18,6 +18,10 @@ export const assistants = pgTable(
     description: varchar('description', { length: 512 }),
     /** FK to assistant_versions.id — null when no version has ever been published. */
     activeVersionId: uuid('active_version_id'),
+    /** TPL-6.3 kill flag — set blocks run acceptance; cleared resumes it. Audited. */
+    disabledAt: timestamp('disabled_at', { withTimezone: true, mode: 'string' }),
+    disabledBy: varchar('disabled_by', { length: 128 }),
+    disabledReason: varchar('disabled_reason', { length: 512 }),
     /** Retention class per engine_data_and_lifecycle.md:40 — Phase 9 wires the policy. */
     retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -117,6 +121,21 @@ export const policySnapshots = pgTable(
     budgetPolicy: jsonb('budget_policy'),
     /** Canonical hash of the policy set — equals the source version's `hash`. */
     hash: varchar('hash', { length: 64 }).notNull(),
+    /**
+     * TPL-5.2 — stored ToolBindings: each version tool_policy entry resolved
+     * against the org catalog AT PUBLISH (row id + version + schema hash +
+     * Neryva-owned capability class + approval mode + credential ref +
+     * timeout/retry/rate-limit). History, not live config.
+     */
+    toolBindings: jsonb('tool_bindings').notNull().default([]),
+    /** TPL-5.3 — knowledge source slugs pinned to immutable document_version ids + hashes. */
+    knowledgePins: jsonb('knowledge_pins'),
+    /** TPL-5.4 — resolved model aliases (provider/model + catalog config ref + entry hash). */
+    modelRef: jsonb('model_ref'),
+    /** TPL-5.5 — template provenance ({slug, version, definition_hash}) or null for manual assistants. */
+    templateRef: jsonb('template_ref'),
+    /** TPL-5.5 — canonical hash of the resolved set (bindings+pins+refs+policies). */
+    manifestHash: varchar('manifest_hash', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
   (t) => [
@@ -145,6 +164,14 @@ export const assistantRollouts = pgTable(
       .references(() => assistants.id, { onDelete: 'cascade' }),
     /** active | paused */
     state: varchar('state', { length: 16 }).notNull().default('active'),
+    /**
+     * TPL-6.2 — release addressability. Promotion is a pointer move over
+     * (environment, channel): prod stays while staging/canary move, and a
+     * dedicated channel pins one customer on an older version. Unique active
+     * row per (assistant, environment, channel).
+     */
+    environment: varchar('environment', { length: 32 }).notNull().default('production'),
+    channel: varchar('channel', { length: 32 }).notNull().default('default'),
     versions: jsonb('versions').notNull(),
     createdBy: varchar('created_by', { length: 128 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -152,6 +179,7 @@ export const assistantRollouts = pgTable(
   },
   (t) => [
     index('ix_rollouts_org_assistant').on(t.organizationId, t.assistantId),
+    index('ix_rollouts_org_assistant_env').on(t.organizationId, t.assistantId, t.environment, t.channel),
   ],
 );
 
@@ -161,11 +189,151 @@ export interface RolloutVariant {
   weight: number;
 }
 
+/**
+ * TPL-5.6 — Run manifests: per-run execution identity. Written in the
+ * run-acceptance TX beside the runs row (same atomic commit): snapshot +
+ * binding references + conversation/input-message/channel/release pointer.
+ * Light row — the heavy truth stays on the policy snapshot; the manifest
+ * answers "exactly what produced this outcome?" without joins.
+ */
+export const runManifests = pgTable(
+  'run_manifests',
+  {
+    // No TS-level .references(): conversations/schema.ts already imports this
+    // file, so a TS FK to runs would cycle. The SQL FK (ON DELETE CASCADE)
+    // is declared in drizzle/0049 and is the constraint authority.
+    runId: uuid('run_id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    assistantVersionId: uuid('assistant_version_id').notNull(),
+    policySnapshotId: uuid('policy_snapshot_id').notNull(),
+    manifest: jsonb('manifest').notNull(),
+    manifestHash: varchar('manifest_hash', { length: 64 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [index('ix_run_manifests_org_version').on(t.organizationId, t.assistantVersionId)],
+);
+
+export type RunManifest = typeof runManifests.$inferSelect;
+
 export const ASSISTANT_STATUSES = ['DRAFT', 'VALIDATING', 'VALID', 'PUBLISHED', 'RETIRED', 'ROLLED_BACK'] as const;
 export type AssistantStatus = (typeof ASSISTANT_STATUSES)[number];
 
 export const ASSISTANT_SCHEMA_VERSION = 2;
 export const POLICY_SNAPSHOT_SCHEMA_VERSION = 1;
+
+/**
+ * TPL-1.1 — Template registry mirror (drizzle/0048_assistant_templates.sql).
+ *
+ * GLOBAL seed data: no organization_id, no RLS (price_catalog posture).
+ * One row per released slug@version; rows arrive only via the §7.1
+ * release-job upsert of registry.json — never via DDL, never via API.
+ *
+ * `definition` is keyed EXACTLY as the Engine AssistantPayload
+ * ({model_policy, context_policy, tool_policy, knowledge_policy?,
+ * guardrail_policy, instructions?, model_params?, budget_policy?}) — the
+ * release job assembles it from the BOM files (model.json → model_policy,
+ * …, instructions.md → instructions), so install can validate + write it
+ * without remapping. `bindings` carries tools.required / knowledge /
+ * channels pins; `release_policy` is the release_policy.yaml content.
+ */
+export const assistantTemplates = pgTable(
+  'assistant_templates',
+  {
+    slug: varchar('slug', { length: 64 }).notNull(),
+    /** Semver release string (1.4.0); compared with the semver helper in the service — never ORDER BY in SQL. */
+    version: varchar('version', { length: 32 }).notNull(),
+    /** stable | beta | deprecated */
+    status: varchar('status', { length: 16 }).notNull(),
+    family: varchar('family', { length: 32 }).notNull(),
+    definition: jsonb('definition').notNull(),
+    bindings: jsonb('bindings').notNull().default({}),
+    evalRef: jsonb('eval_ref'),
+    releasePolicy: jsonb('release_policy').notNull(),
+    /** sha256 of the canonical definition/ bytes — tamper evidence for the sync job. */
+    hash: varchar('hash', { length: 64 }).notNull(),
+    minEngineSchema: integer('min_engine_schema').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: 'pk_assistant_templates_slug_version', columns: [t.slug, t.version] }),
+    index('ix_assistant_templates_status').on(t.status),
+    index('ix_assistant_templates_family').on(t.family),
+  ],
+);
+
+export type AssistantTemplate = typeof assistantTemplates.$inferSelect;
+
+export const TEMPLATE_STATUSES = ['stable', 'beta', 'deprecated'] as const;
+export type TemplateStatus = (typeof TEMPLATE_STATUSES)[number];
+
+/**
+ * TPL-1.1 — Per-org install record (drizzle/0048_assistant_templates.sql).
+ *
+ * Copy provenance, never a live link: installing clones the template
+ * definition into a fresh assistant + DRAFT version (TPL-2.2). Mutating the
+ * registry never mutates a customer's assistant (TemplateRelease ≠
+ * AssistantVersion). Tenant scope: organization_id RLS ENABLE + FORCE.
+ */
+export const assistantInstalls = pgTable(
+  'assistant_installs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id').notNull(),
+    slug: varchar('slug', { length: 64 }).notNull(),
+    templateVersion: varchar('template_version', { length: 32 }).notNull(),
+    assistantId: uuid('assistant_id')
+      .notNull()
+      .references(() => assistants.id, { onDelete: 'cascade' }),
+    installedBy: varchar('installed_by', { length: 128 }),
+    retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
+    installedAt: timestamp('installed_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_assistant_installs_assistant').on(t.assistantId),
+    index('ix_assistant_installs_org_slug').on(t.organizationId, t.slug, t.templateVersion),
+  ],
+);
+
+export type AssistantInstall = typeof assistantInstalls.$inferSelect;
+
+export const CONTROL_BLOCK_TARGETS = ['assistant', 'version', 'tool', 'template', 'capability'] as const;
+export type ControlBlockTarget = (typeof CONTROL_BLOCK_TARGETS)[number];
+
+/**
+ * TPL-6.4 — Operator control blocks (kill switches with expiry). A block is
+ * ACTIVE when `expires_at IS NULL OR expires_at > now()` — evaluated at
+ * check time, so no sweeper is needed and expiry needs no worker. Either
+ * state blocks: there is no "warn" for kill switches.
+ *
+ * Enforcement points (each documented at its call site):
+ *  assistant  → run acceptance refuses (in addition to assistants.disabled_at)
+ *  version    → release-pointer assignment refuses (in-flight runs stay pinned)
+ *  tool       → authorizeToolCall + context resolution + getToolCredential deny
+ *  template   → template install refuses (slug or slug@version match)
+ *  capability → authorizeToolCall refuses the 'tool' capability family
+ *               (terminal commits intentionally unsupported in v1: freezing
+ *               completions would strand runs mid-flight with no recovery —
+ *               freeze the effect path instead).
+ */
+export const controlBlocks = pgTable(
+  'control_blocks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id').notNull(),
+    targetType: varchar('target_type', { length: 32 }).notNull(),
+    targetName: varchar('target_name', { length: 128 }).notNull(),
+    reason: varchar('reason', { length: 512 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
+    createdBy: varchar('created_by', { length: 128 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [index('ix_control_blocks_org_target').on(t.organizationId, t.targetType, t.targetName)],
+);
+
+export type ControlBlock = typeof controlBlocks.$inferSelect;
 
 /**
  * v1.1 harness additions. `instructions` is required at publish time for

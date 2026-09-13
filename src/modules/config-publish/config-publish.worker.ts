@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
 import { env } from '../../common/config/env';
-import { QueueService } from '../../common/infra/queue.service';
+import { QueueService, bullQueueName } from '../../common/infra/queue.service';
 import { ConfigPublishService } from './config-publish.service';
 
 /**
@@ -37,7 +37,7 @@ export class ConfigPublishWorker implements OnModuleInit, OnModuleDestroy {
     await queue.add('config.retention', {}, { repeat: { pattern: '40 3 * * *' }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
 
     this.worker = new Worker(
-      'config:default',
+      bullQueueName('config'),
       async (job: Job) => {
         if (job.name === 'config.retention') {
           const result = await this.publish.retentionSweep();

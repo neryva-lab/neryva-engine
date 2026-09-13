@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { z } from 'zod';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
@@ -6,7 +7,12 @@ import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
 import { uuidv7 } from '../../common/ids/uuidv7';
-import { assistantVersions } from '../assistants/schema';
+import { canonicalHash } from '../../common/crypto/canonical-hash';
+import { assistantVersions, assistantInstalls, assistantTemplates, policySnapshots } from '../assistants/schema';
+import { toolCatalog } from '../assistants/tool-catalog.schema';
+import { BUILT_IN_TOOLS } from '../assistants/tool-catalog.service';
+import { validateAssistantPayload } from '../assistants/validation';
+import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { RetrievalService } from './retrieval.service';
 
 /**
@@ -50,6 +56,49 @@ export const evalResultsSchema = z.object({
     )
     .min(1)
     .max(2000),
+  /**
+   * TPL-7.3/7.4 — enriched worker report (all optional, additive: legacy
+   * workers posting bare cases keep working, with decisions degrading
+   * honestly — missing required checks BLOCK, missing threshold metrics WARN).
+   */
+  checks: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(128),
+        passed: z.boolean(),
+      }),
+    )
+    .max(100)
+    .optional(),
+  /** Critical-failure names that occurred (matched against the release policy list). */
+  critical_failures: z.array(z.string().min(1).max(128)).max(32).optional(),
+  evaluators: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(128),
+        version: z.string().min(1).max(32),
+      }),
+    )
+    .max(32)
+    .optional(),
+  model: z
+    .object({
+      provider: z.string().min(1).max(64),
+      model: z.string().min(1).max(128),
+    })
+    .optional(),
+  /** Threshold metrics; absent metrics degrade their threshold to WARN (never invented). */
+  metrics: z
+    .object({
+      task_success: z.number().min(0).max(1).optional(),
+      groundedness: z.number().min(0).max(1).optional(),
+      policy_compliance: z.number().min(0).max(1).optional(),
+    })
+    .optional(),
+  compiler_version: z.string().min(1).max(32).optional(),
+  seed: z.number().int().optional(),
+  /** Free-form worker half of the provenance (runner version, harness details). */
+  worker_provenance: z.record(z.string(), z.unknown()).optional(),
 });
 
 @Injectable()
@@ -60,6 +109,7 @@ export class EvalService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly retrieval: RetrievalService,
+    private readonly configPublish: ConfigPublishService,
   ) {}
 
   async createDataset(input: { orgId: string; name: string; description?: string; actor: string }): Promise<unknown> {
@@ -123,11 +173,124 @@ export class EvalService {
   }
 
   /**
+   * TPL-8.2 — human-gated failure promotion. Failing production traces become
+   * *candidate* eval cases FIRST (curators write them into a candidate
+   * dataset named `template:<slug>@<version>:candidates` — same tables, never
+   * auto-ingested, so prompt injection cannot write the test suite). A
+   * curator then promotes (copy into the real dataset) or rejects (delete):
+   *
+   *  - promote = copy with the next sequence + audit; the candidate row is
+   *    deleted after the copy (its lifecycle ends; the audit preserves it);
+   *  - only candidate datasets promote (name must start with `template:`
+   *    and end with `:candidates`), only into the sibling dataset with the
+   *    suffix stripped. Reviewer/approver roles own this surface.
+   */
+  async promoteCandidateCase(input: { orgId: string; datasetId: string; caseId: string; actor: string }): Promise<{ promoted_case_id: string }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    assertUuid(input.caseId, 'caseId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const source = await tx
+        .select()
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      const sourceDataset = source[0];
+      if (!sourceDataset) {
+        throw ApiError.notFound('eval dataset');
+      }
+      const targetName = targetDatasetName(sourceDataset.name);
+      if (!targetName) {
+        throw ApiError.validation({ dataset_id: 'only candidate datasets (template:<slug>@<version>:candidates) promote' });
+      }
+      const target = await tx
+        .select()
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.organizationId, input.orgId), eq(evalDatasets.name, targetName)))
+        .limit(1);
+      if (target.length === 0) {
+        throw ApiError.conflict('candidate target dataset does not exist', { target: targetName });
+      }
+      const cases = await tx
+        .select()
+        .from(evalCases)
+        .where(and(eq(evalCases.id, input.caseId), eq(evalCases.datasetId, input.datasetId), eq(evalCases.organizationId, input.orgId)))
+        .limit(1);
+      const candidate = cases[0];
+      if (!candidate) {
+        throw ApiError.notFound('eval case');
+      }
+      const next = await tx.execute(sql`
+        select coalesce(max(sequence), 0) + 1 as next from eval_cases where dataset_id = ${target[0].id}::uuid
+      `);
+      const sequence = Number((next.rows[0] as { next: number | string }).next);
+      const promotedId = uuidv7();
+      await tx.insert(evalCases).values({
+        id: promotedId,
+        organizationId: input.orgId,
+        datasetId: target[0].id,
+        input: candidate.input,
+        expected: candidate.expected,
+        rubric: candidate.rubric,
+        sequence,
+      });
+      await tx.delete(evalCases).where(eq(evalCases.id, input.caseId));
+      await this.audit.add({
+        action: 'eval.case_promoted',
+        resourceType: 'eval_dataset',
+        resourceId: target[0].id,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { from_dataset: sourceDataset.name, candidate_case_id: input.caseId, promoted_case_id: promotedId },
+      });
+      return { promoted_case_id: promotedId };
+    });
+  }
+
+  /** TPL-8.2 — reject a candidate case (audited delete; the trace stays in run_judgments). */
+  async rejectCandidateCase(input: { orgId: string; datasetId: string; caseId: string; actor: string }): Promise<{ ok: true }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    assertUuid(input.caseId, 'caseId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const source = await tx
+        .select()
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      if (source.length === 0) {
+        throw ApiError.notFound('eval dataset');
+      }
+      if (!targetDatasetName(source[0].name)) {
+        throw ApiError.validation({ dataset_id: 'only candidate datasets (template:<slug>@<version>:candidates) reject' });
+      }
+      const deleted = await tx
+        .delete(evalCases)
+        .where(and(eq(evalCases.id, input.caseId), eq(evalCases.datasetId, input.datasetId), eq(evalCases.organizationId, input.orgId)))
+        .returning({ id: evalCases.id });
+      if (deleted.length === 0) {
+        throw ApiError.notFound('eval case');
+      }
+      await this.audit.add({
+        action: 'eval.case_rejected',
+        resourceType: 'eval_dataset',
+        resourceId: input.datasetId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { candidate_case_id: input.caseId },
+      });
+      return { ok: true };
+    });
+  }
+
+  /**
    * Start an eval run: pins the assistant version, stores the case snapshot
    * count and emits `eval.run_requested` on the outbox (invariant 7) — the
    * Studio eval-worker consumes execution through its own transport.
    */
-  async startRun(input: { orgId: string; datasetId: string; assistantVersionId: string; attemptsPerCase: number; actor: string }): Promise<unknown> {
+  async startRun(input: { orgId: string; datasetId: string; assistantVersionId: string; attemptsPerCase: number; actor: string; environment?: string }): Promise<unknown> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.datasetId, 'datasetId');
     assertUuid(input.assistantVersionId, 'assistantVersionId');
@@ -141,6 +304,17 @@ export class EvalService {
         .limit(1);
       if (version.length === 0 || version[0].status !== 'PUBLISHED') {
         throw ApiError.validation({ assistant_version_id: 'must be a PUBLISHED version of this org' });
+      }
+      // Fail-closed dataset scope: a version may only run against its own
+      // org's dataset (previously unchecked — cross-org dataset reference
+      // would leak case content into another org's eval trail).
+      const dataset = await tx
+        .select({ id: evalDatasets.id })
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      if (dataset.length === 0) {
+        throw ApiError.notFound('eval dataset');
       }
       const rows = await tx
         .insert(evalRuns)
@@ -160,7 +334,13 @@ export class EvalService {
         organizationId: input.orgId,
         eventType: 'eval.run_requested',
         partitionKey: input.datasetId,
-        payload: { eval_run_id: id, dataset_id: input.datasetId, assistant_version_id: input.assistantVersionId, attempts_per_case: attempts },
+        payload: {
+          eval_run_id: id,
+          dataset_id: input.datasetId,
+          assistant_version_id: input.assistantVersionId,
+          attempts_per_case: attempts,
+          ...(input.environment ? { environment: input.environment } : {}),
+        },
       });
       return rows[0];
     });
@@ -186,16 +366,320 @@ export class EvalService {
     const passed = parsed.cases.filter((c) => c.passed).length;
     const score = total === 0 ? 0 : passed / total;
     return this.db.withOrg(input.orgId, async (tx) => {
+      const runRows = await tx
+        .select()
+        .from(evalRuns)
+        .where(and(eq(evalRuns.organizationId, input.orgId), eq(evalRuns.id, input.evalRunId)))
+        .limit(1);
+      const run = runRows[0];
+      if (!run) {
+        throw ApiError.notFound('eval run');
+      }
+      if (run.state !== 'pending' && run.state !== 'running') {
+        throw ApiError.conflict('eval run is not in an open state');
+      }
+      const versionRows = await tx.select().from(assistantVersions).where(eq(assistantVersions.id, run.assistantVersionId)).limit(1);
+      const version = versionRows[0];
+      if (!version) {
+        throw ApiError.conflict('eval run references a missing assistant version');
+      }
+      const datasetRows = await tx.select().from(evalDatasets).where(eq(evalDatasets.id, run.datasetId)).limit(1);
+      const dataset = datasetRows[0] ?? null;
+
+      // Template linkage: seeded datasets are named template:<slug>@<version>.
+      const template = await this.resolveTemplatePolicy(tx, input.orgId, version.assistantId);
+      const policy = (template?.releasePolicy ?? null) as {
+        release_policy_version?: unknown;
+        required?: unknown;
+        thresholds?: unknown;
+        critical_failures?: unknown;
+        regression_no_worse_than?: unknown;
+      } | null;
+      const requiredChecks = Array.isArray(policy?.required) ? (policy?.required as unknown[]) : [];
+      const thresholds = (policy?.thresholds ?? {}) as { task_success?: number; groundedness?: number; policy_compliance?: number };
+      const criticalList = Array.isArray(policy?.critical_failures) ? (policy?.critical_failures as string[]) : [];
+
+      // ── Engine-verifiable required checks (never delegated to the worker) ──
+      const engineChecks = new Map<string, boolean>();
+      engineChecks.set(
+        'schema_valid',
+        validateAssistantPayload({
+          model_policy: version.modelPolicy,
+          context_policy: version.contextPolicy,
+          tool_policy: version.toolPolicy,
+          knowledge_policy: version.knowledgePolicy,
+          guardrail_policy: version.guardrailPolicy,
+          instructions: version.instructions ?? undefined,
+          model_params: version.modelParams ?? undefined,
+          budget_policy: version.budgetPolicy ?? undefined,
+        }).ok,
+      );
+      engineChecks.set('tool_authorization_pass', await this.verifyToolPinsLive(tx, input.orgId, version.toolPolicy));
+      const workerChecks = new Map((parsed.checks ?? []).map((c) => [c.name, c.passed]));
+
+      // ── Decision (TPL-7.3/7.4 + §4.4 model) ──
+      const blockReasons: string[] = [];
+      const warnings: string[] = [];
+      // 1. Critical failures: worker-reported occurrence ∩ policy list.
+      const occurred = new Set(parsed.critical_failures ?? []);
+      for (const critical of criticalList) {
+        if (occurred.has(critical)) {
+          blockReasons.push(`critical failure: ${critical}`);
+        }
+      }
+      // 2. Required checks: engine verdict wins for engine-verifiable names,
+      //    worker verdict otherwise. A required check nobody evaluated BLOCKS
+      //    (fail-closed: unverified safety is not safety).
+      for (const required of requiredChecks) {
+        if (typeof required === 'object' && required !== null) {
+          continue; // handled as regression below
+        }
+        if (typeof required !== 'string') {
+          continue;
+        }
+        if (engineChecks.has(required)) {
+          if (!engineChecks.get(required)) {
+            blockReasons.push(`required check failed: ${required}`);
+          }
+          continue;
+        }
+        if (!workerChecks.has(required)) {
+          blockReasons.push(`required check unevaluated: ${required}`);
+          continue;
+        }
+        if (!workerChecks.get(required)) {
+          blockReasons.push(`required check failed: ${required}`);
+        }
+      }
+      // 3. Regression (TPL-7.5): previous PUBLISHED version's latest completed
+      //    run on the SAME dataset. Breach of the required bound BLOCKs.
+      const regressionBound =
+        typeof policy?.regression_no_worse_than === 'number'
+          ? policy.regression_no_worse_than
+          : (requiredChecks.find((r) => typeof r === 'object' && r !== null && 'regression_no_worse_than' in (r as Record<string, unknown>)) as
+              | { regression_no_worse_than?: unknown }
+              | undefined)?.regression_no_worse_than;
+      if (typeof regressionBound === 'number') {
+        const previous = await tx
+          .select({ id: assistantVersions.id })
+          .from(assistantVersions)
+          .where(and(eq(assistantVersions.assistantId, version.assistantId), eq(assistantVersions.status, 'PUBLISHED'), sql`${assistantVersions.version} < ${version.version}`))
+          .orderBy(desc(assistantVersions.version))
+          .limit(1);
+        if (previous.length > 0) {
+          const prevRuns = await tx
+            .select({ score: evalRuns.score })
+            .from(evalRuns)
+            .where(
+              and(
+                eq(evalRuns.organizationId, input.orgId),
+                eq(evalRuns.assistantVersionId, previous[0].id),
+                eq(evalRuns.datasetId, run.datasetId),
+                eq(evalRuns.state, 'completed'),
+              ),
+            )
+            .orderBy(desc(evalRuns.finishedAt))
+            .limit(1);
+          if (prevRuns.length > 0 && prevRuns[0].score !== null) {
+            const delta = Number(prevRuns[0].score) - score;
+            if (delta > regressionBound) {
+              blockReasons.push(`regression ${delta.toFixed(4)} exceeds bound ${regressionBound} (previous score ${prevRuns[0].score})`);
+            }
+          }
+        }
+      }
+      // 4. Thresholds: task_success defaults to the aggregate score BY
+      //    DEFINITION (mean case score); groundedness/policy_compliance with
+      //    no worker metric are recorded unevaluated → WARN, never invented.
+      const metrics = parsed.metrics ?? {};
+      const evaluatedMetrics: Record<string, number | null> = {
+        task_success: metrics.task_success ?? score,
+        groundedness: metrics.groundedness ?? null,
+        policy_compliance: metrics.policy_compliance ?? null,
+      };
+      for (const [name, bar] of Object.entries(thresholds)) {
+        const value = evaluatedMetrics[name];
+        if (value === null || value === undefined) {
+          warnings.push(`threshold ${name} unevaluated (no worker metric)`);
+        } else if (value < (bar as number)) {
+          warnings.push(`threshold ${name} ${value} below bar ${bar}`);
+        }
+      }
+      const decision = blockReasons.length > 0 ? 'BLOCK' : warnings.length > 0 ? 'WARN' : 'PASS';
+
+      // ── Provenance (TPL-7.4 — everything a replayer needs, no scalars alone) ──
+      const provenance = await this.assembleProvenance(tx, input.orgId, {
+        run,
+        version,
+        dataset,
+        template,
+        parsed,
+        score,
+        evaluatedMetrics,
+        blockReasons,
+        warnings,
+      });
+
       const rows = await tx
         .update(evalRuns)
-        .set({ state: 'completed', results: parsed, score: score.toFixed(4), finishedAt: new Date().toISOString() })
+        .set({
+          state: 'completed',
+          results: parsed,
+          score: score.toFixed(4),
+          provenance,
+          decision,
+          releasePolicyVersion:
+            typeof template?.releasePolicyVersion === 'number' ? template.releasePolicyVersion : null,
+          finishedAt: new Date().toISOString(),
+        })
         .where(and(eq(evalRuns.organizationId, input.orgId), eq(evalRuns.id, input.evalRunId), sql`state in ('pending','running')`))
         .returning();
       if (rows.length === 0) {
         throw ApiError.conflict('eval run is not in an open state');
       }
+      await this.audit.add({
+        action: template ? 'template.version_evaluated' : 'eval.run_completed',
+        resourceType: 'assistant_version',
+        resourceId: version.id,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: {
+          eval_run_id: input.evalRunId,
+          decision,
+          score: Number(score.toFixed(4)),
+          ...(template ? { template_slug: template.slug, template_version: template.version } : {}),
+          block_reasons: blockReasons,
+          warnings,
+        },
+      });
       return rows[0];
     });
+  }
+
+  /** Template linkage for a version: installs row → registry row + release policy. */
+  private async resolveTemplatePolicy(
+    tx: NodePgDatabase,
+    orgId: string,
+    assistantId: string,
+  ): Promise<{ slug: string; version: string; definitionHash: string | null; releasePolicy: unknown; releasePolicyVersion: number | null } | null> {
+    const installs = await tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1);
+    const install = installs[0];
+    if (!install || install.organizationId !== orgId) {
+      return null;
+    }
+    const templates = await tx
+      .select()
+      .from(assistantTemplates)
+      .where(and(eq(assistantTemplates.slug, install.slug), eq(assistantTemplates.version, install.templateVersion)))
+      .limit(1);
+    const template = templates[0];
+    if (!template) {
+      return { slug: install.slug, version: install.templateVersion, definitionHash: null, releasePolicy: null, releasePolicyVersion: null };
+    }
+    const policy = (template.releasePolicy ?? {}) as { release_policy_version?: unknown };
+    return {
+      slug: template.slug,
+      version: template.version,
+      definitionHash: template.hash,
+      releasePolicy: template.releasePolicy,
+      releasePolicyVersion: typeof policy.release_policy_version === 'number' ? policy.release_policy_version : null,
+    };
+  }
+
+  /** Engine-side tool pin verification (never delegated): every non-built-in
+   *  version entry resolves to an ENABLED catalog row with matching hash. */
+  private async verifyToolPinsLive(tx: NodePgDatabase, orgId: string, toolPolicy: unknown): Promise<boolean> {
+    const tools = (toolPolicy as { tools?: Array<{ name?: string; schema_hash?: string }> } | null)?.tools ?? [];
+    const names = tools.map((t) => t?.name).filter((n): n is string => typeof n === 'string' && n.length > 0 && !BUILT_IN_TOOLS.has(n));
+    if (names.length === 0) {
+      return true;
+    }
+    const rows = await tx
+      .select({ name: toolCatalog.name, hash: toolCatalog.hash, enabled: toolCatalog.enabled })
+      .from(toolCatalog)
+      .where(eq(toolCatalog.organizationId, orgId));
+    const byName = new Map(rows.map((r) => [r.name, r]));
+    return names.every((name) => {
+      const row = byName.get(name);
+      if (!row || !row.enabled) {
+        return false;
+      }
+      const entry = tools.find((t) => t?.name === name);
+      return entry?.schema_hash === undefined || entry.schema_hash === row.hash;
+    });
+  }
+
+  /** Dataset content hash at run time — the reproducibility anchor. */
+  private async hashDatasetCases(tx: NodePgDatabase, orgId: string, datasetId: string): Promise<string> {
+    const cases = await tx
+      .select({ input: evalCases.input, expected: evalCases.expected, rubric: evalCases.rubric, sequence: evalCases.sequence })
+      .from(evalCases)
+      .where(and(eq(evalCases.organizationId, orgId), eq(evalCases.datasetId, datasetId)))
+      .orderBy(asc(evalCases.sequence));
+    return canonicalHash(cases);
+  }
+
+  private async assembleProvenance(
+    tx: NodePgDatabase,
+    orgId: string,
+    input: {
+      run: { id: string; datasetId: string; attemptsPerCase: number };
+      version: { id: string; assistantId: string };
+      dataset: { id: string; name: string } | null;
+      template: { slug: string; version: string; definitionHash: string | null } | null;
+      parsed: {
+        evaluators?: Array<{ name: string; version: string }>;
+        model?: { provider: string; model: string };
+        compiler_version?: string;
+        seed?: number;
+        worker_provenance?: Record<string, unknown>;
+      };
+      score: number;
+      evaluatedMetrics: Record<string, number | null>;
+      blockReasons: string[];
+      warnings: string[];
+    },
+  ): Promise<Record<string, unknown>> {
+    const catalogRows = await tx
+      .select({ name: toolCatalog.name, version: toolCatalog.version, hash: toolCatalog.hash, enabled: toolCatalog.enabled })
+      .from(toolCatalog)
+      .where(eq(toolCatalog.organizationId, orgId));
+    const snapshotRows = await tx.select().from(policySnapshots).where(eq(policySnapshots.assistantVersionId, input.version.id)).limit(1);
+    const snapshot = snapshotRows[0] ?? null;
+    let modelCatalogMatch: Record<string, unknown> | null = null;
+    if (input.parsed.model) {
+      try {
+        const latest = await this.configPublish.latest(orgId, 'model_catalog', null);
+        const models = ((latest?.payload ?? null) as { models?: Array<{ provider: string; model: string; enabled: boolean }> } | null)?.models ?? [];
+        const entry = models.find((m) => m.provider === input.parsed.model?.provider && m.model === input.parsed.model?.model) ?? null;
+        modelCatalogMatch = {
+          claimed: input.parsed.model,
+          catalog_config_present: latest !== null && latest !== undefined,
+          entry_hash: entry ? canonicalHash(entry) : null,
+          catalog_enabled: entry?.enabled ?? null,
+        };
+      } catch {
+        modelCatalogMatch = { claimed: input.parsed.model, catalog_config_present: false, entry_hash: null, catalog_enabled: null };
+      }
+    }
+    return {
+      template: input.template ? { slug: input.template.slug, version: input.template.version, definition_hash: input.template.definitionHash } : null,
+      dataset: input.dataset ? { id: input.dataset.id, name: input.dataset.name, content_hash: await this.hashDatasetCases(tx, orgId, input.dataset.id) } : null,
+      evaluators: input.parsed.evaluators ?? null,
+      model: modelCatalogMatch,
+      tool_catalog_hash: canonicalHash(catalogRows.filter((r) => r.enabled)),
+      knowledge_pins: (snapshot?.knowledgePins ?? null) as unknown,
+      guardrail_ref: snapshot?.hash ?? null,
+      compiler_version: input.parsed.compiler_version ?? null,
+      environment: null,
+      seed: input.parsed.seed ?? null,
+      attempts_per_case: input.run.attemptsPerCase,
+      worker_provenance: input.parsed.worker_provenance ?? null,
+      evaluated_metrics: input.evaluatedMetrics,
+      block_reasons: input.blockReasons,
+      warnings: input.warnings,
+    };
   }
 
   /**
@@ -252,6 +736,19 @@ function assertUuid(id: string, field: string): void {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
     throw ApiError.validation({ [field]: 'must be a uuid' });
   }
+}
+
+/**
+ * TPL-8.2 — candidate dataset convention. `template:<slug>@<version>:candidates`
+ * holds curator-written candidates; stripping the suffix yields the dataset
+ * they promote into. Anything else returns null (not a candidate dataset).
+ */
+function targetDatasetName(name: string): string | null {
+  if (!name.startsWith('template:') || !name.endsWith(':candidates')) {
+    return null;
+  }
+  const target = name.slice(0, -':candidates'.length);
+  return target.length > 'template:'.length ? target : null;
 }
 
 // table imports (bottom to avoid partial-init ordering issues in editor views)

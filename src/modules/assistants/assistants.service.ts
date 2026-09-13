@@ -9,13 +9,18 @@ import {
   assistants,
   assistantVersions,
   policySnapshots,
+  assistantInstalls,
   Assistant,
   AssistantVersion,
   PolicySnapshot,
   AssistantVersionExport,
   POLICY_SNAPSHOT_SCHEMA_VERSION,
 } from './schema';
-import { validateAssistantPayload, assertPublishable, assistantPayloadSchema, AssistantPayload } from './validation';
+import { validateAssistantPayload, assertPublishable, assistantPayloadSchema, rejectUnknownPayloadKeys, AssistantPayload } from './validation';
+import { TemplatesService } from './templates.service';
+import { ManifestResolutionService } from './manifest-resolution.service';
+import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
+import { EvalService } from '../knowledge/eval.service';
 import { toolCatalog } from './tool-catalog.schema';
 import { BUILT_IN_TOOLS } from './tool-catalog.service';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
@@ -43,24 +48,137 @@ export class AssistantsService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly configPublish: ConfigPublishService,
+    private readonly templates: TemplatesService,
+    private readonly manifests: ManifestResolutionService,
+    private readonly evals: EvalService,
   ) {}
 
   // ── Assistants (identity) ────────────────────────────────────────────────
 
-  async create(input: { orgId: string; name: string; description?: string | null; createdBy: string }): Promise<Assistant> {
+  /**
+   * TPL-2.1 — three modes, one route. Name-only keeps back-compat; `template`
+   * installs a registry template (copy into assistant + DRAFT version +
+   * install record + provisioning outbox, atomically); `definition` lands a
+   * full Engine-subset payload (assistant + DRAFT version, atomically).
+   * `template` and `definition` together are a 422 — install is copy from
+   * exactly one source.
+   *
+   * Consumer contract (plan §7.3 item 3): the response carries the assistant
+   * PLUS the install provenance — version_id, `slug@version` (template path
+   * only), and the content hash — so a client never needs a second read to
+   * know what landed.
+   */
+  async create(input: {
+    orgId: string;
+    name: string;
+    description?: string | null;
+    createdBy: string;
+    template?: { slug: string; version?: string };
+    definition?: Record<string, unknown>;
+  }): Promise<{ assistant: Assistant; version_id: string | null; template: string | null; hash: string | null }> {
     assertOrgId(input.orgId);
     assertName(input.name);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(assistants)
-        .values({
-          organizationId: input.orgId,
-          name: input.name.trim(),
-          description: input.description?.trim() ?? null,
-        })
-        .returning(),
-    );
-    const row = rows[0];
+    if (input.template && input.definition) {
+      throw ApiError.validation({ template: 'template and definition are mutually exclusive — install copies from exactly one source' });
+    }
+    if (input.template) {
+      const installed = await this.templates.install({
+        orgId: input.orgId,
+        slug: input.template.slug,
+        version: input.template.version,
+        name: input.name,
+        actorId: input.createdBy,
+      });
+      return {
+        assistant: installed.assistant,
+        version_id: installed.version.id,
+        template: `${installed.install.slug}@${installed.install.templateVersion}`,
+        hash: installed.version.hash,
+      };
+    }
+    if (input.definition) {
+      const normalized = rejectUnknownPayloadKeys(input.definition);
+      const validated = validateAssistantPayload(normalized);
+      if (!validated.ok) {
+        throw ApiError.validation({ assistant: validated.issues });
+      }
+      const hash = hashPayload(validated.normalized);
+      // One transaction: assistant identity + DRAFT version commit together —
+      // a failed version insert must never leave a versionless assistant.
+      let assistant: Assistant;
+      let versionId: string;
+      try {
+        const created = await this.db.withOrg(input.orgId, async (tx) => {
+          const assistantRows = await tx
+            .insert(assistants)
+            .values({
+              organizationId: input.orgId,
+              name: input.name.trim(),
+              description: input.description?.trim() ?? null,
+            })
+            .returning();
+          const versionRows = await tx
+            .insert(assistantVersions)
+            .values({
+              assistantId: assistantRows[0].id,
+              organizationId: input.orgId,
+              version: 0, // sentinel for DRAFT — publish assigns monotonic version
+              status: 'DRAFT',
+              modelPolicy: validated.normalized.model_policy,
+              contextPolicy: validated.normalized.context_policy,
+              toolPolicy: validated.normalized.tool_policy,
+              knowledgePolicy: validated.normalized.knowledge_policy ?? null,
+              guardrailPolicy: validated.normalized.guardrail_policy,
+              instructions: validated.normalized.instructions ?? null,
+              modelParams: validated.normalized.model_params ?? null,
+              budgetPolicy: validated.normalized.budget_policy ?? null,
+              hash,
+            })
+            .returning({ id: assistantVersions.id });
+          return { assistant: assistantRows[0], versionId: versionRows[0].id };
+        });
+        assistant = created.assistant;
+        versionId = created.versionId;
+      } catch (err) {
+        if (err instanceof ApiError) throw err;
+        throw mapAssistantUniqueViolation(err, input.name);
+      }
+      await this.audit.add({
+        action: 'assistant.created',
+        resourceType: 'assistant',
+        resourceId: assistant.id,
+        actorType: 'account',
+        actorId: input.createdBy,
+        tenantId: input.orgId,
+        details: { name: assistant.name, from: 'definition' },
+      });
+      await this.audit.add({
+        action: 'assistant.version_drafted',
+        resourceType: 'assistant_version',
+        resourceId: versionId,
+        actorType: 'account',
+        actorId: input.createdBy,
+        tenantId: input.orgId,
+        details: { assistant_id: assistant.id, hash: hash.slice(0, 16) },
+      });
+      return { assistant, version_id: versionId, template: null, hash };
+    }
+    let row: Assistant;
+    try {
+      const rows = await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .insert(assistants)
+          .values({
+            organizationId: input.orgId,
+            name: input.name.trim(),
+            description: input.description?.trim() ?? null,
+          })
+          .returning(),
+      );
+      row = rows[0];
+    } catch (err) {
+      throw mapAssistantUniqueViolation(err, input.name);
+    }
     await this.audit.add({
       action: 'assistant.created',
       resourceType: 'assistant',
@@ -70,7 +188,7 @@ export class AssistantsService {
       tenantId: input.orgId,
       details: { name: row.name },
     });
-    return row;
+    return { assistant: row, version_id: null, template: null, hash: null };
   }
 
   async get(orgId: string, assistantId: string): Promise<Assistant | null> {
@@ -131,6 +249,45 @@ export class AssistantsService {
 
   // ── Versions ─────────────────────────────────────────────────────────────
 
+  /**
+   * TPL-6.3 — assistant kill flag. Set blocks run acceptance for the whole
+   * assistant (in-flight runs fail closed at their next tool authorization);
+   * cleared resumes it. Both transitions audited. Idempotent.
+   */
+  async setDisabled(input: { orgId: string; assistantId: string; disabled: boolean; reason?: string; actorId: string }): Promise<Assistant> {
+    assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    const rows = await this.db.withOrg(input.orgId, (tx) =>
+      tx
+        .update(assistants)
+        .set(
+          input.disabled
+            ? {
+                disabledAt: new Date().toISOString(),
+                disabledBy: input.actorId.slice(0, 128),
+                disabledReason: (input.reason ?? 'operator kill switch').slice(0, 512),
+                updatedAt: new Date().toISOString(),
+              }
+            : { disabledAt: null, disabledBy: null, disabledReason: null, updatedAt: new Date().toISOString() },
+        )
+        .where(eq(assistants.id, input.assistantId))
+        .returning(),
+    );
+    if (rows.length === 0) {
+      throw ApiError.notFound('assistant');
+    }
+    await this.audit.add({
+      action: input.disabled ? 'assistant.disabled' : 'assistant.enabled',
+      resourceType: 'assistant',
+      resourceId: input.assistantId,
+      actorType: 'account',
+      actorId: input.actorId,
+      tenantId: input.orgId,
+      details: input.disabled ? { reason: rows[0].disabledReason } : {},
+    });
+    return rows[0];
+  }
+
   async createVersion(input: {
     orgId: string;
     assistantId: string;
@@ -148,28 +305,36 @@ export class AssistantsService {
     }
     const hash = hashPayload(validated.normalized);
 
-    // DRAFT is always a new row; version is assigned only on publish.
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(assistantVersions)
-        .values({
-          assistantId: input.assistantId,
-          organizationId: input.orgId,
-          version: 0, // sentinel for DRAFT — publish assigns monotonic version
-          status: 'DRAFT',
-          modelPolicy: validated.normalized.model_policy,
-          contextPolicy: validated.normalized.context_policy,
-          toolPolicy: validated.normalized.tool_policy,
-          knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-          guardrailPolicy: validated.normalized.guardrail_policy,
-          instructions: validated.normalized.instructions ?? null,
-          modelParams: validated.normalized.model_params ?? null,
-          budgetPolicy: validated.normalized.budget_policy ?? null,
-          hash,
-        })
-        .returning(),
-    );
-    const row = rows[0];
+    // DRAFT is always a new row; version is assigned only on publish. The
+    // (assistant_id, version=0) sentinel is unique — a second draft before
+    // the first is published surfaces as a typed 409, never a raw 23505.
+    let row: AssistantVersion;
+    try {
+      const rows = await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .insert(assistantVersions)
+          .values({
+            assistantId: input.assistantId,
+            organizationId: input.orgId,
+            version: 0, // sentinel for DRAFT — publish assigns monotonic version
+            status: 'DRAFT',
+            modelPolicy: validated.normalized.model_policy,
+            contextPolicy: validated.normalized.context_policy,
+            toolPolicy: validated.normalized.tool_policy,
+            knowledgePolicy: validated.normalized.knowledge_policy ?? null,
+            guardrailPolicy: validated.normalized.guardrail_policy,
+            instructions: validated.normalized.instructions ?? null,
+            modelParams: validated.normalized.model_params ?? null,
+            budgetPolicy: validated.normalized.budget_policy ?? null,
+            hash,
+          })
+          .returning(),
+      );
+      row = rows[0];
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw mapAssistantUniqueViolation(err, '');
+    }
     await this.audit.add({
       action: 'assistant.version_drafted',
       resourceType: 'assistant_version',
@@ -221,13 +386,19 @@ export class AssistantsService {
     if (!['DRAFT', 'VALID', 'VALIDATING'].includes(draft.status)) {
       throw ApiError.validation({ status: `version status ${draft.status} cannot be published` });
     }
-    // Re-validate before publish — domain invariants must hold at publish time.
+    // Re-validate the FULL draft row — instructions/model_params/budget live
+    // on the version row, not just the policy columns. (A policies-only
+    // rebuild silently drops the prompt and can never satisfy
+    // assertPublishable — that path is why every publish must start here.)
     const payload: AssistantPayload = {
       model_policy: draft.modelPolicy as AssistantPayload['model_policy'],
       context_policy: draft.contextPolicy as AssistantPayload['context_policy'],
       tool_policy: draft.toolPolicy as AssistantPayload['tool_policy'],
       knowledge_policy: draft.knowledgePolicy as AssistantPayload['knowledge_policy'],
       guardrail_policy: draft.guardrailPolicy as AssistantPayload['guardrail_policy'],
+      instructions: (draft.instructions ?? undefined) as AssistantPayload['instructions'],
+      model_params: (draft.modelParams ?? undefined) as AssistantPayload['model_params'],
+      budget_policy: (draft.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
     };
     const validated = validateAssistantPayload(payload);
     if (!validated.ok) {
@@ -255,51 +426,15 @@ export class AssistantsService {
         .limit(1);
       const nextVersion = Math.max(latest[0]?.version ?? 0, maxAll[0]?.version ?? 0) + 1;
 
-      const hash = hashPayload(validated.normalized);
-      await this.rejectNoOpPublish(tx, input.assistantId, hash);
-      const rows = await tx
-        .insert(assistantVersions)
-        .values({
-          assistantId: input.assistantId,
-          organizationId: input.orgId,
-          version: nextVersion,
-          schemaVersion: draft.schemaVersion,
-          status: 'PUBLISHED',
-          modelPolicy: validated.normalized.model_policy,
-          contextPolicy: validated.normalized.context_policy,
-          toolPolicy: validated.normalized.tool_policy,
-          knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-          guardrailPolicy: validated.normalized.guardrail_policy,
-          instructions: validated.normalized.instructions ?? null,
-          modelParams: validated.normalized.model_params ?? null,
-          budgetPolicy: validated.normalized.budget_policy ?? null,
-          hash,
-          publishedAt: new Date().toISOString(),
-          publishedBy: input.publishedBy,
-        })
-        .returning();
-      const inserted = rows[0];
-
-      // Snapshot materialized in the same TX as publish — the pinning
-      // authority Phase 4 runs will reference (pinned decision, ledger 3.1).
-      await tx.insert(policySnapshots).values({
-        organizationId: input.orgId,
-        assistantVersionId: inserted.id,
-        snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
-        modelPolicy: validated.normalized.model_policy,
-        contextPolicy: validated.normalized.context_policy,
-        toolPolicy: validated.normalized.tool_policy,
-        guardrailPolicy: validated.normalized.guardrail_policy,
-        knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-        instructions: validated.normalized.instructions ?? null,
-        modelParams: validated.normalized.model_params ?? null,
-        budgetPolicy: validated.normalized.budget_policy ?? null,
-        hash,
+      return this.insertPublishedVersion(tx, {
+        orgId: input.orgId,
+        assistantId: input.assistantId,
+        version: nextVersion,
+        schemaVersion: draft.schemaVersion,
+        normalized: validated.normalized,
+        publishedBy: input.publishedBy,
+        rollbackOf: null,
       });
-
-      await tx.update(assistants).set({ activeVersionId: inserted.id, updatedAt: new Date().toISOString() }).where(eq(assistants.id, input.assistantId));
-
-      return inserted;
     });
 
     await this.audit.add({
@@ -380,13 +515,18 @@ export class AssistantsService {
     if (target.status === 'DRAFT') {
       throw ApiError.validation({ rollback: 'cannot rollback to a DRAFT' });
     }
-    // Rollback = NEW PUBLISHED version restoring target's payload.
+    // Rollback = NEW PUBLISHED version restoring target's payload (full row —
+    // same always-throw trap as publish: instructions/model_params/budget
+    // live on the version row and must round-trip, or rollback 500s).
     const payload: AssistantPayload = {
       model_policy: target.modelPolicy as AssistantPayload['model_policy'],
       context_policy: target.contextPolicy as AssistantPayload['context_policy'],
       tool_policy: target.toolPolicy as AssistantPayload['tool_policy'],
       knowledge_policy: target.knowledgePolicy as AssistantPayload['knowledge_policy'],
       guardrail_policy: target.guardrailPolicy as AssistantPayload['guardrail_policy'],
+      instructions: (target.instructions ?? undefined) as AssistantPayload['instructions'],
+      model_params: (target.modelParams ?? undefined) as AssistantPayload['model_params'],
+      budget_policy: (target.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
     };
     const validated = validateAssistantPayload(payload);
     if (!validated.ok) {
@@ -404,47 +544,15 @@ export class AssistantsService {
         .orderBy(desc(assistantVersions.version))
         .limit(1);
       const nextVersion = (maxAll[0]?.version ?? 0) + 1;
-      const hash = hashPayload(validated.normalized);
-      await this.rejectNoOpPublish(tx, input.assistantId, hash);
-      const rows = await tx
-        .insert(assistantVersions)
-        .values({
-          assistantId: input.assistantId,
-          organizationId: input.orgId,
-          version: nextVersion,
-          schemaVersion: target.schemaVersion,
-          status: 'PUBLISHED',
-          modelPolicy: validated.normalized.model_policy,
-          contextPolicy: validated.normalized.context_policy,
-          toolPolicy: validated.normalized.tool_policy,
-          knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-          guardrailPolicy: validated.normalized.guardrail_policy,
-          instructions: validated.normalized.instructions ?? null,
-          modelParams: validated.normalized.model_params ?? null,
-          budgetPolicy: validated.normalized.budget_policy ?? null,
-          rollbackOf: target.id,
-          hash,
-          publishedAt: new Date().toISOString(),
-          publishedBy: input.publishedBy,
-        })
-        .returning();
-      const inserted = rows[0];
-      await tx.insert(policySnapshots).values({
-        organizationId: input.orgId,
-        assistantVersionId: inserted.id,
-        snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
-        modelPolicy: validated.normalized.model_policy,
-        contextPolicy: validated.normalized.context_policy,
-        toolPolicy: validated.normalized.tool_policy,
-        guardrailPolicy: validated.normalized.guardrail_policy,
-        knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-        instructions: validated.normalized.instructions ?? null,
-        modelParams: validated.normalized.model_params ?? null,
-        budgetPolicy: validated.normalized.budget_policy ?? null,
-        hash,
+      return this.insertPublishedVersion(tx, {
+        orgId: input.orgId,
+        assistantId: input.assistantId,
+        version: nextVersion,
+        schemaVersion: target.schemaVersion,
+        normalized: validated.normalized,
+        publishedBy: input.publishedBy,
+        rollbackOf: target.id,
       });
-      await tx.update(assistants).set({ activeVersionId: inserted.id, updatedAt: new Date().toISOString() }).where(eq(assistants.id, input.assistantId));
-      return inserted;
     });
     await this.audit.add({
       action: 'assistant.rolled_back',
@@ -485,6 +593,118 @@ export class AssistantsService {
       const rows = await tx.select().from(policySnapshots).where(eq(policySnapshots.assistantVersionId, versionId)).limit(1);
       return rows[0] ?? null;
     });
+  }
+
+  /**
+   * TPL-7.2 — evaluate a PUBLISHED version. Thin route over EvalService.startRun:
+   * with no explicit dataset, the version's template-seeded dataset
+   * (`template:<slug>@<version>`) is selected automatically. DRAFT versions
+   * stay rejected (PUBLISHED-only gate in startRun is untouched).
+   */
+  async evaluateVersion(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    datasetId?: string;
+    environment?: string;
+    attemptsPerCase?: number;
+    actor: string;
+  }): Promise<unknown> {
+    assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    assertUuid(input.versionId);
+    const version = await this.getVersion(input.orgId, input.versionId);
+    if (!version || version.assistantId !== input.assistantId) {
+      throw ApiError.notFound('assistant version');
+    }
+    let datasetId: string | undefined = input.datasetId;
+    if (!datasetId) {
+      const resolved = await this.resolveTemplateDataset(input.orgId, input.assistantId);
+      if (!resolved) {
+        throw ApiError.validation({
+          dataset_id: 'no template dataset for this assistant — install from a template or pass dataset_id explicitly',
+        });
+      }
+      datasetId = resolved;
+    }
+    return this.evals.startRun({
+      orgId: input.orgId,
+      datasetId,
+      assistantVersionId: input.versionId,
+      attemptsPerCase: input.attemptsPerCase ?? 1,
+      actor: input.actor,
+      ...(input.environment ? { environment: input.environment } : {}),
+    });
+  }
+
+  /** Template-seeded dataset id for an assistant (`template:<slug>@<version>`), if installed. */
+  private async resolveTemplateDataset(orgId: string, assistantId: string): Promise<string | null> {
+    const name = await this.db.withOrg(orgId, async (tx) => {
+      const installs = await tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1);
+      const install = installs[0];
+      if (!install || install.organizationId !== orgId) {
+        return null;
+      }
+      return `template:${install.slug}@${install.templateVersion}`;
+    });
+    if (!name) {
+      return null;
+    }
+    const datasets = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ id: evalDatasets.id }).from(evalDatasets).where(and(eq(evalDatasets.organizationId, orgId), eq(evalDatasets.name, name))).limit(1),
+    );
+    return datasets[0]?.id ?? null;
+  }
+
+  /**
+   * TPL-4.2 — version provenance for reads. Enriches (never replaces) the
+   * version/snapshot payloads: template ref, snapshot manifest hash,
+   * update-available signal, and the last completed EvaluationRun decision.
+   * Upgrade guidance is always "new draft from vX.Y.Z" — published rows are
+   * never mutated.
+   */
+  async getVersionProvenance(
+    orgId: string,
+    assistantId: string,
+    versionId: string,
+  ): Promise<{
+    template: { slug: string; version: string; definition_hash: string | null } | null;
+    manifest_hash: string | null;
+    update_available: 'major' | 'minor' | 'none';
+    last_evaluation: { decision: string; score: string | null; finished_at: string | null } | null;
+  }> {
+    assertOrgId(orgId);
+    assertUuid(assistantId);
+    assertUuid(versionId);
+    const version = await this.getVersion(orgId, versionId);
+    if (!version || version.assistantId !== assistantId) {
+      throw ApiError.notFound('assistant version');
+    }
+    const snapshot = await this.getSnapshotForVersion(orgId, assistantId, versionId);
+    const template = await this.templates.resolveInstallTemplate(orgId, assistantId);
+    let update_available: 'major' | 'minor' | 'none' = 'none';
+    if (template) {
+      const updates = await this.templates.checkUpdates(orgId);
+      const entry = updates.find((u) => u.slug === template.slug && u.installed_version === template.version);
+      update_available = entry?.update_available ?? 'none';
+    }
+    const runs = await this.db.withOrg(orgId, (tx) =>
+      tx
+        .select({ decision: evalRuns.decision, score: evalRuns.score, finishedAt: evalRuns.finishedAt })
+        .from(evalRuns)
+        .where(and(eq(evalRuns.organizationId, orgId), eq(evalRuns.assistantVersionId, versionId), eq(evalRuns.state, 'completed')))
+        .orderBy(desc(evalRuns.finishedAt))
+        .limit(1),
+    );
+    const last = runs[0];
+    return {
+      template,
+      manifest_hash: (snapshot?.manifestHash ?? null) as string | null,
+      update_available,
+      last_evaluation: last?.decision
+        ? { decision: last.decision, score: last.score, finished_at: last.finishedAt }
+        : null,
+    };
   }
 
   // ── Deterministic export / import (Phase 3 exit gate) ───────────────────
@@ -651,6 +871,116 @@ export class AssistantsService {
   }
 
   /**
+   * Shared publish/rollback commit — version row + resolved snapshot + active
+   * pointer in ONE transaction (caller holds the advisory lock).
+   *
+   * In-TX gates (no TOCTOU against concurrent publishes of this assistant):
+   *  - no-op guard (active pointer already carries the payload),
+   *  - BLOCK gate (TPL-6.1): content whose hash matches a BLOCK-decided eval
+   *    run can never publish again — critical failures are mathematically
+   *    unpublishable. (Concurrent eval completion racing this TX is covered
+   *    by the release-pointer gate at promotion time.)
+   * Resolution failures (missing pins, drifted catalog) abort the TX —
+   * nothing half-publishes.
+   */
+  private async insertPublishedVersion(
+    tx: NodePgDatabase,
+    input: {
+      orgId: string;
+      assistantId: string;
+      version: number;
+      schemaVersion: number;
+      normalized: AssistantPayload;
+      publishedBy: string;
+      rollbackOf: string | null;
+    },
+  ): Promise<AssistantVersion> {
+    const hash = hashPayload(input.normalized);
+    await this.rejectNoOpPublish(tx, input.assistantId, hash);
+    await this.rejectBlockedContent(tx, input.orgId, input.assistantId, hash);
+    const manifest = await this.manifests.resolveForPublish(tx, input.orgId, input.assistantId, input.normalized);
+    const rows = await tx
+      .insert(assistantVersions)
+      .values({
+        assistantId: input.assistantId,
+        organizationId: input.orgId,
+        version: input.version,
+        schemaVersion: input.schemaVersion,
+        status: 'PUBLISHED',
+        modelPolicy: input.normalized.model_policy,
+        contextPolicy: input.normalized.context_policy,
+        toolPolicy: input.normalized.tool_policy,
+        knowledgePolicy: input.normalized.knowledge_policy ?? null,
+        guardrailPolicy: input.normalized.guardrail_policy,
+        instructions: input.normalized.instructions ?? null,
+        modelParams: input.normalized.model_params ?? null,
+        budgetPolicy: input.normalized.budget_policy ?? null,
+        rollbackOf: input.rollbackOf,
+        hash,
+        publishedAt: new Date().toISOString(),
+        publishedBy: input.publishedBy,
+      })
+      .returning();
+    const inserted = rows[0];
+
+    // Snapshot materialized in the same TX as publish — the pinning
+    // authority Phase 4 runs reference (pinned decision, ledger 3.1),
+    // now carrying the fully resolved set (TPL-5.2 … TPL-5.5).
+    await tx.insert(policySnapshots).values({
+      organizationId: input.orgId,
+      assistantVersionId: inserted.id,
+      snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
+      modelPolicy: input.normalized.model_policy,
+      contextPolicy: input.normalized.context_policy,
+      toolPolicy: input.normalized.tool_policy,
+      guardrailPolicy: input.normalized.guardrail_policy,
+      knowledgePolicy: input.normalized.knowledge_policy ?? null,
+      instructions: input.normalized.instructions ?? null,
+      modelParams: input.normalized.model_params ?? null,
+      budgetPolicy: input.normalized.budget_policy ?? null,
+      hash,
+      toolBindings: manifest.toolBindings,
+      knowledgePins: manifest.knowledgePins,
+      modelRef: manifest.modelRef,
+      templateRef: manifest.templateRef,
+      manifestHash: manifest.manifestHash,
+    });
+
+    await tx.update(assistants).set({ activeVersionId: inserted.id, updatedAt: new Date().toISOString() }).where(eq(assistants.id, input.assistantId));
+
+    return inserted;
+  }
+
+  /**
+   * BLOCK gate (TPL-6.1): the LATEST completed eval decision for this content
+   * hash must not be BLOCK — critical failures are mathematically unpublishable
+   * while they stand. Keyed by CONTENT hash (not row id), so the same bad
+   * payload cannot re-enter through rollback-as-new or a fresh draft either.
+   * "Latest wins" is deliberate: a re-evaluation that passes clears an earlier
+   * BLOCK — publishability tracks the current verdict, not history.
+   */
+  private async rejectBlockedContent(tx: NodePgDatabase, orgId: string, assistantId: string, hash: string): Promise<void> {
+    const rows = await tx.execute(sql`
+      select er.decision
+      from eval_runs er
+      join assistant_versions av on av.id = er.assistant_version_id
+      where er.organization_id = ${orgId}::uuid
+        and av.assistant_id = ${assistantId}::uuid
+        and av.hash = ${hash}
+        and er.state = 'completed'
+        and er.decision is not null
+      order by er.finished_at desc nulls last, er.created_at desc
+      limit 1
+    `);
+    const decision = (rows.rows[0] as { decision?: string } | undefined)?.decision;
+    if (decision === 'BLOCK') {
+      throw ApiError.conflict('the latest evaluation of this content decided BLOCK — resolve the critical failures and re-evaluate before publishing', {
+        assistant_id: assistantId,
+      });
+    }
+  }
+
+  /**
    * Publish/rollback whose payload equals the assistant's CURRENT ACTIVE
    * version hash is a no-op — rejected as a conflict. Restoring a payload
    * that exists on a non-active PUBLISHED row is legitimate (that is what
@@ -687,6 +1017,32 @@ function assertUuid(id: string): void {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
     throw ApiError.validation({ id: 'must be a uuid' });
   }
+}
+
+/**
+ * TPL-2.1 — unknown-key rejection lives in validation.ts (`rejectUnknownPayloadKeys`)
+ * so the create-definition path and the template install path share one
+ * implementation (deep diff, 422 with the key list).
+ */
+
+/**
+ * Unique-violation mapping for the assistant identity plane (never leak a raw
+ * 23505): the org-name unique index is a caller-fixable conflict; the draft
+ * sentinel collision (uq_assistant_versions_assistant_version on version=0)
+ * means a DRAFT already exists — publish or delete it first.
+ */
+function mapAssistantUniqueViolation(err: unknown, name: string): unknown {
+  const pg = err as { code?: string; constraint?: string };
+  if (pg?.code !== '23505') {
+    return err;
+  }
+  if (pg.constraint === 'uq_assistants_org_name') {
+    return ApiError.conflict('assistant name already taken in this organization — supply a distinct name', { name });
+  }
+  if (pg.constraint === 'uq_assistant_versions_assistant_version') {
+    return ApiError.conflict('a draft version already exists for this assistant — publish or delete it before drafting another', { reason: 'draft_exists' });
+  }
+  return err;
 }
 
 function assertName(name: string): void {

@@ -229,6 +229,13 @@ These are DONE â€” gates already hold:
 
 - [ ] **3.7** Rename legacy furniture â€” `src/modules/agent-studio` â†’ `src/modules/studio-furniture` (or `console/studio`) after `assistants` lands â€” `AgentStudioModule` `src/app.module.ts:13` currently at `studio_project_keys` only; rename prevents route/ownership ambiguity `engine_implementation_plan.md:213` product registration. Include import/codemod + `ownership-map.json` note; no behavior change.
 
+> **Phase 3.x — Agent template plane (2026-09-13).** Design authority: `docs/dev/agent_related/_agent_setup_detail_plan.md`; execution order: `docs/dev/agent_related/agent_setup_ledger.md` (TPL-0 … TPL-10, one task ID per PR). This expansion adds rows — it does not bypass Phase 3 exit gates. Pinned decisions: registry sync = release-job upsert (never DDL — template bumps require zero migrations); retrieval tools (`search_knowledge`/`search_memory`) become platform built-ins; BLOCK enforcement lives in the publish TX; no new version states (dead `VALIDATING`/`VALID`/`ROLLED_BACK` enum values stay reserved); install is copy (TemplateRelease ≠ AssistantVersion).
+>
+> - [ ] **3.8** Template registry (`assistant_templates` global + `assistant_installs` tenant, `drizzle/0048`) + release-job sync + `TemplatesService.list/get/install/checkUpdates` + `GET .../assistant-templates` (ledger TPL-1 … TPL-2, TPL-4.1).
+> - [ ] **3.9** Template contents: 12 Tier-1 + 8 Tier-2 BOMs under `products/agent-studio/templates/` + `neryva-template lint` CI (ledger TPL-3, TPL-9).
+> - [ ] **3.10** Release governance (`drizzle/0049`: snapshot binding columns, `run_manifests`, eval `provenance`/`decision`, rollout env/channel, `control_blocks`) + publish-time resolution + BLOCK enforcement + kill switches + RBAC mapping (ledger TPL-5 … TPL-6).
+> - [ ] **3.11** Eval gate wiring on existing `EvalService.startRun` + EvaluationRun provenance + regression comparison + observe→evolve loop on `run_judgments` (ledger TPL-7 … TPL-8).
+
 #### Exit gates â€” Phase 3
 
 - [ ] Concurrent `publish`/`update` cannot publish a partially written version (advisory-lock + transaction isolation test).

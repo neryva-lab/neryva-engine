@@ -1,16 +1,16 @@
 import { Module } from '@nestjs/common';
 import { OutboxDispatcherWorker } from './outbox-dispatcher.worker';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
+import { TemplateProvisioningConsumer } from './template-provisioning.consumer';
 import { RunCancelConsumer } from './run-cancel.consumer';
-import { UsageLedgerConsumer } from './usage-ledger.consumer';
 import { AcceptedRunSweepWorker } from './accepted-run-sweep.worker';
-import { ReEmbedWorker } from './reembed.worker';
 import { MemoryProposerConsumer } from './memory-proposer.consumer';
 import { LlmJudgeConsumer } from './llm-judge.consumer';
-import { LifecycleWebhookConsumer } from './lifecycle-webhook.consumer';
 import { AnalyticsRollupConsumer } from './analytics-rollup.consumer';
 import { ModuleFlags } from '../common/config/feature-flags';
 import { ChannelsModule } from '../modules/channels/channels.module';
+import { BillingModule } from '../modules/billing/billing.module';
+import { WebhooksModule } from '../modules/webhooks/webhooks.module';
 
 /**
  * Worker module — Phase 6.6 worker families live here (bounded concurrency,
@@ -18,11 +18,18 @@ import { ChannelsModule } from '../modules/channels/channels.module';
  * monolith; role split at deploy time does not change this module.
  */
 @Module({
-  // The channels consumers (ingest/outbound) join the dispatcher only when
-  // the channel plane is enabled — the worker registry is the composition
-  // point for every outbox consumer.
-  imports: [...(ModuleFlags.channels ? [ChannelsModule] : [])],
-  providers: [RunDispatchConsumer, RunCancelConsumer, UsageLedgerConsumer, AnalyticsRollupConsumer, LifecycleWebhookConsumer, MemoryProposerConsumer, LlmJudgeConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker, ReEmbedWorker],
+  // Domain-owned consumers join the dispatcher only when their feature module
+  // is loaded: channels (ingest/outbound), billing (usage ledger), webhooks
+  // (lifecycle notifications). The feature modules export those consumers, so
+  // WITHOUT these imports the @Optional() @Inject(class) tokens in the
+  // dispatcher resolve to undefined EVEN WHEN the flags are on — consumers
+  // would be silently dropped. The flags keep both sides in the same states.
+  imports: [
+    ...(ModuleFlags.channels ? [ChannelsModule] : []),
+    ...(ModuleFlags.billing ? [BillingModule] : []),
+    ...(ModuleFlags.webhooks ? [WebhooksModule] : []),
+  ],
+  providers: [RunDispatchConsumer, TemplateProvisioningConsumer, RunCancelConsumer, AnalyticsRollupConsumer, MemoryProposerConsumer, LlmJudgeConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker],
   exports: [OutboxDispatcherWorker],
 })
 export class WorkersModule {}

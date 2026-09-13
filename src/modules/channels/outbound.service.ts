@@ -7,7 +7,10 @@ import { metrics } from '../../common/observability/metrics';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { PermanentConsumerError, type OutboxConsumer } from '../../common/infra/outbox/consumer';
 import type { OutboxEvent } from '../../common/infra/outbox/schema';
-import type { RedisService } from '../../common/infra/redis.service';
+// VALUE import (not `import type`): NestJS reads this binding for
+// design:paramtypes metadata — a type-only import erases it and the
+// injected redis cannot resolve.
+import { RedisService } from '../../common/infra/redis.service';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { messages, conversations } from '../conversations/schema';
 import { artifacts } from '../knowledge/schema';

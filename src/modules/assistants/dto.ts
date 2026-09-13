@@ -1,6 +1,17 @@
 import { IsArray, IsBoolean, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, Length, MaxLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
+export class TemplateRefDto {
+  @IsString()
+  @Length(1, 64)
+  slug!: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 32)
+  version?: string;
+}
+
 export class CreateAssistantDto {
   @IsString()
   @Length(2, 128)
@@ -10,6 +21,26 @@ export class CreateAssistantDto {
   @IsString()
   @MaxLength(512)
   description?: string;
+
+  /**
+   * TPL-2.1 — governed install: clone a registry template into a fresh
+   * assistant + DRAFT version (copy, never a live link). Mutually exclusive
+   * with `definition`.
+   */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TemplateRefDto)
+  template?: TemplateRefDto;
+
+  /**
+   * TPL-2.1 — full Engine-subset definition in one step (assistant + DRAFT
+   * version, atomically). Validated by validateAssistantPayload; template-only
+   * extensions are rejected with a 422 listing them (service-side diff —
+   * the global pipe already 400s unknown top-level DTO keys).
+   */
+  @IsOptional()
+  @IsObject()
+  definition?: Record<string, unknown>;
 }
 
 export class ModelPolicyDto {

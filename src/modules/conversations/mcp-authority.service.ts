@@ -10,9 +10,10 @@ import { StorageService } from '../../common/infra/storage/storage.service';
 import { artifacts } from '../knowledge/schema';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { runEvents, runs, messages, conversations, conversationSummaries, Run } from './schema';
-import { policySnapshots } from '../assistants/schema';
+import { policySnapshots, assistants, assistantVersions, controlBlocks } from '../assistants/schema';
 import { toolCatalog } from '../assistants/tool-catalog.schema';
 import { BUILT_IN_TOOLS } from '../assistants/tool-catalog.service';
+import { ControlBlocksService } from '../assistants/control-blocks.service';
 import { RetrievalService } from '../knowledge/retrieval.service';
 import { UsageLedgerService } from '../billing/usage-ledger.service';
 import { spotlight, redactPii } from '../../common/guardrails';
@@ -546,7 +547,28 @@ export class McpAuthorityService {
         .from(toolCatalog)
         .where(and(eq(toolCatalog.organizationId, input.orgId), eq(toolCatalog.name, input.toolName)))
         .limit(1);
-      return catalogRows[0] ?? null;
+      const row = catalogRows[0] ?? null;
+      // TPL-6.3 — same gates as authorize, adapted to the disclosure shape:
+      // an operator block or a disabled flag denies loudly (audited throw),
+      // while a missing row keeps the legacy empty-credential behavior
+      // (platform built-ins carry no row and need no credential).
+      if (row) {
+        const toolBlock = await ControlBlocksService.findActiveBlock(tx, input.orgId, 'tool', input.toolName);
+        if (toolBlock || !row.enabled) {
+          const reason = toolBlock ? `tool ${input.toolName} is blocked (${toolBlock.reason})` : `tool ${input.toolName} is disabled at this org`;
+          await this.auditSafe({
+            action: 'mcp.tool_credential_denied',
+            resourceType: 'tool_catalog',
+            resourceId: row.id,
+            tenantId: input.orgId,
+            details: { run_id: input.runId, tool: input.toolName, reason },
+          });
+          // Policy denial, not a malformed request — forbidden (403), the
+          // same semantics an authorize denial would produce.
+          throw ApiError.forbidden(reason, { tool_name: input.toolName });
+        }
+      }
+      return row;
     });
     const entry = found;
     if (!entry || !entry.credentialSealed) {
@@ -849,6 +871,69 @@ export class McpAuthorityService {
       const descriptor = toolPolicy?.tools?.find((t) => t.name === input.toolName);
       if (!descriptor) {
         return { allowed: false, reason: `tool ${input.toolName} is not in the pinned tool policy`, approvalRequired: false, duplicate: false };
+      }
+
+      // TPL-6.3 kill levels 2-4 — evaluated on EVERY new authorization (no
+      // cache, so kill-to-deny latency is one RPC). Order: explicit operator
+      // blocks first (cheapest, most specific), then the catalog enabled
+      // flag. NOTE: the dedup early-return above intentionally precedes all
+      // of this — replaying an already-authorized call's ack is idempotency,
+      // not a new authorization; freezing it would corrupt exactly-once
+      // completion of in-flight effects.
+      const deny = async (reason: string): Promise<{ allowed: false; reason: string; approvalRequired: false; duplicate: false }> => {
+        await this.auditSafe({
+          action: 'mcp.tool_denied',
+          resourceType: 'tool_effect',
+          resourceId: run.id,
+          tenantId: input.orgId,
+          details: { run_id: input.runId, tool: input.toolName, reason },
+        });
+        return { allowed: false, reason, approvalRequired: false, duplicate: false };
+      };
+      const capabilityBlock = await ControlBlocksService.findActiveBlock(tx, input.orgId, 'capability', 'tool');
+      if (capabilityBlock) {
+        return deny(`tool capability frozen (${capabilityBlock.reason})`);
+      }
+      const toolBlock = await ControlBlocksService.findActiveBlock(tx, input.orgId, 'tool', input.toolName);
+      if (toolBlock) {
+        return deny(`tool ${input.toolName} is blocked (${toolBlock.reason})`);
+      }
+      if (!BUILT_IN_TOOLS.has(input.toolName)) {
+        const catalogRows = await tx
+          .select({ id: toolCatalog.id, enabled: toolCatalog.enabled })
+          .from(toolCatalog)
+          .where(and(eq(toolCatalog.organizationId, input.orgId), eq(toolCatalog.name, input.toolName)))
+          .limit(1);
+        const row = catalogRows[0];
+        if (!row) {
+          // Pinned at publish but the row is gone (deleted post-publish) —
+          // fail closed rather than executing against an ungoverned tool.
+          return deny(`tool ${input.toolName} has no catalog row at this org`);
+        }
+        if (!row.enabled) {
+          return deny(`tool ${input.toolName} is disabled at this org`);
+        }
+      }
+      // Assistant-level kill for in-flight runs: acceptance already refuses
+      // new runs, but a run accepted BEFORE the kill must not authorize new
+      // tool calls after it. Either the disabled flag or an active block
+      // freezes the assistant. (Version blocks intentionally do NOT gate
+      // here — in-flight runs stay pinned to their manifest by invariant.)
+      const versionRows = await tx
+        .select({ assistantId: assistantVersions.assistantId })
+        .from(assistantVersions)
+        .where(eq(assistantVersions.id, run.assistantVersionId))
+        .limit(1);
+      const assistantId = versionRows[0]?.assistantId;
+      if (assistantId) {
+        const assistantRows = await tx.select({ disabledAt: assistants.disabledAt }).from(assistants).where(eq(assistants.id, assistantId)).limit(1);
+        if (assistantRows[0]?.disabledAt) {
+          return deny(`assistant is disabled`);
+        }
+        const assistantBlock = await ControlBlocksService.findActiveBlock(tx, input.orgId, 'assistant', assistantId);
+        if (assistantBlock) {
+          return deny(`assistant is blocked (${assistantBlock.reason})`);
+        }
       }
 
       const effectId = uuidv7();
@@ -1289,7 +1374,28 @@ export class McpAuthorityService {
             .where(eq(toolCatalog.organizationId, input.orgId))
         : [];
       const catalogByName = new Map(catalogRows.map((r) => [r.name, r]));
-      const tools = pinnedTools.map((t) => {
+      // TPL-6.3 — disabled or operator-blocked tools are withheld from the
+      // served descriptors: the model is never offered what authorize would
+      // deny. Silent on this read path by design (documented); authorize
+      // denies loudly with audit — the decision point, not the read path.
+      const blockRows = await tx
+        .select({ targetName: controlBlocks.targetName })
+        .from(controlBlocks)
+        .where(
+          and(
+            eq(controlBlocks.organizationId, input.orgId),
+            eq(controlBlocks.targetType, 'tool'),
+            or(isNull(controlBlocks.expiresAt), sql`${controlBlocks.expiresAt} > now()`),
+          ),
+        );
+      const blockedNames = new Set(blockRows.map((r) => r.targetName));
+      const visibleTools = pinnedTools.filter((t) => {
+        if (blockedNames.has(t.name)) return false;
+        const entry = catalogByName.get(t.name);
+        if (entry && !entry.enabled) return false;
+        return true;
+      });
+      const tools = visibleTools.map((t) => {
         const entry = catalogByName.get(t.name);
         // Built-in tools (e.g. request_human_handoff) resolve without a
         // catalog row - the platform implements them (FL-1.7c).

@@ -44,7 +44,12 @@ async function bootstrap(): Promise<void> {
       loggerInstance: rootLogger,
       disableRequestLogging: env.NODE_ENV === 'test',
     }),
-    { logger },
+    // No Nest default body parsers: this file registers exactly the two the
+    // product needs below (urlencoded for the Apple callback, JSON with
+    // rawBody preservation for Stripe HMAC). Nest 11's adapter otherwise
+    // registers its own urlencoded parser at init and collides with ours
+    // (FastifyError: already present).
+    { logger, bodyParser: false },
   );
 
   // The bijection collector must be hooked BEFORE Nest registers routes

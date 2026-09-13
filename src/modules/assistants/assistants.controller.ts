@@ -17,8 +17,16 @@ export class AssistantsController {
   @UseGuards(OrgRolesGuard)
   @Idempotent()
   async create(@Param('orgId') orgId: string, @Body() dto: CreateAssistantDto, @CurrentPrincipal() principal: L1Principal) {
-    const row = await this.assistants.create({ orgId, name: dto.name, description: dto.description ?? null, createdBy: principal.id });
-    return { assistant: row };
+    const created = await this.assistants.create({
+      orgId,
+      name: dto.name,
+      description: dto.description ?? null,
+      createdBy: principal.id,
+      template: dto.template,
+      definition: dto.definition,
+    });
+    // Consumer contract §7.3 item 3: assistant + version_id + slug@version + hash.
+    return { assistant: created.assistant, version_id: created.version_id, template: created.template, hash: created.hash };
   }
 
   @Get()
@@ -49,6 +57,35 @@ export class AssistantsController {
     @CurrentPrincipal() principal: L1Principal,
   ): Promise<{ ok: true }> {
     return this.assistants.remove({ orgId, assistantId, actorId: principal.id });
+  }
+
+  @Post(':assistantId/disable')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async disable(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Body() dto: { reason?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const row = await this.assistants.setDisabled({
+      orgId,
+      assistantId,
+      disabled: true,
+      reason: typeof dto.reason === 'string' ? dto.reason : undefined,
+      actorId: principal.id,
+    });
+    return { assistant: row };
+  }
+
+  @Post(':assistantId/enable')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async enable(@Param('orgId') orgId: string, @Param('assistantId') assistantId: string, @CurrentPrincipal() principal: L1Principal) {
+    const row = await this.assistants.setDisabled({ orgId, assistantId, disabled: false, actorId: principal.id });
+    return { assistant: row };
   }
 
   @Post(':assistantId/versions')
@@ -92,6 +129,32 @@ export class AssistantsController {
     return { version: row };
   }
 
+  @Post(':assistantId/versions/:versionId/evaluate')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async evaluate(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Param('versionId') versionId: string,
+    @Body() dto: { dataset_id?: unknown; environment?: unknown; attempts_per_case?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    // Thin route over EvalService.startRun (template-seeded dataset selected
+    // automatically when dataset_id is absent). Response carries eval_run_id;
+    // the decision is polled from eval_runs.decision via the provenance read.
+    const run = (await this.assistants.evaluateVersion({
+      orgId,
+      assistantId,
+      versionId,
+      datasetId: typeof dto.dataset_id === 'string' ? dto.dataset_id : undefined,
+      environment: typeof dto.environment === 'string' ? dto.environment : undefined,
+      attemptsPerCase: typeof dto.attempts_per_case === 'number' ? dto.attempts_per_case : undefined,
+      actor: principal.id,
+    })) as { id: string };
+    return { eval_run_id: run.id };
+  }
+
   @Post(':assistantId/rollback')
   @Roles('owner', 'admin')
   @UseGuards(OrgRolesGuard)
@@ -129,7 +192,10 @@ export class AssistantsController {
     @Param('versionId') versionId: string,
   ) {
     const envelope = await this.assistants.exportVersion(orgId, assistantId, versionId);
-    return { export: envelope };
+    // Provenance rides BESIDE the envelope, never inside it — the export
+    // hash covers the version payload only (determinism gate untouched).
+    const provenance = await this.assistants.getVersionProvenance(orgId, assistantId, versionId);
+    return { export: envelope, provenance };
   }
 
   @Post(':assistantId/versions/import')
@@ -163,6 +229,22 @@ export class AssistantsController {
     if (!snapshot) {
       throw ApiError.notFound('policy snapshot');
     }
-    return { snapshot };
+    const provenance = await this.assistants.getVersionProvenance(orgId, assistantId, versionId);
+    return { snapshot, provenance };
+  }
+
+  @Get(':assistantId/versions/:versionId/provenance')
+  @Roles('owner', 'admin', 'developer', 'reader', 'billing')
+  @UseGuards(OrgRolesGuard)
+  async getProvenance(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Param('versionId') versionId: string,
+  ) {
+    // Standalone provenance read: template ref, snapshot manifest hash,
+    // update-available signal, last EvaluationRun decision. Upgrade guidance
+    // is always "new draft from vX.Y.Z" — published rows are never mutated.
+    const provenance = await this.assistants.getVersionProvenance(orgId, assistantId, versionId);
+    return { provenance };
   }
 }

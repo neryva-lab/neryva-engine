@@ -5,7 +5,11 @@ import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { randomToken, sha256Hex } from '../../common/infra/crypto/envelope';
-import type { RedisService } from '../../common/infra/redis.service';
+// VALUE import (not `import type`): NestJS reads this binding for
+// design:paramtypes metadata — a type-only import erases it and the
+// @Optional() redis would ALWAYS resolve undefined, silently disabling
+// session caching even when Redis is healthy.
+import { RedisService } from '../../common/infra/redis.service';
 import { verifyTurnstile } from '../../common/http/turnstile';
 import { ConversationsService } from '../conversations/conversations.service';
 import { EscalationsService } from '../conversations/escalations.service';

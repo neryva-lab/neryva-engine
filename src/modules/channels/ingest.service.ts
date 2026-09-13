@@ -8,7 +8,10 @@ import { PermanentConsumerError, type OutboxConsumer } from '../../common/infra/
 import type { OutboxEvent } from '../../common/infra/outbox/schema';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
-import type { RedisService } from '../../common/infra/redis.service';
+// VALUE import (not `import type`): NestJS reads this binding for
+// design:paramtypes metadata — a type-only import erases it and the
+// injected redis resolves to undefined, failing or silently disabling.
+import { RedisService } from '../../common/infra/redis.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { channelAccounts, channelEvents, channelIdentities, channelMessageLinks, messageReceipts, ChannelAccount } from './schema';

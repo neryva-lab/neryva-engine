@@ -7,6 +7,7 @@ import { ConversationsModule } from '../../modules/conversations/conversations.m
 import { ConversationsService } from '../../modules/conversations/conversations.service';
 import { McpAuthorityService } from '../../modules/conversations/mcp-authority.service';
 import { KnowledgeModule } from '../../modules/knowledge/knowledge.module';
+import { LifecycleModule } from '../../modules/lifecycle/lifecycle.module';
 import { UsageLedgerService } from '../../modules/billing/usage-ledger.service';
 import { registerMcpRoutes } from './routes';
 
@@ -41,8 +42,10 @@ export class McpTransportService implements OnModuleInit {
   // KnowledgeModule provides the ACL-before-scoring RetrievalService used by
   // GetAuthorizedRunContext / SearchKnowledge. UsageLedgerService depends only
   // on DbService, so it is provided here directly (no BillingModule cycle).
-  imports: [ConversationsModule, KnowledgeModule],
-  providers: [McpAuthorityService, McpTransportService, UsageLedgerService],
-  exports: [McpAuthorityService],
+  // McpAuthorityService is provided+exported by ConversationsModule (its
+  // home — RunsController needs it there); this module consumes it via the
+  // ConversationsModule import.
+  imports: [ConversationsModule, KnowledgeModule, LifecycleModule],
+  providers: [McpTransportService, UsageLedgerService],
 })
 export class McpModule {}

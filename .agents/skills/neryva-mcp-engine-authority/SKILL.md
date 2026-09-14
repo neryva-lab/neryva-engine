@@ -7,7 +7,7 @@ description: Implement Engine authority side of Neryva MCP (neryva.mcp.v1) â€
 
 Engine owns identity, tenancy, authorization, durable data, and final state. Studio owns execution; Neryva MCP (`neryva.mcp.v1`) is the versioned boundary. Studio never has Engine DB credentials (`docs/architecture/engine/engine_architecture.md:570:2`).
 
-> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`, `neryva.mcp.v1`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` (`studio_project_keys` `drizzle/0006`) is project-key binding furniture only, not the runtime.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`, `neryva.mcp.v1`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). Frontend = `../console/neryva-website/` (Vite React, UI `/agent-studio/*`). `src/modules/studio-furniture` (`studio_project_keys` `drizzle/0006`) is project-key binding furniture only, not the runtime.
 
 ## When to use
 

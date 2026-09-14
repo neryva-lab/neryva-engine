@@ -7,7 +7,7 @@ description: Implement audit hash-chain, retention policies, exports, legal hold
 
 Lifecycle is product capability
 
-> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., not DB cleanup script. Covers retention, legal-hold, export, deletion, tombstone, and audit evidence as intertwined workflows.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). Frontend = `../console/neryva-website/` (Vite React, UI `/agent-studio/*`). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., not DB cleanup script. Covers retention, legal-hold, export, deletion, tombstone, and audit evidence as intertwined workflows.
 
 ## When to use
 

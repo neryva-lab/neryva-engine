@@ -193,6 +193,7 @@ export const metrics = new MetricsRegistry();
 export const httpRequestsTotal = metrics.counter('neryva_engine_http_requests_total', 'HTTP requests by route, method, status', ['route', 'method', 'status']);
 export const httpRequestDuration = metrics.histogram('neryva_engine_http_request_duration_seconds', 'HTTP request latency by route', ['route', 'method']);
 export const authFailuresTotal = metrics.counter('neryva_engine_auth_failures_total', 'Authentication failures by layer', ['layer', 'reason']);
+export const tokenRefreshReuseTotal = metrics.counter('neryva_engine_token_refresh_reuse_total', 'Refresh token reuse detections (family revoked)', []);
 export const meteringIngestRows = metrics.counter('neryva_engine_metering_ingest_rows_total', 'Spend rows accepted / duplicated / rejected', ['outcome']);
 export const deploymentTransitions = metrics.counter('neryva_engine_deployment_transitions_total', 'Deployment status transitions', ['from', 'to']);
 export const webhooksDelivered = metrics.counter('neryva_engine_webhook_deliveries_total', 'Webhook delivery attempts by outcome', ['outcome']);

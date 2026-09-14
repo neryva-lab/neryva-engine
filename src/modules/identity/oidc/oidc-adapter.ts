@@ -3,7 +3,8 @@ import { and, eq } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../../common/infra/db/db.service';
 import { AuditService } from '../../../common/audit/audit.service';
-import { EventBus, EngineEvents, SessionRevokedEvent } from '../../../common/events/event-bus';
+import { EventBus, EngineEvents, SessionRevokedEvent, TokenRefreshReuseEvent } from '../../../common/events/event-bus';
+import { tokenRefreshReuseTotal } from '../../../common/observability/metrics';
 import { envelopeDecrypt, envelopeEncrypt } from '../../../common/infra/crypto/envelope';
 import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPayloads } from '../schema';
 
@@ -102,6 +103,12 @@ export class OidcDrizzleAdapter {
             const rows = await self.db.root.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.jti, id)).limit(1);
             const row = rows[0];
             if (!row) {
+              return undefined;
+            }
+            if (!isRefreshRowUsable({ expiresAt: row.expiresAt, revokedAt: row.revokedAt }, nowIso())) {
+              // Expired or family-revoked tokens never resolve — defense in
+              // depth on top of the provider's own checks. Consumed (rotated)
+              // rows still resolve with consumed:true so rotation proceeds.
               return undefined;
             }
             const base: Payload = { grantId: row.grantId ?? undefined };
@@ -223,6 +230,22 @@ export class OidcDrizzleAdapter {
   private async upsertRefreshToken(id: string, payload: Payload, expiresAt: string): Promise<void> {
     const familyId = extractFamilyId(payload);
     const rotatedFrom = extractRotatedFrom(payload);
+    const caps: Array<string | null | undefined> = [];
+    if (rotatedFrom) {
+      const prev = await this.db.root
+        .select({ expiresAt: oauthRefreshTokens.expiresAt })
+        .from(oauthRefreshTokens)
+        .where(eq(oauthRefreshTokens.jti, rotatedFrom))
+        .limit(1);
+      caps.push(prev[0]?.expiresAt);
+    }
+    const existing = await this.db.root
+      .select({ expiresAt: oauthRefreshTokens.expiresAt })
+      .from(oauthRefreshTokens)
+      .where(eq(oauthRefreshTokens.jti, id))
+      .limit(1);
+    caps.push(existing[0]?.expiresAt);
+    const finalExpiresAt = clampRefreshExpiresAt(expiresAt, caps);
     await this.db.root
       .insert(oauthRefreshTokens)
       .values({
@@ -231,12 +254,12 @@ export class OidcDrizzleAdapter {
         sessionId: extractSessionId(payload),
         tokenHash: sha256(String(payload.rotatingToken ?? id)),
         grantId: typeof payload.grantId === 'string' ? payload.grantId : null,
-        expiresAt,
+        expiresAt: finalExpiresAt,
         rotatedFrom,
       })
       .onConflictDoUpdate({
         target: oauthRefreshTokens.jti,
-        set: { expiresAt },
+        set: { expiresAt: finalExpiresAt },
       });
     if (rotatedFrom) {
       await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, rotatedFrom));
@@ -251,11 +274,23 @@ export class OidcDrizzleAdapter {
     }
     if (row.consumedAt) {
       // REUSE: a retired token was presented again — revoke the family.
+      // Alert exactly once per family: the revoke marks every member, so a
+      // repeat replay already carries revokedAt and stays silent (audit
+      // still records every attempt below).
+      const firstDetection = !row.revokedAt;
       this.logger.warn(`refresh token reuse detected: jti=${id} family=${row.familyId}`);
       await this.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso(), retiredAt: nowIso() }).where(eq(oauthRefreshTokens.familyId, row.familyId));
       if (row.sessionId) {
         await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sid, row.sessionId));
         this.helpers.pushSidDeny(row.sessionId);
+      }
+      if (firstDetection) {
+        tokenRefreshReuseTotal.inc();
+        await this.events.emit<TokenRefreshReuseEvent>(EngineEvents.TokenRefreshReuse, {
+          accountId: await this.resolveAccountForSession(row.sessionId),
+          familyId: row.familyId,
+          sessionId: row.sessionId,
+        });
       }
       await this.audit.add({
         action: 'auth.refresh_reuse',
@@ -267,6 +302,19 @@ export class OidcDrizzleAdapter {
       return;
     }
     await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, id));
+  }
+
+  /** Owner lookup for the reuse alert — 'unknown' when the session row is gone. */
+  private async resolveAccountForSession(sessionId: string | null): Promise<string> {
+    if (!sessionId) {
+      return 'unknown';
+    }
+    const rows = await this.db.root
+      .select({ accountId: oauthSessions.accountId })
+      .from(oauthSessions)
+      .where(eq(oauthSessions.sid, sessionId))
+      .limit(1);
+    return rows[0]?.accountId ?? 'unknown';
   }
 
   // ── Generic payloads & grant codes ───────────────────────────────────────
@@ -298,6 +346,35 @@ export class OidcDrizzleAdapter {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/**
+ * Refresh-expiry policy (RFC 9700 §4.14 / RFC 10017 §6.3.2.3): a rotated
+ * token MUST NOT outlive the token it replaces, and a re-persisted row
+ * MUST NOT extend its own expiry. Both sides are `toISOString()` stamps,
+ * so lexicographic comparison is chronological. Pure — unit-tested.
+ */
+export function clampRefreshExpiresAt(candidate: string, caps: Array<string | null | undefined>): string {
+  let out = candidate;
+  for (const cap of caps) {
+    if (typeof cap === 'string' && cap.length > 0 && cap < out) {
+      out = cap;
+    }
+  }
+  return out;
+}
+
+/**
+ * Adapter-layer usability gate for refresh rows: expired or family-revoked
+ * tokens never resolve. Consumed (rotated) rows are still usable here —
+ * they resolve with consumed:true so rotation proceeds and the reuse
+ * tripwire in consume() sees the replay. Pure — unit-tested.
+ */
+export function isRefreshRowUsable(row: { expiresAt: string; revokedAt: string | null }, now: string): boolean {
+  if (row.revokedAt) {
+    return false;
+  }
+  return row.expiresAt > now;
 }
 
 function nowIso(): string {

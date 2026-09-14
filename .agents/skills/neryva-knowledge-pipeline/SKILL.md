@@ -7,7 +7,7 @@ description: Implement Engine artifact, upload session, document ingestion, pgve
 
 Engine owns metadata, authorization, retention, and lifecycle; object storage owns bytes; indexes are derived and rebuildable. Single pipeline from upload authorization to authorized retrieval.
 
-> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`). Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). Do not place conversation/run logic in `src/modules/studio-furniture` (project-key binding furniture only).
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`). Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). Frontend = `../console/neryva-website/` (Vite React, UI `/agent-studio/*`). Do not place conversation/run logic in `src/modules/studio-furniture` (project-key binding furniture only).
 
 ## When to use
 

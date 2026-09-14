@@ -7,7 +7,7 @@ description: Implement Engine conversation, message, run projection, and durable
 
 Durable, provider-independent history owned by Engine. Studio execution is projected via lease-fenced run state; canonical events carry Engine sequence.
 
-> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not copy. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` (`studio_project_keys`) is project-key binding furniture only, not the runtime.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not copy. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). Frontend = `../console/neryva-website/` (Vite React, UI `/agent-studio/*`). `src/modules/studio-furniture` (`studio_project_keys`) is project-key binding furniture only, not the runtime.
 
 ## When to use
 

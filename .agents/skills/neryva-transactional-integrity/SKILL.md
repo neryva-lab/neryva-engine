@@ -7,7 +7,7 @@ description: Enforce transactional boundaries, tiered idempotency, outbox/inbox 
 
 Owns request consistency
 
-> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., exactly-once business effects via idempotent retries, and bounded payloads. Prevents duplicate user-visible messages, billable effects, and unbounded transport.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). Frontend = `../console/neryva-website/` (Vite React, UI `/agent-studio/*`). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., exactly-once business effects via idempotent retries, and bounded payloads. Prevents duplicate user-visible messages, billable effects, and unbounded transport.
 
 ## When to use
 

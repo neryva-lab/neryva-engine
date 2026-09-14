@@ -2,7 +2,7 @@
 
 **Purpose:** project-key binding furniture inside the engine (ledger
 agent-studio S-1…S-4): entitlement plans, the summary card, org-level
-studio views, project-scoped key bindings, runtime pointers. This is NOT the Agent Studio runtime — canonical runtime is `products/agent-studio/` (Temporal + TS), canonical MCP contract is `products/neryva_mcp/neryva-mcp-contract/`. Distinct from
+studio views, project-scoped key bindings, runtime pointers. This is NOT the Agent Studio runtime — canonical runtime is `products/agent-studio/` (Temporal + TS), canonical MCP contract is `products/neryva_mcp/neryva-mcp-contract/`, canonical frontend is `../console/neryva-website/` (Vite React, UI `/agent-studio/*`). Distinct from
 the agent-runtime satellite (ADR-006): the runtime serves `/v1` +
 `/surfaces`; this module is the product REGISTRATION the console renders.
 

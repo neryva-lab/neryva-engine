@@ -19,7 +19,10 @@ oauth_refresh_tokens, oauth_grants, oidc_payloads, email_login_codes.
   per-account + per-IP hourly budgets; upsert-on-login = no enumeration signal
 - OP: Authorization Code + PKCE (S256) required, JWT access tokens (aud =
   `neryva-engine`), refresh rotation with adapter-level family revocation and
-  the reuse tripwire (audit `auth.refresh_reuse`)
+  the reuse tripwire (audit `auth.refresh_reuse` + metric
+  `neryva_engine_token_refresh_reuse_total` + immediate account notice via
+  `token.refresh_reuse`); rotated tokens never outlive the token they replace
+  (expiry clamp); expired/revoked refresh rows never resolve from the adapter
 - signing keys from file only in production; dev keys opt-in and ephemeral
 - break-glass `BOOTSTRAP_API_KEY` handled by the kernel L2 guard (audited)
 

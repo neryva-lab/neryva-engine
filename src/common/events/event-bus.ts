@@ -58,6 +58,13 @@ export interface SessionRevokedEvent {
   revokeAllSessionsOfAccount?: boolean;
 }
 
+/** Refresh-token reuse tripwire fired (family already revoked by the adapter). */
+export interface TokenRefreshReuseEvent {
+  accountId: string;
+  familyId: string;
+  sessionId: string | null;
+}
+
 export const EngineEvents = {
   AccountCreated: 'account.created',
   AccountEmailChanged: 'account.email_changed',
@@ -65,6 +72,8 @@ export const EngineEvents = {
   AccountDeletionCancelled: 'account.deletion_cancelled',
   AccountPurged: 'account.purged',
   SessionRevoked: 'session.revoked',
+  /** Refresh reuse detected — the presenting family was revoked (doc-06 §10.4). */
+  TokenRefreshReuse: 'token.refresh_reuse',
   LoginSuccess: 'login.success',
   LoginFailure: 'login.failure',
   EntitlementTransitioned: 'entitlement.transitioned',

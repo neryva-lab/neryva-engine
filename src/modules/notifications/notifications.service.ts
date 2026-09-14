@@ -32,8 +32,11 @@ import { notifications } from './schema';
  *   satellite.{quarantined,draining,retired,liveness_lost,
  *              version_floor_violated,config_drift} → the ops team inbox
  *     (platform-plane events — no org/account target exists)
- *   login.failure                 → the account after a threshold of failed
- *     attempts within an hour window (warn, email) — never per-attempt
+  *   login.failure                 → the account after a threshold of failed
+  *     attempts within an hour window (warn, email) — never per-attempt
+  *   token.refresh_reuse           → the account immediately (warn, email) —
+  *     reuse is compromise-grade signal and the family is already dead, so
+  *     no attacker-driven loop is possible (deduped per account-day)
  *   account.deletion_requested    → the account (info, email)
  *   account.email_changed         → the account (warn)
  */
@@ -274,6 +277,13 @@ export class NotificationsService implements OnModuleInit {
       void this.recordLoginFailure(event.accountId);
     });
 
+    this.events.on<{ accountId: string; familyId: string; sessionId: string | null }>(EngineEvents.TokenRefreshReuse, (event) => {
+      if (!event.accountId || event.accountId === 'unknown') {
+        return; // session row gone — metric + audit still carry the signal
+      }
+      void this.recordTokenReuse(event.accountId, event.familyId);
+    });
+
     // ── account lifecycle (H-6/H-7 producers) ───────────────────────────────
 
     this.events.on<{ accountId: string; scheduledPurgeAt: string }>(EngineEvents.AccountDeletionRequested, (event) => {
@@ -349,6 +359,37 @@ export class NotificationsService implements OnModuleInit {
   }
 
   // ── subscriber helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Refresh-reuse notice: exactly ONE per account per UTC day. Reuse means
+   * the session was very likely copied, so the first detection notifies
+   * immediately (no threshold unlike login failures); the adapter already
+   * guarantees one event per family, this key guarantees one notice per
+   * day even across families. Redis unavailable ⇒ skip silently.
+   */
+  private async recordTokenReuse(accountId: string, familyId: string): Promise<void> {
+    const day = new Date().toISOString().slice(0, 10);
+    const key = `notif:tokenreuse:${accountId}:${day}`;
+    try {
+      const count = await this.redis.raw.incr(key);
+      if (count === 1) {
+        await this.redis.raw.expire(key, 90000);
+      }
+      if (count !== 1) {
+        return;
+      }
+      await this.notifyAccount(accountId, {
+        kind: 'security.token_reuse',
+        severity: 'warn',
+        title: 'A sign-in session was revoked for your protection',
+        body: 'We detected a reused session token for your account — a sign the session may have been copied. Every session from that sign-in was signed out. If this was not you, change your password and enable two-factor authentication.',
+        data: { family_id: familyId },
+        email: true,
+      });
+    } catch (err) {
+      NotificationsService.logger.warn(`token-reuse alert accounting failed: ${(err as Error).message}`);
+    }
+  }
 
   /**
    * Fixed-window failure counter (Redis): the Nth failed sign-in inside one

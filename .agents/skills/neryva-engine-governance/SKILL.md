@@ -7,7 +7,7 @@ description: Enforce Neryva Engine non-negotiable invariants, ADRs, ownership-ma
 
 Enterprise governance for the Engine control plane â€” system of record. Enforces 12 non-weakening invariants, ADR discipline, migration ownership, and ledger execution order.
 
-> **Implementation status (2026-09-01):** Engine ~45%, **Neryva MCP 100% complete** in `../products/neryva_mcp/` — consume, do not reimplement; **Agent Studio legacy only** (`src/modules/agent-studio` furniture, `studio_project_keys`) with **new Studio 0% hard-delete planned** — see `AGENTS.md` Implementation Status and `docs/architecture/engine/imp/ledger.md:2`. Do not add new Studio logic to Engine before ledger Phase 5.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` (`studio_project_keys`) is project-key binding furniture only, not the runtime — see `AGENTS.md` Implementation Status and `docs/architecture/engine/imp/ledger.md:2`. Do not add runtime logic to Engine.
 
 ## When to use
 

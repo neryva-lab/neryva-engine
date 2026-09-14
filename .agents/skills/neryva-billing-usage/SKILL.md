@@ -7,7 +7,7 @@ description: Implement immutable usage ledger, quotas/entitlements, price catalo
 
 Billing is an Engine module
 
-> **Implementation status (2026-09-01):** **Neryva MCP 100%** in `../products/neryva_mcp/` -- consume, do not reimplement. **Agent Studio legacy only** (`src/modules/agent-studio` furniture) with **new Studio 0% hard-delete planned** -- see `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., not a provider callback side effect. Stripe/payment provider owns collection + invoice mechanics; Engine owns product entitlements, quota decisions, internal usage truth, and reconciliation (`docs/architecture/engine/engine_architecture.md:401`).
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., not a provider callback side effect. Stripe/payment provider owns collection + invoice mechanics; Engine owns product entitlements, quota decisions, internal usage truth, and reconciliation (`docs/architecture/engine/engine_architecture.md:401`).
 
 ## When to use
 

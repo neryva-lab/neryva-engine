@@ -26,7 +26,7 @@ export class AgentStudioSummaryProvider implements SummaryProvider {
         { label: 'Projects', value: String(projects.length) },
       ],
       alerts: [],
-      primary_cta: { label: 'Manage', route: '/console/agent-studio' },
+      primary_cta: { label: 'Manage', route: '/agent-studio/dashboard' },
     };
   }
 }

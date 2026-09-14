@@ -43,7 +43,7 @@ export class AgentStudioSummary implements SummaryProvider {
       product: this.productKey,
       kpis,
       alerts: [],
-      primary_cta: { label: 'Manage', route: '/console/studio-furniture/dashboard' },
+      primary_cta: { label: 'Manage', route: '/agent-studio/dashboard' },
     };
   }
 }

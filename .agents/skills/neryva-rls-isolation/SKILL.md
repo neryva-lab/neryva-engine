@@ -7,7 +7,7 @@ description: Enforce tenant isolation via PostgreSQL RLS (FORCE), app predicates
 
 Defense-in-depth tenancy
 
-> **Implementation status (2026-09-01):** **Neryva MCP 100%** in `../products/neryva_mcp/` -- consume, do not reimplement. **Agent Studio legacy only** (`src/modules/agent-studio` furniture) with **new Studio 0% hard-delete planned** -- see `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`.: RLS is the safety net, application authorization is mandatory. Covers shared-tables, isolation tiers, and cross-tenant safety tests.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`.: RLS is the safety net, application authorization is mandatory. Covers shared-tables, isolation tiers, and cross-tenant safety tests.
 
 ## When to use
 

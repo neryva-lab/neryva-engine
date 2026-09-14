@@ -7,7 +7,7 @@ description: Implement Engine conversation, message, run projection, and durable
 
 Durable, provider-independent history owned by Engine. Studio execution is projected via lease-fenced run state; canonical events carry Engine sequence.
 
-> **Implementation status (2026-09-01):** Engine `conversations`/`messages`/`runs`/`run_events`/`assistants` 0% (not yet implemented; ledger Phases 3-4). **Agent Studio legacy** is furniture only (`src/modules/agent-studio` `studio_project_keys`) -- will be hard-deleted. **New Agent Studio 0%**, rebuild from ground up after Engine. **Neryva MCP 100%** in `../products/neryva_mcp/` -- consume, do not copy.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not copy. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` (`studio_project_keys`) is project-key binding furniture only, not the runtime.
 
 ## When to use
 

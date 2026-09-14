@@ -7,7 +7,7 @@ description: Implement audit hash-chain, retention policies, exports, legal hold
 
 Lifecycle is product capability
 
-> **Implementation status (2026-09-01):** **Neryva MCP 100%** in `../products/neryva_mcp/` -- consume, do not reimplement. **Agent Studio legacy only** (`src/modules/agent-studio` furniture) with **new Studio 0% hard-delete planned** -- see `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., not DB cleanup script. Covers retention, legal-hold, export, deletion, tombstone, and audit evidence as intertwined workflows.
+> **Canonical locations (final):** MCP contract = `../products/neryva_mcp/neryva-mcp-contract` (`@neryva/mcp-contract`) — consume, do not reimplement. Agent Studio runtime = `../products/agent-studio/` (Temporal + TS execution plane). `src/modules/studio-furniture` is project-key binding furniture only, not the runtime. See `AGENTS.md` Implementation Status. Engine tasks gated by `docs/architecture/engine/imp/ledger.md`., not DB cleanup script. Covers retention, legal-hold, export, deletion, tombstone, and audit evidence as intertwined workflows.
 
 ## When to use
 

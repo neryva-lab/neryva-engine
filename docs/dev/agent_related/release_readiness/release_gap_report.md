@@ -445,7 +445,7 @@ the `db-suites` job); authoring the standalone script remains optional.
 The deploy lane exists (`ops/engine/engine.Dockerfile`, compose + Caddy, compose
 `secrets:` for OIDC/MFA keys) and `ops/migrate.sh` is the single release-job migration
 runner — but nothing builds/pushes images or deploys on tag/release. The legacy Python
-product (`products/neryva_agent_studio`) has a full reference CD (GHCR push, Trivy, SBOM,
+product (`products/neryva_agent_studio` — quarantined Python prototype, NOT the canonical runtime) has a full reference CD (GHCR push, Trivy, SBOM,
 staging deploy, monthly DR-drill workflow) to copy the shape from. Also absent: helm/ terraform engine-side (same reference exists).
 
 **REL-6 — Runbook index promised 7, disk had 3. P1. CLOSED.**
@@ -520,8 +520,8 @@ Plane boundary status, for scoping "publish":
 | **Engine** (this repo) | Governance + data plane, ~54k lines, 18 modules, ~432 routes, 49 ordered migrations. Code complete per ledgers; gates pending the first run. |
 | **Neryva MCP** (`products/neryva_mcp`) | Contract + implementation, declared 100% end-to-end; 9-proto buf-managed contract, conformance fixtures, 11 phase test files; its own repo, no CI of its own. |
 | **Agent runtime** (`products/agent-studio`) | The existing TS execution satellite: 13 packages + 4 apps, template authoring tooling (registry generator + linter, 20 templates), infra (Dockerfiles, k8s manifest, alerts, SLOs), 9 test suites — **but no CI workflow of its own**, and it is where GAP-02's runtime side lands. |
-| **Legacy product** (`products/neryva_agent_studio`) | Separate Python/full-stack product with the workspace's only complete release engineering (CD, helm, terraform, DR drills, status page, 9 runbooks). Reference material for REL-5/7; not the plane this report gates. |
-| **New Agent Studio** (rebuild, `docs/architecture/agent_studio/*`) | **Pre-code blueprint** ("Status: pre-code implementation blueprint", 12 phases 0–11, per-phase exit criteria, no status tracking). Explicitly sequenced after Engine per `AGENTS.md`. Publishing does not wait for it; it is the next plane, not this release. |
+| **Legacy product** (`products/neryva_agent_studio` — quarantined, NOT the runtime) | Separate Python/full-stack prototype with the workspace's only complete release engineering (CD, helm, terraform, DR drills, status page, 9 runbooks). Reference material for REL-5/7 only; canonical runtime is `products/agent-studio/`, canonical contract is `products/neryva_mcp/`; not the plane this report gates. |
+| **Agent Studio blueprint** (`docs/architecture/agent_studio/*`) | Design blueprint for the runtime now implemented in `products/agent-studio/`. Publishing does not wait for further runtime work; remaining gates are CI/DB evidence only. |
 
 ---
 

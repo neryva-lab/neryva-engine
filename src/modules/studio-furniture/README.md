@@ -1,12 +1,12 @@
-# agent-studio (`src/modules/agent-studio`)
+# studio-furniture (`src/modules/studio-furniture`)
 
-**Purpose:** the Agent Studio product furniture inside the engine (ledger
+**Purpose:** project-key binding furniture inside the engine (ledger
 agent-studio S-1…S-4): entitlement plans, the summary card, org-level
-studio views, project-scoped key bindings, runtime pointers. Distinct from
+studio views, project-scoped key bindings, runtime pointers. This is NOT the Agent Studio runtime — canonical runtime is `products/agent-studio/` (Temporal + TS), canonical MCP contract is `products/neryva_mcp/neryva-mcp-contract/`. Distinct from
 the agent-runtime satellite (ADR-006): the runtime serves `/v1` +
 `/surfaces`; this module is the product REGISTRATION the console renders.
 
-**Routes:** `/console/agent-studio/**` (L1 + membership; entitlement
+**Routes:** `/console/studio-furniture/**` (L1 + membership; entitlement
 semantics 403 `entitlement_required` / 402 `past_due` per the access-model;
 trial start is owner/billing + step-up MFA). Org context: `X-Neryva-Org`.
 

@@ -68,7 +68,7 @@ Single NestJS/Fastify monolith `src/main.ts` + `src/app.module.ts:1`. All module
 | `organizations` | `ORGANIZATIONS` | `org_memberships`, `org_invites`, `projects`, `product_entitlements`, `org_settings`, `org_groups/members`, `org_service_accounts`, `org_deletions` (`0002`/`0009`/`0012`) | 7 controllers (`/console/org/*`) | 100% tenancy |
 | `console` | `CONSOLE` | `console_announcements` (`0009`) | home/status/audit/announcements + `ManifestRegistryService` + `RouteBijectionService` | Shell 80% â€” no assistant console |
 | `billing` | `BILLING` | `billing.spend_events`, `billing.billing_invoices`, `billing.price_catalog` (`0004`/`0011`), `billing_credits/credit_applications/budgets/invoice_lines/adjustments` (`0014`) | metering L3, usage, invoices, budgets, Stripe webhook, price catalog | 65% â€” no full ledger/compensation/reconciliation |
-| `agent-studio` | `AGENT_STUDIO` | `studio_project_keys` only (`0006`); key rows stay `python` `api_keys` until handover A-1 | `/console/agent-studio/*` furniture | **Legacy furniture** â€” 20%, name collides with new Agent Studio runtime |
+| `studio-furniture` (renamed from `agent-studio`, 3.7 DONE) | `AGENT_STUDIO` | `studio_project_keys` only (`0006`); key rows stay `python` `api_keys` until handover A-1 | `/console/studio-furniture/*` furniture | **Project-key binding furniture only — NOT the Studio runtime** (`products/agent-studio/`) |
 | `deployment` | `DEPLOYMENT` | `product_deployment.*` 7 tables (`0005`/`0017`) + envelope-encrypted `secrets` | 38 console routes + runtime/internal | 90% as product, 0% as generic Engine role split |
 | `keys` | `KEYS` | none yet (dual-write `python` `api_keys` until A-1) | `POST /internal/keys/validate*` L3 | 70% |
 | `config-publish` | `CONFIG_PUBLISH` | `published_configs`/`config_drafts`/`config_notifications` (`0007`/`0016`) | draft/validate/publish/rollback/delivery + pull | 85% (exemplar) |
@@ -80,7 +80,7 @@ Single NestJS/Fastify monolith `src/main.ts` + `src/app.module.ts:1`. All module
 
 ### 3.3 Collision to resolve before Phase 3
 
-`src/modules/agent-studio` is **not** the new architecture's Agent Studio `agent_studio_architecture.md:42-55`. The new Engine must own `assistants`/`conversations`/`runs`/`events`/`knowledge`/`memory`; the new Studio owns Temporal execution. The existing module is satellite-side Studio product furniture (key bindings + KPIs). Track rename under `Phase 3 â€” Rename`.
+`src/modules/studio-furniture` (renamed from `src/modules/agent-studio`, 3.7 DONE) is **not** the Agent Studio runtime `agent_studio_architecture.md:42-55`. Canonical runtime is `products/agent-studio/` (Temporal + TS); canonical MCP contract is `products/neryva_mcp/neryva-mcp-contract/`. The existing module is project-key binding furniture (key bindings + KPIs).
 
 ### 3.4 Database â€” 19 files (18 logical + duplicate 0009), 52 engine-owned tables
 
@@ -234,7 +234,7 @@ These are DONE â€” gates already hold:
 
 - [ ] **3.6** Generalize config-publish as sibling, not replacement â€” keep `published_configs` for platform `policy_set`/`guardrail_profile`/`quota_profile`/`model_catalog`; introduce `assistants` for agent definitions. Do not conflate both into one table.
 
-- [ ] **3.7** Rename legacy furniture â€” `src/modules/agent-studio` â†’ `src/modules/studio-furniture` (or `console/studio`) after `assistants` lands â€” `AgentStudioModule` `src/app.module.ts:13` currently at `studio_project_keys` only; rename prevents route/ownership ambiguity `engine_implementation_plan.md:213` product registration. Include import/codemod + `ownership-map.json` note; no behavior change.
+- [x] **3.7** Rename legacy furniture — DONE: `src/modules/agent-studio` → `src/modules/studio-furniture` — `AgentStudioModule` `src/app.module.ts:13` currently at `studio_project_keys` only; canonical runtime is `products/agent-studio/`, canonical contract is `products/neryva_mcp/neryva-mcp-contract/`.
 
 > **Phase 3.x — Agent template plane (2026-09-13).** Design authority: `docs/dev/agent_related/_agent_setup_detail_plan.md`; execution order: `docs/dev/agent_related/agent_setup_ledger.md` (TPL-0 … TPL-10, one task ID per PR). This expansion adds rows — it does not bypass Phase 3 exit gates. Pinned decisions: registry sync = release-job upsert (never DDL — template bumps require zero migrations); retrieval tools (`search_knowledge`/`search_memory`) become platform built-ins; BLOCK enforcement lives in the publish TX; no new version states (dead `VALIDATING`/`VALID`/`ROLLED_BACK` enum values stay reserved); install is copy (TemplateRelease ≠ AssistantVersion).
 >
@@ -595,7 +595,7 @@ These are the non-weakening 12 from `engine_architecture.md:570-584`, mirrored a
 
 | Target | Action | When | Notes |
 |---|---|---|---|
-| Legacy `src/modules/agent-studio` furniture | **Rename** `src/modules/agent-studio` â†’ `src/modules/studio-furniture` (or `src/modules/console/studio`) and update `AppModule` `ModuleFlags.agentStudio` mapping | Phase 3 (gate of `assistants` domain) | No behavior change; prevents routing/ownership confusion with new Studio runtime. Keep `studio_project_keys` table; additive columns already require Python Alembic 0017. |
+| `src/modules/studio-furniture` furniture (renamed, 3.7 DONE) | **Renamed** `src/modules/agent-studio` → `src/modules/studio-furniture` | Phase 3 (gate of `assistants` domain) | No behavior change. Canonical runtime is `products/agent-studio/`; canonical contract is `products/neryva_mcp/neryva-mcp-contract/`. Keep `studio_project_keys` table; additive columns already require Python Alembic 0017. |
 | Hard delete of legacy Agent Studio execution surfaces | **Delete** any remaining in-`engine/` execution runtime, broker fan-out shims, or sat-embedded agent loops that duplicate `runs`/`run_events` â€” replace with MCP authority | Phase 4â€“5 | Confirm no `../products/neryva_mcp` attachment remains `engine/`-internal after 5.6. |
 | `ownership-map.json` | **Add** entries for every new table to `engine-ts` owner; never list new tables as `python` | Same PR as migration | Enforced by `validateFlagMatrix` + migration self-check at kernel boot. |
 | `api_keys` direct mutation | **Remove** dual-write seams only at handover A-1 per `ownership-map.json:63-65` note; until then keep L2 verify + `KeysModule` dual path | Post-Phase 2 | Do not early-retire Python-owned `api_keys` DDL. |

@@ -21,7 +21,7 @@ faces:
   consumer: false
 
 console:
-  base_route: /console/agent-studio
+  base_route: /console/studio-furniture
   nav:
     - section: Workspace
       items: [dashboard, agents, conversations, activity]
@@ -35,7 +35,7 @@ console:
       items: [team, api-keys, webhooks, guardrails]
 
 portal:
-  base_path: /studio
+  base_path: /agent-studio
 
 scopes: [studio:read, studio:write, studio:publish]
 
@@ -43,7 +43,7 @@ entitlements:
   plans: [studio-team, studio-enterprise]
 
 summary_provider:
-  route: /console/agent-studio/summary
+  route: /console/studio-furniture/summary
   cache_seconds: 60
 
 metering:

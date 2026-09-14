@@ -1,6 +1,6 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { IsBoolean, IsInt, IsOptional, IsString, Length, Matches, Max, MaxLength, Min } from 'class-validator';
-import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
+import { AuthLayer, CurrentPrincipal, Public } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { Idempotent } from '../../common/http/idempotency';
 import { RateLimit } from '../../common/http/rate-limit';
@@ -167,6 +167,24 @@ export class OrgController {
   ): Promise<{ ok: true; orgId: string; role: string }> {
     const joined = await this.invites.redeem({ inviteId, token: dto.token, accountId: principal.id });
     return { ok: true, ...joined };
+  }
+
+  /**
+   * Public invite preview (side-effect free): what the invitee would accept.
+   * Anonymous by design (the invitee may not have a session yet) — hence the
+   * strict IP-scoped rate limit and the uniform generic failure for every
+   * non-usable state. No attempt registration (scanners must not burn
+   * invites), no audit row, token never logged. Redeem still requires the
+   * matching L1 session; preview discloses nothing redeemable.
+   */
+  @Get('invites/:inviteId/preview')
+  @Public()
+  @RateLimit({ name: 'org-invite-preview', capacity: 20, refillPerSecond: 0.05, scope: 'ip' })
+  async previewInvite(
+    @Param('inviteId') inviteId: string,
+    @Query('token') token?: string,
+  ): Promise<{ org_name: string; role: string; expires_at: string; invited_by: string; email_hint: string }> {
+    return this.invites.preview({ inviteId, token: token ?? '' });
   }
 
   // ── Org profile + settings ────────────────────────────────────────────────

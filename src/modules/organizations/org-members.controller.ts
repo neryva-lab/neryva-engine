@@ -25,6 +25,22 @@ export class CreateInviteDto {
 
   @IsIn(INVITABLE_ROLES as unknown as string[])
   role!: string;
+
+  /**
+   * Delivery channel: 'email' (Engine sends org.invite, default — today's
+   * behavior) or 'manual' (Engine sends nothing; the raw accept URL is
+   * returned ONCE for the admin to forward). Unknown values are rejected
+   * by the whitelist pipe; the service re-validates fail-closed.
+   */
+  @IsOptional()
+  @IsIn(['email', 'manual'])
+  delivery?: string;
+}
+
+export class ResendInviteDto {
+  @IsOptional()
+  @IsIn(['email', 'manual'])
+  delivery?: string;
 }
 
 export class ExtendInviteDto {
@@ -181,7 +197,7 @@ export class OrgMembersController {
     @Body() dto: CreateInviteDto,
     @CurrentPrincipal() principal: L1Principal,
     @Req() request: FastifyRequest,
-  ): Promise<{ inviteId: string; email: string }> {
+  ): Promise<{ inviteId: string; email: string; accept_url?: string; expires_at?: string }> {
     // Inviting AS admin assigns the admin role ⇒ owner + step-up (Δ5).
     if (dto.role === 'admin') {
       const actorRole = await this.orgAccess.getMembershipRole(principal.id, orgId);
@@ -193,7 +209,7 @@ export class OrgMembersController {
     if (principal.imp) {
       throw ApiError.forbidden('Impersonated sessions are read-only');
     }
-    return this.invites.create({ orgId, email: dto.email, role: dto.role, actorId: principal.id, actorEmail: principal.email });
+    return this.invites.create({ orgId, email: dto.email, role: dto.role, delivery: dto.delivery ?? 'email', actorId: principal.id, actorEmail: principal.email });
   }
 
   @Get(':orgId/invites')
@@ -224,11 +240,12 @@ export class OrgMembersController {
     @Param('orgId') orgId: string,
     @Param('inviteId') inviteId: string,
     @CurrentPrincipal() principal: L1Principal,
-  ): Promise<{ ok: true; expires_at: string }> {
+    @Body() dto?: ResendInviteDto,
+  ): Promise<{ ok: true; expires_at: string; accept_url?: string }> {
     if (principal.imp) {
       throw ApiError.forbidden('Impersonated sessions are read-only');
     }
-    return { ok: true, ...(await this.invites.resend({ orgId, inviteId, actorId: principal.id, actorEmail: principal.email })) };
+    return { ok: true, ...(await this.invites.resend({ orgId, inviteId, delivery: dto?.delivery ?? 'email', actorId: principal.id, actorEmail: principal.email })) };
   }
 
   /** Extend the accept window (the emailed link stays the same). */

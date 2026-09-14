@@ -58,8 +58,9 @@ export class InvitesService {
     private readonly memberships: MembershipsService,
   ) {}
 
-  async create(input: { orgId: string; email: string; role: string; actorId: string; actorEmail?: string | null }): Promise<{ inviteId: string; email: string }> {
+  async create(input: { orgId: string; email: string; role: string; delivery: string; actorId: string; actorEmail?: string | null }): Promise<{ inviteId: string; email: string; accept_url?: string; expires_at?: string }> {
     assertInvitableRole(input.role);
+    const delivery = normalizeInviteDelivery(input.delivery);
     const email = normalizeEmail(input.email);
 
     // Guard: the email is already an active member.
@@ -91,7 +92,13 @@ export class InvitesService {
       throw ApiError.conflict(`the organization is at its pending-invitation cap (${env.ORG_MAX_PENDING_INVITES})`);
     }
 
-    const { inviteId, token } = await this.insert(input.orgId, email, input.role, input.actorId);
+    const { inviteId, token, expiresAt } = await this.insert(input.orgId, email, input.role, input.actorId);
+    if (delivery === 'manual') {
+      // Manual delivery: the Engine sends nothing. The raw accept URL is
+      // returned ONCE here and never again (hash-only storage) — it is
+      // never logged, never audited, and never present in list/detail.
+      return { inviteId, email, accept_url: this.inviteUrl(inviteId, token), expires_at: expiresAt };
+    }
     await this.sendInviteEmail({ inviteId, token, orgId: input.orgId, email, role: input.role, actorId: input.actorId, actorEmail: input.actorEmail });
     // The token is returned to nobody — only the email carries it. The row
     // stores its hash.
@@ -135,7 +142,8 @@ export class InvitesService {
    * email link cannot survive a resend), reset attempts, restart the TTL
    * clock. Capped per invite so a stuck mailbox cannot loop forever.
    */
-  async resend(input: { orgId: string; inviteId: string; actorId: string; actorEmail?: string | null }): Promise<{ expires_at: string }> {
+  async resend(input: { orgId: string; inviteId: string; delivery: string; actorId: string; actorEmail?: string | null }): Promise<{ expires_at: string; accept_url?: string }> {
+    const delivery = normalizeInviteDelivery(input.delivery);
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx.select().from(orgInvites).where(and(eq(orgInvites.id, input.inviteId), eq(orgInvites.orgId, input.orgId))).limit(1),
     );
@@ -173,8 +181,11 @@ export class InvitesService {
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
-      details: { email: invite.email, resend_count: invite.resendCount + 1 },
+      details: { email: invite.email, resend_count: invite.resendCount + 1, delivery },
     });
+    if (delivery === 'manual') {
+      return { expires_at: expiresAt, accept_url: this.inviteUrl(invite.id, token) };
+    }
     await this.sendInviteEmail({ inviteId: invite.id, token, orgId: input.orgId, email: invite.email, role: invite.role, actorId: input.actorId, actorEmail: input.actorEmail });
     return { expires_at: expiresAt };
   }
@@ -280,12 +291,47 @@ export class InvitesService {
     return { orgId: invite.orgId, role: invite.role };
   }
 
+  /**
+   * Public preview (side-effect free): what the invitee would accept. The
+   * ONLY token-consuming read that changes nothing — no attempt registration
+   * (link scanners must not burn invites), no audit row (no token-adjacent
+   * records), uniform generic failure for every non-usable state so no
+   * oracle distinguishes missing/revoked/expired/accepted/locked.
+   */
+  async preview(input: { inviteId: string; token: string }): Promise<{ org_name: string; role: string; expires_at: string; invited_by: string; email_hint: string }> {
+    const t = (input.token ?? '').trim();
+    if (!input.inviteId || !t || t.length > 256) {
+      throw ApiError.notFound('invitation');
+    }
+    const rows = await this.db.withBypass((tx) =>
+      // Justification (withBypass): preview runs BEFORE the caller is a
+      // member — RLS on org_id cannot admit the row yet. Filtering is by
+      // the invite's unguessable id + hash, same as redeem.
+      tx.select().from(orgInvites).where(eq(orgInvites.id, input.inviteId)).limit(1),
+    );
+    const invite = rows[0];
+    if (!invite || invite.tokenHash !== sha256Hex(t)) {
+      throw ApiError.notFound('invitation');
+    }
+    if (invite.revokedAt || invite.acceptedAt || Date.parse(invite.expiresAt) < Date.now() || invite.attempts >= MAX_REDEEM_ATTEMPTS) {
+      throw ApiError.notFound('invitation');
+    }
+    const inviter = invite.invitedBy ? await this.accounts.findById(invite.invitedBy).catch(() => null) : null;
+    return {
+      org_name: await getOrgName(this.db, invite.orgId),
+      role: invite.role,
+      expires_at: invite.expiresAt,
+      invited_by: inviter?.displayName?.trim() ? String(inviter.displayName) : 'a member of your team',
+      email_hint: maskInviteEmail(invite.email),
+    };
+  }
+
   /** Invite-accept URL for the console route (frontend: /platform/invites/:id?token=). */
   inviteUrl(inviteId: string, token: string): string {
     return `${env.ENGINE_BASE_URL.replace(/\/$/, '')}/platform/invites/${inviteId}?token=${token}`;
   }
 
-  private async insert(orgId: string, email: string, role: string, actorId: string): Promise<{ inviteId: string; token: string }> {
+  private async insert(orgId: string, email: string, role: string, actorId: string): Promise<{ inviteId: string; token: string; expiresAt: string }> {
     const token = randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + env.ORG_INVITE_TTL_DAYS * 86_400_000).toISOString();
     const inserted = await this.db.withOrg(orgId, (tx) =>
@@ -304,7 +350,7 @@ export class InvitesService {
       details: { role, ttl_days: env.ORG_INVITE_TTL_DAYS },
     });
     await this.events.emit(EngineEvents.OrgInviteCreated, { orgId, inviteId: inserted[0].id, email, role });
-    return { inviteId: inserted[0].id, token };
+    return { inviteId: inserted[0].id, token, expiresAt };
   }
 
   private async sendInviteEmail(input: { inviteId: string; token: string; orgId: string; email: string; role: string; actorId: string; actorEmail?: string | null }): Promise<void> {
@@ -359,4 +405,35 @@ function toView(row: typeof orgInvites.$inferSelect): InviteView {
     resendCount: row.resendCount,
     attempts: row.attempts,
   };
+}
+
+/** Delivery channels for an invite. Email = Engine sends; manual = admin forwards. */
+export type InviteDelivery = 'email' | 'manual';
+
+/**
+ * Fail-closed delivery parsing (DTO whitelists first; the service is the
+ * trust boundary). Pure — unit-tested.
+ */
+export function normalizeInviteDelivery(raw: unknown): InviteDelivery {
+  if (raw === 'email' || raw === 'manual') {
+    return raw;
+  }
+  throw ApiError.validation({ delivery: "must be 'email' or 'manual'" });
+}
+
+/**
+ * Masked email hint for the public preview: first local-part character +
+ * full domain (e.g. j***@acme.com). Enough for the invitee to recognize
+ * which mailbox to use, useless for harvesting. Pure — unit-tested.
+ */
+export function maskInviteEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  if (at <= 0) {
+    return '***';
+  }
+  const domain = email.slice(at + 1);
+  if (!domain) {
+    return '***';
+  }
+  return `${email.slice(0, 1)}***@${domain}`;
 }

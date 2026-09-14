@@ -96,7 +96,7 @@ Redeem failure copy (exact Engine semantics — render these, not generic errors
 |---|---|
 | 403 `sent to a different email address` (`invites.service.ts:243-246` — redemption requires the session email to match the invite) | "This invitation was sent to {invite.email}. Sign in with that address to accept." + account-switch action |
 | 409 expired / revoked / locked / already-used (`:232-240,266-268`) | Uniform invalid-invite screen WITH a "Continue to my workspace" exit — a brand-new user already owns a fresh personal org (unconditional autocreation), so never trap an authenticated user on an error page. The button sets active org to their personal org (Flow A freshness logic) and routes to dashboard. |
-| 409 `seat_limit_reached` / member cap (`memberships.service.ts:277-279,314`; invite stays usable by design — `invites.service.ts:248-252`) | "This workspace is full. Ask an owner to add seats, then retry — your invitation is still valid." + retry button (do NOT burn the token client-side) |
+| 409 seat-full / member-cap (`seatLimitReached`, `organization is at its member cap` — `memberships.service.ts:277-279,314`; invite stays usable by design, `invites.service.ts:248-252`) | "This workspace is full. Ask an owner to add seats, then retry — your invitation is still valid." + retry button (do NOT burn the token client-side). Member cap is abuse posture, not billing — same retryable pattern. Re-activating a removed member consumes no additional seat. |
 
 Invited users already know why they are here (research: show inviter + workspace + role context, minimize setup, guide to one collaborative first action). Expired/revoked invites render the uniform invalid-invite state, never an org-creation detour.
 
@@ -136,6 +136,15 @@ Invited users already know why they are here (research: show inviter + workspace
 - [ ] Abandoned first run → usable dashboard with defaults; rename available in settings.
 - [ ] Checklist reflects Engine `GET /console/onboarding` truthfully (no client-side completion flags).
 - [ ] Signup→first-successful-run instrumented (in-session + 7-day).
+
+---
+
+## 6. Locked decisions (2026-09-15)
+
+- **Activation event:** first successful assistant run in the org (production or test-run). Instrumented in-session + 7-day from day one.
+- **Trial placement: value-first.** Engine permits runs with no entitlement row — the quota wall passes open absent a plan row (`conversations.service.ts:446-460`; only `deployment`/`studio-furniture` routes are entitlement-gated) and test/eval runs skip quota + billing entirely. Trial is prompted contextually (limits view, usage approach, collaborator invite), never as a gate before first value.
+- **Default project: user-created.** Runs work unscoped; the checklist prompts project creation. No auto-created "Getting started" project.
+- **Template-first activation:** the shortest path to first value is template gallery → install → test-run (zero quota/billing risk); blank-assistant editor stays secondary.
 
 ---
 

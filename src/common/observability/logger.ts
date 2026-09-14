@@ -15,7 +15,8 @@ import { env } from '../config/env';
  * Redaction is set for the fields humans put secrets into; anything missed
  * is a bug to fix at the source, but the common ones never reach disk.
  */
-const REDACT_PATHS = [
+/** Pino redact paths. Exported for the log-redaction tripwire test: removing an entry breaks the build gate — deliberate removal updates the test. */
+export const REDACT_PATHS = [
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-mfa-proof"]',

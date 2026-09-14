@@ -98,6 +98,7 @@ export class AccountController {
 
   @Patch('auth/me')
   @AuthLayer('l1')
+  @Idempotent()
   async updateMe(@CurrentPrincipal() principal: L1Principal, @Body() body: { display_name?: string }): Promise<{ ok: true }> {
     if (typeof body.display_name !== 'string' || body.display_name.trim().length < 1 || body.display_name.length > 256) {
       throw ApiError.validation({ display_name: '1..256 characters' });

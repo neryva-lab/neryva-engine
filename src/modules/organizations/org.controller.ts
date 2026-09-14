@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { IsBoolean, IsInt, IsOptional, IsString, Length, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AuthLayer, CurrentPrincipal, Public } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
@@ -12,6 +12,13 @@ import { OrgSettingsService } from './org-settings.service';
 import { OrgAccessService } from './org-access.service';
 
 export class RedeemInviteDto {
+  @IsString()
+  @Length(16, 256)
+  token!: string;
+}
+
+/** Preview carries the same bearer-equivalent token — body only, never the URL (proxies and our own request logs record url+query). */
+export class PreviewInviteDto {
   @IsString()
   @Length(16, 256)
   token!: string;
@@ -173,18 +180,22 @@ export class OrgController {
    * Public invite preview (side-effect free): what the invitee would accept.
    * Anonymous by design (the invitee may not have a session yet) — hence the
    * strict IP-scoped rate limit and the uniform generic failure for every
-   * non-usable state. No attempt registration (scanners must not burn
-   * invites), no audit row, token never logged. Redeem still requires the
-   * matching L1 session; preview discloses nothing redeemable.
+   * non-usable state. POST with the token in the BODY, never the query
+   * string: proxies, CDNs, browser history, and our own Fastify request logs
+   * record url+query — bodies do not appear there, and a `token` key
+   * additionally matches the pino redact paths. No attempt registration
+   * (scanners must not burn invites), no audit row, token never logged.
+   * Redeem still requires the matching L1 session; preview discloses
+   * nothing redeemable.
    */
-  @Get('invites/:inviteId/preview')
+  @Post('invites/:inviteId/preview')
   @Public()
   @RateLimit({ name: 'org-invite-preview', capacity: 20, refillPerSecond: 0.05, scope: 'ip' })
   async previewInvite(
     @Param('inviteId') inviteId: string,
-    @Query('token') token?: string,
+    @Body() dto: PreviewInviteDto,
   ): Promise<{ org_name: string; role: string; expires_at: string; invited_by: string; email_hint: string }> {
-    return this.invites.preview({ inviteId, token: token ?? '' });
+    return this.invites.preview({ inviteId, token: dto.token });
   }
 
   // ── Org profile + settings ────────────────────────────────────────────────

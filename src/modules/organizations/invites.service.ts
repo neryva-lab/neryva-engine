@@ -64,15 +64,23 @@ export class InvitesService {
     const email = normalizeEmail(input.email);
 
     // Guard: the email is already an active member.
-    const existingMember = await this.db.withOrg(input.orgId, (tx) =>
+    // Guard: a suspended member already holds a (deactivated) membership row
+    // — inviting them would silently reactivate via the addMember upsert.
+    // Reject with the reactivate path instead so the intent is explicit.
+    const priorMember = await this.db.withOrg(input.orgId, (tx) =>
       tx
-        .select({ id: orgMemberships.id })
+        .select({ id: orgMemberships.id, status: orgMemberships.status })
         .from(orgMemberships)
-        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, sql`(select id from accounts where email = ${email})`), eq(orgMemberships.status, 'active')))
+        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, sql`(select id from accounts where email = ${email})`)))
         .limit(1),
     );
-    if (existingMember[0]) {
+    if (priorMember[0]?.status === 'active') {
       throw ApiError.conflict('this email is already a member of the organization');
+    }
+    if (priorMember[0]?.status === 'suspended') {
+      throw ApiError.conflict('this email belongs to a suspended member — reactivate them in the Members tab instead', {
+        reason: 'member_suspended',
+      });
     }
 
     // Guard: one usable invite per (org, email) — revoke it first to re-issue.

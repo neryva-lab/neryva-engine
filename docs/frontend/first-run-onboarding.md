@@ -66,12 +66,22 @@ Proposed: **first successful assistant run in the org** (production or test-run 
 
 ```text
 Invite email link (/platform/invites/:inviteId?token= — exact shape Engine
-generates in invites.service.ts:284-286; the frontend MUST own this route)
-  → stash {inviteId, token} in sessionStorage BEFORE any redirect
+generates in invites.service.ts; the frontend MUST own this route)
+  → stash {inviteId, token, savedAt} in localStorage under the single
+    namespaced key `neryva.pending_invite` (newest wins) BEFORE any redirect.
+    NOT sessionStorage: mobile OAuth app-switches and new-tab sign-ins lose
+    tab-scoped storage and strand the user post-callback. localStorage
+    survives same-origin returns; the value is a short-TTL single-purpose
+    token (XSS could read it, but XSS already owns the session — CSP is the
+    control, and the token is email-bound so it is useless elsewhere).
   → if anonymous: OAuth first (same OP flow; new account auto-creates AND
     gets its own personal org via the unconditional AccountCreated listener —
-    this is expected, not a bug; the personal org stays in the picker's list)
-  → on callback with stashed invite: POST /console/org/invites/:inviteId/redeem
+    this is expected, not a bug; the personal org stays in the picker's list).
+    ALSO stash the invite page URL (with ?token=) as the post-login return
+    target: the page re-stashes from the URL on every load, so even total
+    storage loss self-heals via the email link.
+  → on callback with stashed invite (ignore when older than 30 min):
+    POST /console/org/invites/:inviteId/redeem
   → set active org = redeem.orgId (response returns {orgId, role} —
     invites.service.ts:280). NEVER default to contexts[0]: index 0 is the
     fresh personal org, not the team org.

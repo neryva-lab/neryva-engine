@@ -24,7 +24,7 @@
 ## 1. Invite creation (owner/admin only)
 
 - Entry: members page → email + role picker (`admin | billing | developer | reader` — owner absent by construction; inviting AS admin is owner-only + step-up, `org-members.controller.ts:185-192`) → delivery choice (§1A) → `POST :orgId/invites` (`@Idempotent`, rate-limited, `org-members.controller.ts:175-184`).
-- Server guards, in order: role invitable (+ admin-role invite requires owner + fresh MFA proof) → email normalized (lowercase — case-mismatch accept bugs are structurally impossible) → not already an active member → no usable pending invite for (org, email) → pending-invite ceiling (`ORG_MAX_PENDING_INVITES`).
+- Server guards, in order: role invitable (+ admin-role invite requires owner + fresh MFA proof) → email normalized (lowercase — case-mismatch accept bugs are structurally impossible) → not already an active member → not a SUSPENDED member (409 `member_suspended`: "belongs to a suspended member — reactivate in Members instead"; inviting would otherwise silently reactivate via the `addMember` upsert, bypassing the explicit reactivate path and its audit) → removed/nonexistent addresses proceed → no usable pending invite for (org, email) → pending-invite ceiling (`ORG_MAX_PENDING_INVITES`).
 - Pending row shows in the invites tab with computed status (pending/accepted/revoked/expired — never stored, derived per read so it cannot drift).
 - Lifecycle ops on pending rows: **resend** (token rotation + attempt reset + TTL restart, cap 5 — rotation-guarded against concurrent redeem), **extend** (expiry push, token unchanged, ≤30d), **revoke** (one write, link dies immediately with the same generic error as expired). All audited (`org.invite_created/resent/extended/revoked`).
 
@@ -65,19 +65,29 @@ Engine contract for the later implementation (specified here so it is mechanical
 
 ```text
 GET /platform/invites/:inviteId?token=   ← NEW frontend route (does not exist yet)
-  → stash {inviteId, token} in sessionStorage (same stash discipline as first-run doc)
+  → stash {inviteId, token, savedAt} in localStorage under `neryva.pending_invite`
+    (newest wins). NOT sessionStorage: mobile OAuth app-switches and new-tab
+    sign-ins lose tab-scoped storage and strand the user post-callback.
+    Consume-and-delete on use; ignore when older than 30 min; the invite page
+    re-stashes from ?token= on every load so total storage loss self-heals
+    via the email link, and the invite URL itself is the post-login return
+    target for the same reason.
   → if anonymous: OAuth (any provider) → callback → return here
   → preview (side-effect free): org name, inviter, ROLE being granted, expiry
       — the invitee sees what they accept BEFORE clicking (role-on-invite rule).
-      ⚠️ REQUIRED ENGINE ADDITION (no such endpoint exists today — the only
-      token-consuming route is redeem): public
-      `GET /invites/:inviteId/preview?token=` performing a hash lookup and
-      returning ONLY {org_name, role, expires_at, inviter display, status}.
+      ⚠️ IMPLEMENTED as `POST console/org/invites/:inviteId/preview` with
+      `{token}` in the JSON BODY — never the query string. Rationale, verified
+      in-repo: proxies/CDNs log url+query, and Engine's own Fastify request
+      logs record `url` with query string (`logger.ts:8`) outside the redact
+      paths (`logger.ts:18-58`, which cover headers and body keys like
+      `*.token` but NOT `req.url`). Bodies appear in neither. Returns ONLY
+      {org_name, role, expires_at, invited_by (display name, never email),
+      email_hint (`j***@acme.com` masked)}.
       Rules: token-hash comparison only; uniform generic error for
-      missing/revoked/expired/accepted (same status/body/timing); strict
-      rate limit (redeem's `org-invite-redeem` pattern); token never logged,
-      never in audit details, `Referrer-Policy: no-referrer` on the page.
-      No membership data, no email echo beyond what the invitee already owns.
+      missing/revoked/expired/accepted/locked (same status/body/timing); strict
+      IP-scoped rate limit; token never logged, never in audit details;
+      `Referrer-Policy: no-referrer` on the page.
+      No membership data, no email echo beyond the masked hint.
   → [Accept] → POST …/invites/:inviteId/redeem
   → Engine (invites.service.ts:218-281): hash match → liveness (not revoked/
     accepted/expired, attempts < 5) → session-email == invite-email (403) →
@@ -129,7 +139,8 @@ Offboarding posture: **suspend before remove** (suspend keeps the row + history,
 - [ ] Owner/admin invites by email+role+delivery: email path delivers the link with no URL in any response; manual path returns `accept_url` once; token never appears in any other API response, log, or analytics event (grep-proven).
 - [ ] New-address invitee: OAuth → accept → member with invite role; no duplicate account; personal background org untouched.
 - [ ] Existing user: accept attaches membership; already-member gets "already a member", not a second row (unique `(account, org)`).
-- [ ] Wrong-email session → 403 + switch-account path; expired/revoked/used → uniform invalid screen + workspace exit; seat-full → retryable "workspace full" (invite intact).
+- [ ] Wrong-email session → 403 + switch-account path; expired/revoked/used → uniform invalid screen + workspace exit; seat-full → retryable "workspace full" (invite intact); suspended address invited → 409 `member_suspended` + reactivate-instead copy (no silent reactivation).
+- [ ] Preview is POST-only (GET → 404); scanner/prefetcher POSTs change no state (replay 10×, invite still pending, attempts untouched); wrong token reveals nothing distinguishable from expired; raw token absent from request logs (grep a preview call's request-id across the log stream).
 - [ ] Double-click/refresh/concurrent redeem → exactly one membership (conditional claim + upsert), idempotent replays.
 - [ ] Admin cannot assign owner/admin (403 + step-up proof demanded of owner path); cannot remove owner/admin; last owner cannot leave.
 - [ ] Suspended member's in-flight session denied on next request (guard re-check, not just UI hide).
@@ -145,7 +156,8 @@ SCIM provisioning/deprovisioning, domain-claim auto-join, SSO-JIT, guest/restric
 Both landed, additive only (no migration, no semantic change to existing paths):
 
 1. **Delivery flag + one-time URL** (`org-members.controller.ts` DTOs, `invites.service.ts` create/resend). `delivery?: 'email'|'manual'` whitelisted at the DTO boundary and re-validated fail-closed in the service (`normalizeInviteDelivery`). Default `email` = previous behavior byte-for-byte. Manual skips `sendInviteEmail` and returns `{inviteId, email, accept_url, expires_at}` once; resend mirrors it. List/detail/extend/audit untouched and URL-free.
-2. **Public invite preview** (`GET console/org/invites/:inviteId/preview?token=`, `org.controller.ts` + `invites.service.ts` preview). Hash-only lookup, uniform `404 invitation` for every non-usable state (missing/bad-token/revoked/accepted/expired/locked included), no attempt registration, no audit row, IP-scoped `org-invite-preview` rate limit, masked `email_hint` (`maskInviteEmail`: first local char + full domain).
+2. **Public invite preview** (`POST console/org/invites/:inviteId/preview`, body `{token}`, `org.controller.ts` + `invites.service.ts` preview). Hash-only lookup, uniform `404 invitation` for every non-usable state (missing/bad-token/revoked/accepted/expired/locked included), no attempt registration, no audit row, IP-scoped `org-invite-preview` rate limit, masked `email_hint` (`maskInviteEmail`: first local char + full domain). POST-not-GET deliberately: proxies/CDNs and Engine's own Fastify request lines log url+query outside the redact paths — bodies appear in neither.
+3. **Suspended re-invite rejected at creation** (`create()` 409s `member_suspended` with reactivate-instead copy). No-crash note: the old path could not 500 — the `addMember` upsert would have silently reactivated — but silent reactivation bypasses the explicit path and its audit, so rejection is the correct semantic. Removed/nonexistent addresses proceed as before.
 
 ---
 
@@ -153,6 +165,7 @@ Both landed, additive only (no migration, no semantic change to existing paths):
 
 - `engine/src/modules/organizations/invites.service.ts:61-99,218-286` — create guards, redeem, single-use claim, invite URL shape
 - `engine/src/modules/organizations/org-members.controller.ts:62-184` — list/detail/role/suspend/reactivate/remove/leave/invite routes + guards
+- `engine/src/modules/organizations/org.controller.ts` — redeem (`invites/:inviteId/redeem`) + public preview (`POST invites/:inviteId/preview`, body token)
 - `engine/src/modules/organizations/memberships.service.ts:43-60,244-337` — exactly-one-owner invariant, addMember seat wall, changeRole transfer rules
 - `engine/src/modules/organizations/schema.ts:172-197` — roles, invitable set, staged deletion
 - `engine/src/modules/organizations/org-access.service.ts:37-41` — unconditional personal-org autocreation (background org for invitees)

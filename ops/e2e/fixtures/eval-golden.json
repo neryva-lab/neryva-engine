@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "name": "eval-golden",
+    "purpose": "REL-2.5 golden anchor — the checked-in eval case set the executor path must run deterministically (REL-7.5's CI gate consumes this via the db-suites pass)",
+    "schema": "engine evalCaseSchema (eval.service.ts) — input.text + expected.contains/not_contains",
+    "harness": "engine-side interim lexical scorer (workers/eval-scoring.consumer.ts scoreLexical); state_assertions/rubrics are Studio eval-worker territory",
+    "expected_outcome": "all cases pass when the assistant under test answers with the expected text; any failure yields eval decision WARN/BLOCK per the release policy thresholds"
+  },
+  "dataset": {
+    "name": "golden:harness-v1",
+    "description": "Deterministic lexical cases for the engine-side executor — checked in, versioned with the harness"
+  },
+  "cases": [
+    {
+      "sequence": 1,
+      "input": { "text": "Say exactly: NERYVA_HARNESS_OK" },
+      "expected": { "contains": ["neryva_harness_ok"], "not_contains": ["i cannot", "error"] }
+    },
+    {
+      "sequence": 2,
+      "input": { "text": "Repeat the word banana once." },
+      "expected": { "contains": ["banana"] }
+    },
+    {
+      "sequence": 3,
+      "input": { "text": "Do not mention the word pineapple. Answer with OK." },
+      "expected": { "contains": ["ok"], "not_contains": ["pineapple"] }
+    }
+  ]
+}

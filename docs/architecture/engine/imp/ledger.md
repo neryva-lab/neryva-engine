@@ -101,18 +101,25 @@ Single NestJS/Fastify monolith `src/main.ts` + `src/app.module.ts:1`. All module
 
 | Phase | Name | Goal | Depends on | Current % | New tables |
 |---|---|---|---|---|---|
-| **0** | Architecture, threat model & repo foundation | Enforceable repo rules before business features | â€” | 65% | none |
+| **0** | Architecture, threat model & repo foundation | Enforceable repo rules before business features | — | 65% | none |
 | **1** | Platform kernel & database safety | Shared kernel + tx/session/RLS discipline | 0 | 75% | none |
 | **2** | Identity / organization / authorization hardening | Production tenancy closure & CSR controls | 1 | 85% | `authorization_policies` (optional) |
-| **3** | Organizations, assistants, policies & publication | Immutable assistant versions pinned to runs | 2 | 15%* | `assistants`, `assistant_versions`, `policy_snapshots` (+ rename legacy `agent-studio`) |
-| **4** | Conversations, messages, runs & canonical events | Durable conversation boundary + Engine run projection | 3 | 0% | `conversations`, `conversation_participants`, `messages`, `runs`, `run_events`, `event_cursors` |
-| **5** | Neryva MCP authority & Studio integration | Engine half of `neryva.mcp.v1` without DB leakage | 4 | 0% engine-side (contract complete in `../products/neryva_mcp`) | `run_idempotency`, `checkpoints`, `tool_effects`, `approvals`, `memory_proposals` (or mapped into Phase 4 tables); lease state lives on `runs` (pinned 2026-09-01, no `run_leases` table) |
-| **6** | Outbox / inbox / broker / async workers | Every async boundary durable & replay-safe | 5 (generic introduced at 4) | 0% generic | `outbox_events`, `inbox_events` |
-| **7** | Files, uploads, knowledge & claim-check storage | Secure large-payload + rebuildable ingestion | 6 | 10% (presign only) | `artifacts`, `upload_sessions`, `documents`, `document_versions`, `chunks`, `embeddings` (+ pgvector) |
-| **8** | Billing, quotas, entitlements & reconciliation | Immutable ledger + deterministic quotas | 7 | 60% | `usage_ledger` (or evolve `billing.spend_events`) + `provider_reconciliation_runs` |
-| **9** | Audit, retention, export, legal hold & deletion | Data lifecycle as product capability | 8 | 40% | `retention_policies`, `legal_holds`, `export_requests`, `purge_tasks` |
-| **10** | Enterprise operations & production hardening | ASVS, DR, SLOs, chaos | 9 | 30% | none (runbooks + dashboards) |
+| **3** | Organizations, assistants, policies & publication | Immutable assistant versions pinned to runs | 2 | 85%* | `assistants`, `assistant_versions`, `policy_snapshots` (+ rename legacy `agent-studio`) |
+| **4** | Conversations, messages, runs & canonical events | Durable conversation boundary + Engine run projection | 3 | 85% | `conversations`, `conversation_participants`, `messages`, `runs`, `run_events`, `event_cursors` |
+| **5** | Neryva MCP authority & Studio integration | Engine half of `neryva.mcp.v1` without DB leakage | 4 | 85% engine-side (contract complete in `../products/neryva_mcp`) | `run_idempotency`, `checkpoints`, `tool_effects`, `approvals`, `memory_proposals` (or mapped into Phase 4 tables); lease state lives on `runs` (pinned 2026-09-01, no `run_leases` table) |
+| **6** | Outbox / inbox / broker / async workers | Every async boundary durable & replay-safe | 5 (generic introduced at 4) | 85% generic | `outbox_events`, `inbox_events` |
+| **7** | Files, uploads, knowledge & claim-check storage | Secure large-payload + rebuildable ingestion | 6 | 80% | `artifacts`, `upload_sessions`, `documents`, `document_versions`, `chunks`, `embeddings` (+ pgvector) |
+| **8** | Billing, quotas, entitlements & reconciliation | Immutable ledger + deterministic quotas | 7 | 90% | `usage_ledger` (or evolve `billing.spend_events`) + `provider_reconciliation_runs` |
+| **9** | Audit, retention, export, legal hold & deletion | Data lifecycle as product capability | 8 | 85% | `retention_policies`, `legal_holds`, `export_requests`, `purge_tasks` |
+| **10** | Enterprise operations & production hardening | ASVS, DR, SLOs, chaos | 9 | 60% | none (runbooks + dashboards) |
 | **11** | Optional scale & isolation extensions | Only from measurement/contract | 10 | 0% | only when justified |
+
+> **% column refreshed (REL-10.1, 2026-09-13):** the previous column predated this
+> ledger's own per-phase “implementation status” blockquotes (Phase 3 shown 15% while
+> recorded code-complete, etc.). The numbers above now track the blockquotes: Phases
+> 3–9 are code-complete with DB-backed exit gates pending the first full CI/DB run
+> (the remaining %); Phase 10 is code-side done with live drills open. The blockquotes
+> remain the authority; this column is their summary.
 | *`config-publish` exemplar = 85% for *platform config* ; *assistant* domain = 15% |
 
 ---

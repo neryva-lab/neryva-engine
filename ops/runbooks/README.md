@@ -3,6 +3,8 @@
 One runbook per failure mode the on-call can hit. Every runbook must name:
 detection (alert/dashboard), blast radius, first actions, recovery, and the
 evidence to capture. Phase 10.12 rehearse-and-update cadence: quarterly.
+Status components + alert→page→on-call routing: `ops/monitoring/status-page.md`
+(REL-8.7) — update it in the same PR as any alert/component change.
 
 | Runbook | Trigger |
 |---|---|
@@ -13,6 +15,8 @@ evidence to capture. Phase 10.12 rehearse-and-update cadence: quarterly.
 | `mcp-capability-incident.md` | capability leak / rotation / scope-confusion report |
 | `cross-tenant-incident.md` | suspected isolation breach |
 | `billing-webhook-reconciliation.md` | webhook inbox in `reconciliation_required` |
+| `disaster-recovery.md` | DB loss/corruption, region outage, restore drill (RPO ≤ 5 min, RTO ≤ 1 h) |
+| `secret-rotation.md` | scheduled rotation, suspected leak, vendor expiry (JWT/cookie/envelope/capability/Stripe/S3 keys) |
 
 ## Quick reference — the five commands on-call needs
 

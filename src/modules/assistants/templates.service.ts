@@ -1,10 +1,11 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { ToolCatalogService, BUILT_IN_TOOLS } from './tool-catalog.service';
+import { templatePlatformBlocks } from './template-blocks.schema';
 import { documents } from '../knowledge/schema';
 import {
   assistants,
@@ -18,6 +19,7 @@ import {
   ASSISTANT_SCHEMA_VERSION,
 } from './schema';
 import { ControlBlocksService } from './control-blocks.service';
+import { ModelCatalogService, partitionModelGaps } from './model-catalog.service';
 import { validateAssistantPayload, rejectUnknownPayloadKeys } from './validation';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
@@ -38,7 +40,11 @@ import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
  * is unavailable at their org.
  */
 
-export type CompatibilityReasonCode = 'required_model_capability_missing' | 'required_tool_missing' | 'knowledge_source_missing';
+export type CompatibilityReasonCode =
+  | 'required_model_capability_missing'
+  | 'required_tool_missing'
+  | 'knowledge_source_missing'
+  | 'provider_credential_missing';
 
 export interface CompatibilityReason {
   code: CompatibilityReasonCode;
@@ -73,6 +79,7 @@ export class TemplatesService {
     private readonly audit: AuditService,
     private readonly configPublish: ConfigPublishService,
     private readonly toolCatalog: ToolCatalogService,
+    private readonly modelCatalog: ModelCatalogService,
   ) {}
 
   // ── Registry reads ───────────────────────────────────────────────────
@@ -198,6 +205,17 @@ export class TemplatesService {
       throw ApiError.validation({
         template: `template requires engine schema ${template.minEngineSchema} — this engine serves ${ASSISTANT_SCHEMA_VERSION}`,
       });
+    }
+    // REL-6.1 — platform kill: a staff-written platform block stops new
+    // installs of the slug platform-wide (existing assistants keep running;
+    // their release pointers also refuse re-assignment — rollouts.service).
+    const block = await this.db.root
+      .select({ id: templatePlatformBlocks.id, reason: templatePlatformBlocks.reason })
+      .from(templatePlatformBlocks)
+      .where(and(eq(templatePlatformBlocks.slug, input.slug), isNull(templatePlatformBlocks.liftedAt)))
+      .limit(1);
+    if (block.length > 0) {
+      throw ApiError.forbidden(`template ${input.slug} is platform-blocked (${block[0].reason})`, { slug: input.slug });
     }
     // Deep unknown-key diff before validation: a registry row carrying
     // template-only extensions (nested inside policy objects) must fail 422
@@ -370,6 +388,10 @@ export class TemplatesService {
     let enabledToolNames: Set<string> | null = null;
     let enabledModels: Set<string> | null | undefined;
     let hasReadyDocuments: boolean | undefined;
+    // GAP-09 facts (REL-1.6): the seeded platform catalog + this org's
+    // usable providers. Undefined = not probed yet; Null = catalog unseeded
+    // (legacy behavior — one reason for every missing model).
+    let platformFacts: { models: Set<string>; credentialProviders: Set<string> } | null | undefined;
 
     const result = new Map<string, TemplateCompatibility>();
     for (const item of parsed) {
@@ -388,13 +410,41 @@ export class TemplatesService {
 
       // Models: opt-in catalog governance (mirrors rejectUnknownModels —
       // no published catalog means the org has not opted in, never a reason).
+      // GAP-09: when the PLATFORM catalog is seeded, a missing model splits
+      // into "unknown model" (not on the platform) vs "known model with no
+      // usable key here" — different fixes, different reasons.
       if (item.allowedModels.length > 0) {
         const catalogModels = enabledModels === undefined ? await this.enabledCatalogModels(orgId) : enabledModels;
         enabledModels = catalogModels;
         if (catalogModels !== null) {
           const missing = item.allowedModels.filter((ref) => !catalogModels.has(ref));
           if (missing.length > 0) {
-            reasons.push({ code: 'required_model_capability_missing', detail: `not in the org model_catalog: ${missing.join(', ')}` });
+            if (platformFacts === undefined) {
+              platformFacts = await this.modelCatalog.platformFacts(orgId);
+            }
+            if (platformFacts === null) {
+              reasons.push({ code: 'required_model_capability_missing', detail: `not in the org model_catalog: ${missing.join(', ')}` });
+            } else {
+              const gaps = partitionModelGaps(missing, platformFacts.models, platformFacts.credentialProviders);
+              if (gaps.notInPlatform.length > 0) {
+                reasons.push({
+                  code: 'required_model_capability_missing',
+                  detail: `not in the org model_catalog and not a platform model: ${gaps.notInPlatform.join(', ')}`,
+                });
+              }
+              if (gaps.noKey.length > 0) {
+                reasons.push({
+                  code: 'provider_credential_missing',
+                  detail: `known platform models this org cannot reach yet (enable the provider / add a credential): ${gaps.noKey.join(', ')}`,
+                });
+              }
+              if (gaps.governanceOnly.length > 0) {
+                reasons.push({
+                  code: 'required_model_capability_missing',
+                  detail: `reachable on the platform but excluded by this org's model_catalog governance: ${gaps.governanceOnly.join(', ')}`,
+                });
+              }
+            }
           }
         }
       }

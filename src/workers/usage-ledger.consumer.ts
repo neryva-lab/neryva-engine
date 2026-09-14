@@ -20,8 +20,13 @@ export class UsageLedgerConsumer implements OutboxConsumer {
   constructor(private readonly ledger: UsageLedgerService) {}
 
   async handle(event: OutboxEvent): Promise<void> {
-    const payload = (event.payload ?? {}) as { run_id?: string; conversation_id?: string; message_id?: string };
+    const payload = (event.payload ?? {}) as { run_id?: string; conversation_id?: string; message_id?: string; run_kind?: string };
     const runId = payload.run_id ?? event.aggregateId;
+    // REL-2.2/2.4 — test/eval runs are not billable traffic: no ledger entry.
+    if (payload.run_kind && payload.run_kind !== 'standard') {
+      UsageLedgerConsumer.logger.debug(`skipping usage ledger entry for ${payload.run_kind} run ${runId}`);
+      return;
+    }
     await this.ledger.append({
       orgId: event.organizationId,
       usageEventId: `run-completed:${runId}`,

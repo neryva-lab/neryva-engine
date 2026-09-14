@@ -603,6 +603,36 @@
       "owner": "engine-ts",
       "since": "eng-0001",
       "note": "AUTH-3.3 (eng-0047): column DROPPED — password material lives only in account_credentials kind='password' (single factor registry). Forward-fix only; no re-expansion."
+    },
+    "provider_credentials": {
+      "owner": "engine-ts",
+      "since": "eng-0050",
+      "note": "REL-1.1 (release_ledger.md): model-provider credential store, org-scoped RLS ENABLE+FORCE, material envelope-sealed enc:v1: by the application. Plaintext disclosed only via the audited MCP authority path."
+    },
+    "provider_enablements": {
+      "owner": "engine-ts",
+      "since": "eng-0050",
+      "note": "REL-1.3 (release_ledger.md): per-org provider enablement switch, composite PK (org, provider), RLS ENABLE+FORCE. Provisioning and enablement audit independently."
+    },
+    "model_catalog_entries": {
+      "owner": "engine-ts",
+      "since": "eng-0051",
+      "note": "REL-1.6 (release_ledger.md): GLOBAL platform model identity catalog (price_catalog posture, no RLS), staff-managed, audited. Pricing is the separate REL-4.2 cost catalog."
+    },
+    "eval_case_executions": {
+      "owner": "engine-ts",
+      "since": "eng-0052",
+      "note": "REL-2.2 (release_ledger.md): durable eval-case-to-run linkage — one row per (eval_run, case, attempt); the executor claims idempotently, the run.completed consumer scores, completeRun decides. RLS ENABLE+FORCE."
+    },
+    "model_cost_entries": {
+      "owner": "engine-ts",
+      "since": "eng-0053",
+      "note": "REL-4.2 (release_ledger.md): append-only model price points (micros per 1k tokens, effective-dated), GLOBAL staff-managed. Feeds the commit-time estimated cost (REL-4.5) and Studio budget config."
+    },
+    "template_platform_blocks": {
+      "owner": "engine-ts",
+      "since": "eng-0054",
+      "note": "REL-6.1 (release_ledger.md): GLOBAL platform template kill (staff-written, no RLS — staff-only surface), checked at install and release-pointer assignment. Partial unique index: one active block per slug."
     }
   },
   "rules": [

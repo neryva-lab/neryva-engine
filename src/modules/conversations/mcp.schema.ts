@@ -53,6 +53,12 @@ export const approvals = pgTable(
     decisionActorId: varchar('decision_actor_id', { length: 128 }),
     decidedAt: timestamp('decided_at', { withTimezone: true, mode: 'string' }),
     decisionId: varchar('decision_id', { length: 64 }),
+    /** REL-11.4: who triggered the approval (run input message author) — for approver≠author */
+    createdBy: varchar('created_by', { length: 128 }),
+    /** REL-11.4: 1 = single approver (legacy), 2..5 = multi-approver chain */
+    requiredApprovals: integer('required_approvals').notNull().default(1),
+    /** REL-11.4: array of {actor, decision, decided_at} for multi-approver */
+    approvalsReceived: jsonb('approvals_received').notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
   (t) => [

@@ -29,6 +29,30 @@ export const TRANSITIONS: Record<string, readonly string[]> = {
 
 export type TransitionSource = 'console.trial' | 'billing.payment' | 'billing.dunning' | 'billing.admin' | 'org.deletion';
 
+/**
+ * REL-9 F2 — trial caps for the metered `agents` product. The business sets
+ * them via `AGENTS_TRIAL_MONTHLY_*` env; unset knobs preserve today's
+ * unlimited-trial behavior. Keys match exactly what the quota wall reads
+ * (`monthly_spend_usd`, `monthly_events` — conversations reserveQuota +
+ * quota.service limitsFor). Pure function of its input so the mapping is
+ * unit-testable; the default wires the live env.
+ */
+export function agentsTrialDefaultLimits(
+  knobs: { spendUsd?: number; events?: number } = {
+    spendUsd: env.AGENTS_TRIAL_MONTHLY_SPEND_USD,
+    events: env.AGENTS_TRIAL_MONTHLY_EVENTS,
+  },
+): Record<string, number> {
+  const limits: Record<string, number> = {};
+  if (typeof knobs.spendUsd === 'number') {
+    limits.monthly_spend_usd = knobs.spendUsd;
+  }
+  if (typeof knobs.events === 'number') {
+    limits.monthly_events = knobs.events;
+  }
+  return limits;
+}
+
 export interface EntitlementView {
   id: string;
   product: string;
@@ -93,6 +117,10 @@ export class EntitlementsService {
       product: input.product,
       target: 'trial',
       plan: 'trial',
+      // REL-9 F2: only the metered agents product carries trial caps, and
+      // only when the business configured them — every other product keeps
+      // the legacy uncapped trial row.
+      ...(input.product === 'agents' ? { limits: agentsTrialDefaultLimits() } : {}),
       period: { start: start.toISOString(), end: end.toISOString() },
       source: 'console.trial',
       actorId: input.actorId,

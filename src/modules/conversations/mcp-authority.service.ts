@@ -13,9 +13,9 @@ import { runEvents, runs, messages, conversations, conversationSummaries, Run } 
 import { policySnapshots, assistants, assistantVersions, controlBlocks } from '../assistants/schema';
 import { toolCatalog } from '../assistants/tool-catalog.schema';
 import { BUILT_IN_TOOLS } from '../assistants/tool-catalog.service';
+import { providerCredentials, providerEnablements, isModelProvider } from '../assistants/provider-credentials.schema';
 import { ControlBlocksService } from '../assistants/control-blocks.service';
 import { RetrievalService } from '../knowledge/retrieval.service';
-import { UsageLedgerService } from '../billing/usage-ledger.service';
 import { spotlight, redactPii } from '../../common/guardrails';
 import { envelopeDecrypt } from '../../common/infra/crypto/envelope';
 import { memoryItems } from '../knowledge/schema';
@@ -46,7 +46,6 @@ export class McpAuthorityService {
     private readonly storage: StorageService,
     private readonly purge: RetentionPurgeService,
     private readonly retrieval: RetrievalService,
-    private readonly usageLedger: UsageLedgerService,
     private readonly escalations: EscalationsService,
   ) {}
 
@@ -218,6 +217,16 @@ export class McpAuthorityService {
         .where(eq(runs.id, run.id))
         .returning();
 
+      // REL-4.4 — a failed run releases its durable quota reservation in the
+      // SAME transaction (the wall must not count a run that never ran).
+      if (run.runKind === 'standard') {
+        await tx.execute(sql`
+          update quota_reservations
+          set state = 'RELEASED', released_at = now()
+          where run_id = ${run.id}::uuid and state = 'RESERVED'
+        `);
+      }
+
       await recordOutboxEvent(tx, {
         aggregateType: 'run',
         aggregateId: run.id,
@@ -367,6 +376,10 @@ export class McpAuthorityService {
     policyVersion?: string;
     expiresAt: Date;
     callerScope: string;
+    /** REL-11.4: who triggered the approval (for approver≠author). Defaults to run's input message author. */
+    createdBy?: string | null;
+    /** REL-11.4: 1 = single approver (legacy), 2..5 = multi-approver chain. */
+    requiredApprovals?: number;
   }): Promise<{ approvalId: string; replay: boolean; run: Run }> {
     return this.db.withOrg(input.orgId, async (tx) => {
       const existing = await tx
@@ -391,6 +404,15 @@ export class McpAuthorityService {
       }
 
       const approvalId = uuidv7();
+      // REL-11.4: resolve author for approver≠author. Prefer explicit createdBy
+      // (Studio may pass the end-user id), else fall back to the run's input
+      // message author (the human who sent the message that triggered the run).
+      let createdBy: string | null = input.createdBy ?? null;
+      if (!createdBy) {
+        const msgRows = await tx.select({ createdBy: messages.createdBy }).from(messages).where(eq(messages.id, run.inputMessageId)).limit(1);
+        createdBy = msgRows[0]?.createdBy ?? null;
+      }
+      const requiredApprovals = Math.min(5, Math.max(1, Math.floor(input.requiredApprovals ?? 1)));
       await tx.insert(approvals).values({
         id: approvalId,
         organizationId: input.orgId,
@@ -400,6 +422,9 @@ export class McpAuthorityService {
         actionType: input.actionType ?? null,
         policyVersion: input.policyVersion ?? null,
         expiresAt: input.expiresAt.toISOString(),
+        createdBy,
+        requiredApprovals,
+        approvalsReceived: [],
       });
 
       // Persist WAITING_APPROVAL when the run is executing (contract doc: 172).
@@ -530,6 +555,18 @@ export class McpAuthorityService {
    * credential; disclosure is audited and never flows through the manifest.
    */
   async getToolCredential(input: { orgId: string; runId: string; toolName: string }): Promise<{ credential: string; credentialHeader: string }> {
+    // REL-1.4 (release_ledger.md): model-provider keys ride the SAME audited
+    // disclosure rail as tool credentials — the gateway asks for the
+    // pseudo-tool `model:<provider>`. No contract change: GetToolCredential
+    // already carries (credential, credential_header) and the capability
+    // scope check happened at the transport boundary.
+    if (input.toolName.startsWith('model:')) {
+      const provider = input.toolName.slice('model:'.length);
+      if (!isModelProvider(provider)) {
+        throw ApiError.validation({ tool_name: `unknown model provider: ${provider}` });
+      }
+      return this.getModelCredential({ orgId: input.orgId, runId: input.runId, provider });
+    }
     const found = await this.db.withOrg(input.orgId, async (tx) => {
       const runRows = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
       if (runRows.length === 0) {
@@ -586,6 +623,87 @@ export class McpAuthorityService {
       credential: envelopeDecrypt(entry.credentialSealed),
       credentialHeader: binding.header_name ?? 'authorization',
     };
+  }
+
+  /**
+   * Model-provider credential disclosure (REL-1.4 Engine half). Gates, in
+   * order: the provider must appear on THIS run's resolved model manifest
+   * (a run can never reach a provider its snapshot did not pin), the
+   * capability-level kill switch (`model:<provider>`) must be silent, the
+   * provider must be enabled at the org, and an ACTIVE credential must
+   * exist. Every outcome — denial or disclosure — is audited. The plaintext
+   * exists only inside envelopeDecrypt for the length of this call.
+   */
+  private async getModelCredential(input: { orgId: string; runId: string; provider: string }): Promise<{ credential: string; credentialHeader: string }> {
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const runRows = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
+      if (runRows.length === 0) {
+        throw ApiError.notFound('run');
+      }
+      const snapshotRows = await tx.select().from(policySnapshots).where(eq(policySnapshots.id, runRows[0].policySnapshotId)).limit(1);
+      const modelRef = (snapshotRows[0]?.modelRef ?? null) as { models?: Array<{ provider?: string }> } | null;
+      const providersOnRun = new Set((modelRef?.models ?? []).map((m) => m?.provider).filter((p): p is string => typeof p === 'string'));
+      if (!providersOnRun.has(input.provider)) {
+        throw ApiError.forbidden(`provider ${input.provider} is not on this run's model manifest`, { provider: input.provider });
+      }
+      const block = await ControlBlocksService.findActiveBlock(tx, input.orgId, 'capability', `model:${input.provider}`);
+      if (block) {
+        await this.auditSafe({
+          action: 'mcp.model_credential_denied',
+          resourceType: 'provider_credential',
+          resourceId: null,
+          tenantId: input.orgId,
+          details: { run_id: input.runId, provider: input.provider, reason: `blocked (${block.reason})` },
+        });
+        throw ApiError.forbidden(`model capability ${input.provider} is blocked (${block.reason})`, { provider: input.provider });
+      }
+      const enableRows = await tx
+        .select()
+        .from(providerEnablements)
+        .where(and(eq(providerEnablements.organizationId, input.orgId), eq(providerEnablements.provider, input.provider)))
+        .limit(1);
+      if (enableRows[0] && !enableRows[0].enabled) {
+        await this.auditSafe({
+          action: 'mcp.model_credential_denied',
+          resourceType: 'provider_credential',
+          resourceId: null,
+          tenantId: input.orgId,
+          details: { run_id: input.runId, provider: input.provider, reason: 'provider disabled at this org' },
+        });
+        throw ApiError.forbidden(`provider ${input.provider} is disabled at this org`, { provider: input.provider });
+      }
+      const credRows = await tx
+        .select()
+        .from(providerCredentials)
+        .where(
+          and(
+            eq(providerCredentials.organizationId, input.orgId),
+            eq(providerCredentials.provider, input.provider),
+            eq(providerCredentials.status, 'active'),
+          ),
+        )
+        .orderBy(desc(providerCredentials.createdAt))
+        .limit(1);
+      const cred = credRows[0] ?? null;
+      if (!cred) {
+        await this.auditSafe({
+          action: 'mcp.model_credential_denied',
+          resourceType: 'provider_credential',
+          resourceId: null,
+          tenantId: input.orgId,
+          details: { run_id: input.runId, provider: input.provider, reason: 'no active credential' },
+        });
+        throw ApiError.forbidden(`no active ${input.provider} credential at this org`, { provider: input.provider });
+      }
+      await this.auditSafe({
+        action: 'mcp.model_credential_disclosed',
+        resourceType: 'provider_credential',
+        resourceId: cred.id,
+        tenantId: input.orgId,
+        details: { run_id: input.runId, provider: input.provider },
+      });
+      return { credential: envelopeDecrypt(cred.secretSealed), credentialHeader: 'authorization' };
+    });
   }
 
   /** GetLatestCheckpoint (contract v1.3, FL-2.17) — newest run checkpoint. */
@@ -681,7 +799,7 @@ export class McpAuthorityService {
     decision: 'APPROVED' | 'DENIED';
     actor: string;
     reason?: string;
-  }): Promise<{ approvalId: string; state: 'APPROVED' | 'DENIED'; runState: string; replay: boolean }> {
+  }): Promise<{ approvalId: string; state: 'APPROVED' | 'DENIED' | 'PENDING'; runState: string; replay: boolean }> {
     return this.db.withOrg(input.orgId, async (tx) => {
       const foundApproval = await tx
         .select()
@@ -693,6 +811,27 @@ export class McpAuthorityService {
       if (!approval || approval.runId !== input.runId) {
         throw ApiError.notFound('approval');
       }
+      // REL-11.4: approver≠author — the author who triggered the run (via the
+      // input message) may not approve its own side effect. This was opt-in
+      // (TPL-6.5) and is now enforced when `createdBy` is set. Self-approval
+      // is a 403, not a 422, because the caller is authenticated but not
+      // authorized for this action.
+      if (approval.createdBy && approval.createdBy === input.actor) {
+        throw ApiError.forbidden('approver must differ from author', { approval_id: approval.id, author: approval.createdBy });
+      }
+
+      // REL-11.4: multi-approver chain — when `requiredApprovals` > 1 we
+      // collect individual approvals in `approvalsReceived` and only transition
+      // the approval/run when the threshold is reached. Any DENIED short-circuits
+      // to DENIED/CANCELED. Duplicate actor votes are conflicts.
+      const required = Math.min(5, Math.max(1, approval.requiredApprovals ?? 1));
+      const received = Array.isArray(approval.approvalsReceived) ? (approval.approvalsReceived as Array<{ actor: string; decision: string }>) : [];
+      if (required > 1) {
+        if (received.some((r) => r.actor === input.actor)) {
+          throw ApiError.conflict('actor has already voted on this approval', { approval_id: approval.id, actor: input.actor });
+        }
+      }
+
       if (approval.state !== 'PENDING') {
         // Replay of an already-decided approval with the SAME decision is
         // idempotent; a conflicting decision is a loud conflict.
@@ -718,10 +857,41 @@ export class McpAuthorityService {
       const now = new Date().toISOString();
 
       if (input.decision === 'APPROVED') {
-        await tx
-          .update(approvals)
-          .set({ state: 'APPROVED', decisionActorId: input.actor, decisionId, decidedAt: now })
-          .where(eq(approvals.id, approval.id));
+        if (required > 1) {
+          const nextReceived = [...received, { actor: input.actor, decision: 'APPROVED', decided_at: now }];
+          // Not yet at threshold — record the vote, stay PENDING, do not resume run.
+          if (nextReceived.filter((r) => r.decision === 'APPROVED').length < required) {
+            await tx
+              .update(approvals)
+              .set({ approvalsReceived: nextReceived as unknown as typeof approvals.$inferInsert.approvalsReceived, decisionActorId: input.actor, decidedAt: now } as never)
+              .where(eq(approvals.id, approval.id));
+            await this.auditSafe({
+              action: 'mcp.approval_voted',
+              resourceType: 'approval',
+              resourceId: approval.id,
+              tenantId: input.orgId,
+              details: { run_id: run.id, decision: 'APPROVED', actor: input.actor, received: nextReceived.length, required },
+            });
+            return { approvalId: approval.id, state: 'PENDING' as const, runState: run.state, replay: false };
+          }
+          // Threshold reached — fall through to the single-approver transition below,
+          // but persist the final accumulated votes first.
+          await tx
+            .update(approvals)
+            .set({
+              state: 'APPROVED',
+              decisionActorId: input.actor,
+              decisionId,
+              decidedAt: now,
+              approvalsReceived: nextReceived as unknown as typeof approvals.$inferInsert.approvalsReceived,
+            } as never)
+            .where(eq(approvals.id, approval.id));
+        } else {
+          await tx
+            .update(approvals)
+            .set({ state: 'APPROVED', decisionActorId: input.actor, decisionId, decidedAt: now })
+            .where(eq(approvals.id, approval.id));
+        }
         // WAITING_APPROVAL → RUNNING; the resume outbox event re-drives Studio.
         assertRunTransition(run.state, 'RUNNING');
         await tx
@@ -747,15 +917,30 @@ export class McpAuthorityService {
           resourceType: 'approval',
           resourceId: approval.id,
           tenantId: input.orgId,
-          details: { run_id: run.id, decision: 'APPROVED', actor: input.actor },
+          details: { run_id: run.id, decision: 'APPROVED', actor: input.actor, required, received: required > 1 ? required : 1 },
         });
         return { approvalId: approval.id, state: 'APPROVED', runState: 'RUNNING', replay: false };
       }
 
-      await tx
-        .update(approvals)
-        .set({ state: 'DENIED', decisionActorId: input.actor, decisionId, decidedAt: now })
-        .where(eq(approvals.id, approval.id));
+      // DENIED — any DENIED short-circuits the chain (even for multi-approver).
+      if (required > 1) {
+        const nextReceived = [...received, { actor: input.actor, decision: 'DENIED', decided_at: now }];
+        await tx
+          .update(approvals)
+          .set({
+            state: 'DENIED',
+            decisionActorId: input.actor,
+            decisionId,
+            decidedAt: now,
+            approvalsReceived: nextReceived as unknown as typeof approvals.$inferInsert.approvalsReceived,
+          } as never)
+          .where(eq(approvals.id, approval.id));
+      } else {
+        await tx
+          .update(approvals)
+          .set({ state: 'DENIED', decisionActorId: input.actor, decisionId, decidedAt: now })
+          .where(eq(approvals.id, approval.id));
+      }
       assertRunTransition(run.state, 'CANCELED');
       await tx
         .update(runs)
@@ -1663,7 +1848,7 @@ export class McpAuthorityService {
     return 'duplicate';
   }
 
-  private async auditSafe(event: { action: string; resourceType: string; resourceId: string; tenantId: string; details: Record<string, unknown> }): Promise<void> {
+  private async auditSafe(event: { action: string; resourceType: string; resourceId: string | null; tenantId: string; details: Record<string, unknown> }): Promise<void> {
     try {
       await this.audit.add({
         action: event.action,

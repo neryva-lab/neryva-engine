@@ -103,5 +103,42 @@ export const runJudgments = pgTable(
 
 export type RunJudgment = typeof runJudgments.$inferSelect;
 
+/**
+ * REL-2.2 (drizzle/0052) — durable eval-case-to-run linkage. One row per
+ * (eval_run, case, attempt); the executor claims idempotently, the
+ * run.completed/run.failed consumer scores, completeRun decides. RLS
+ * ENABLE+FORCE, tenant-isolated like every engine table.
+ */
+export const evalCaseExecutions = pgTable(
+  'eval_case_executions',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    evalRunId: uuid('eval_run_id')
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: 'cascade' }),
+    caseId: uuid('case_id')
+      .notNull()
+      .references(() => evalCases.id, { onDelete: 'cascade' }),
+    attempt: integer('attempt').notNull(),
+    conversationId: uuid('conversation_id'),
+    runId: uuid('run_id'),
+    /** pending | passed | failed */
+    state: varchar('state', { length: 16 }).notNull().default('pending'),
+    score: numeric('score', { precision: 5, scale: 4 }),
+    responseExcerpt: varchar('response_excerpt', { length: 512 }),
+    failureReason: varchar('failure_reason', { length: 512 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_eval_case_executions_case_attempt').on(t.evalRunId, t.caseId, t.attempt),
+    index('ix_eval_case_executions_org_run').on(t.organizationId, t.evalRunId),
+    index('ix_eval_case_executions_run_id').on(t.runId),
+  ],
+);
+
+export type EvalCaseExecution = typeof evalCaseExecutions.$inferSelect;
+
 // avoids a circular import at module top (runs lives in conversations/schema)
 import { runs } from '../conversations/schema';

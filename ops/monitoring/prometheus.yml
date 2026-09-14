@@ -1,0 +1,31 @@
+# REL-8.1 — Prometheus scrape config for the Engine. Every metric referenced
+# by alerts.yml is exported from the engine's /metrics endpoint
+# (src/common/observability/metrics.ts + the outbox dispatcher's gauges).
+# Wire this into the production compose lane (ops/engine/) or a managed
+# Prometheus; the scrape target is the engine service on PORT (default 3001).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: neryva-engine
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: engine
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['engine:3001']
+        labels:
+          component: engine-api
+
+  # Worker-host metrics come from the SAME process when the monolith runs
+  # WORKERS__OUTBOX_ENABLED=true; split the target when the deploy separates
+  # engine-api from engine-worker roles (ledger 6.3).
+  - job_name: engine-workers
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['engine:3001']
+        labels:
+          component: engine-worker

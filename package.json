@@ -38,7 +38,7 @@
     "@connectrpc/connect": "2.1.2",
     "@connectrpc/connect-fastify": "2.1.2",
     "@connectrpc/connect-node": "2.1.2",
-    "@neryva/mcp-contract": "file:..\\products\\neryva_mcp\\neryva-mcp-contract",
+    "@neryva/mcp-contract": "file:../products/neryva_mcp/neryva-mcp-contract",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-fastify": "^11.0.0",

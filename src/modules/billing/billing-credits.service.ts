@@ -157,7 +157,7 @@ export class BillingCreditsService {
              coalesce(sum(cost_usd), 0)::text as cost_usd
       from billing.spend_events
       where org_id = ${orgId} and product = ${product}
-        and occurred_at >= ${from}::timestamptz and occurred_at <= ${to}::timestamptz
+        and occurred_at >= ${from}::timestamptz and occurred_at < ${to}::timestamptz
       group by kind, model
       having coalesce(sum(cost_usd), 0) > 0
       order by coalesce(sum(cost_usd), 0) desc
@@ -178,8 +178,87 @@ export class BillingCreditsService {
     return total;
   }
 
-  /** Consume pending adjustments for (org, product) onto this invoice. */
-  async applyAdjustments(
+  /**
+   * REL-9 F1 — usage-ledger line items. The immutable run-usage ledger
+   * (`usage_ledger_entries`) had no path into invoices: an org whose traffic
+   * is purely agent runs received no invoice at all, because cycle discovery
+   * only read `billing.spend_events`. This rolls the period's ledger rows
+   * into (usage_kind × provider × model) lines on the SAME invoice draft the
+   * spend lines land on (same TX, same per-period idempotency guard in
+   * `BillingCycleService.draftOne` — a rerun adds nothing).
+   *
+   * Semantics, chosen to match the quota wall peso-for-peso:
+   * - Amount is `sum(coalesce(settled_cost, estimated_cost, 0))` — the exact
+   *   expression the conversation-path spend wall reads
+   *   (`conversations.service.ts:reserveQuota`), so the invoiced dollar and
+   *   the enforced dollar cannot drift. Settled cost wins where
+   *   reconciliation has filled it; unpriced rows contribute 0 until priced.
+   * - Token columns come from the entry metadata the commit path writes
+   *   (`prompt_tokens`/`completion_tokens`); rows without them (run-count
+   *   markers, corrections) contribute 0 tokens.
+   * - A group drafts a line when it has money OR tokens — token usage on an
+   *   unpriced model stays visible instead of silently unbilled. Pure-count
+   *   `runs` markers ($0, 0 tokens) draft no line; run counts remain
+   *   quota/usage-plane truth via `UsageLedgerService.netQuantity`.
+   * - Line kinds are namespaced `usage:<usage_kind>` so ledger-derived money
+   *   is distinguishable from satellite spend kinds on the same invoice.
+   *   Operators must not emit `billing.spend_events` rows for product
+   *   `agents` covering engine-metered runs — the two planes meter disjoint
+   *   traffic, and the namespace makes any overlap visible.
+   * - Only the `agents` product reads the ledger: ledger rows carry no
+   *   product column, and engine run usage IS the agents product (the same
+   *   product the quota wall reads). Other products return 0 untouched.
+   */
+  async buildUsageLedgerLineItems(
+    tx: Parameters<Parameters<DbService['withOrg']>[1]>[0],
+    orgId: string,
+    product: string,
+    from: string,
+    to: string,
+    invoiceId: string,
+  ): Promise<number> {
+    if (product !== 'agents') {
+      return 0;
+    }
+    const rows = await tx.execute<{
+      kind: string;
+      provider: string | null;
+      model: string | null;
+      events: number;
+      tokens_in: number;
+      tokens_out: number;
+      cost_usd: string;
+    }>(sql`
+      select usage_kind as kind, provider, model, count(*)::int as events,
+             coalesce(sum(((metadata ->> 'prompt_tokens')::bigint)), 0)::int as tokens_in,
+             coalesce(sum(((metadata ->> 'completion_tokens')::bigint)), 0)::int as tokens_out,
+             coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0)::text as cost_usd
+      from usage_ledger_entries
+      where organization_id = ${orgId}::uuid
+        and created_at >= ${from}::timestamptz and created_at < ${to}::timestamptz
+      group by usage_kind, provider, model
+      having coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0) > 0
+          or coalesce(sum(quantity) filter (where unit = 'tokens'), 0) > 0
+      order by coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0) desc
+    `);
+    let total = 0;
+    for (const row of rows.rows) {
+      await tx.insert(billingInvoiceLines).values({
+        invoiceId,
+        kind: toLedgerLineKind(row.kind),
+        model: row.model,
+        events: row.events,
+        tokensIn: row.tokens_in,
+        tokensOut: row.tokens_out,
+        unitPriceNote: toLedgerLineNote(row.provider),
+        amountUsd: Number(row.cost_usd).toFixed(6),
+      });
+      total += Number(row.cost_usd);
+    }
+    return total;
+  }
+
+  /** Consume pending adjustments for (org, product) onto this invoice. */  async applyAdjustments(
     tx: Parameters<Parameters<DbService['withOrg']>[1]>[0],
     orgId: string,
     product: string,
@@ -340,4 +419,33 @@ export class BillingCreditsService {
     }
     return { evaluated: budgets.length, alerted };
   }
+}
+
+/**
+ * REL-9 F1 — pure invoice-derivation helpers (unit-tested, no DB).
+ */
+
+/** The previous calendar month as a half-open [from, to) ISO window. */
+export function previousMonthWindow(now: Date): { from: string; to: string } {
+  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return { from: periodStart.toISOString(), to: periodEnd.toISOString() };
+}
+
+/**
+ * Ledger-derived line kind, namespaced so it can never collide with a
+ * satellite spend kind on the same invoice. Sliced to the
+ * `billing_invoice_lines.kind` varchar(32) bound.
+ */
+export function toLedgerLineKind(usageKind: string): string {
+  const kind = usageKind && usageKind.trim().length > 0 ? usageKind.trim() : 'unknown';
+  return `usage:${kind}`.slice(0, 32);
+}
+
+/**
+ * Line provenance note: the ledger has no product column, so the provider
+ * rides the free-text note (varchar(128)) for chargeback explainability.
+ */
+export function toLedgerLineNote(provider: string | null): string {
+  return (provider && provider.trim().length > 0 ? `usage-ledger ${provider.trim()}` : 'usage-ledger').slice(0, 128);
 }

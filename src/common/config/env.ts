@@ -18,6 +18,16 @@ const positiveInt = (defaultValue: number, max = 2_147_483_647) =>
     .transform((v) => (v === undefined || v === '' ? defaultValue : Number.parseInt(v, 10)))
     .pipe(z.number().int().positive().max(max));
 
+const optionalUrl = () =>
+  z
+    .string()
+    .optional()
+    .default('')
+    .refine(
+      (v) => v === '' || (() => { try { const u = new URL(v); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } })(),
+      'Invalid url',
+    );
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: positiveInt(3001, 65535),
@@ -65,10 +75,10 @@ const envSchema = z.object({
   CHANNELS__WEBHOOK_MAX_EVENT_BYTES: positiveInt(65_536, 262_144),
   // FL-3.1 — inbound voice-note ASR (POST {audio_base64, media_type} → {text}).
   // Unset = voice notes are recorded without reply (text messaging unaffected).
-  CHANNELS__VOICE_ASR_URL: z.string().url().optional().default(''),
+  CHANNELS__VOICE_ASR_URL: optionalUrl(),
   // FL-3.17 — generic HTTP email provider seam for the `email` channel
   // sender (POST {to, subject, text} with `CHANNELS__EMAIL_API_KEY` bearer).
-  CHANNELS__EMAIL_API_URL: z.string().url().optional().default(''),
+  CHANNELS__EMAIL_API_URL: optionalUrl(),
   CHANNELS__EMAIL_API_KEY: z.string().optional().default(''),
 
   /** Billing: cron for the B-5 cost-anomaly scan (daily 03:15 UTC default). */
@@ -105,6 +115,21 @@ const envSchema = z.object({
   ORG_MAX_MEMBERS: positiveInt(500, 100_000),
   /** Default trial length (days) for console-initiated product trials. */
   ORG_TRIAL_DEFAULT_DAYS: positiveInt(14, 90),
+  /**
+   * REL-9 F2 — trial caps for the metered `agents` product, applied at trial
+   * start (entitlements.service.ts). Unset preserves today's unlimited-trial
+   * behavior; set them the moment the business prices the product and the
+   * hard quota walls (D2) spring to life with zero code change. Empty string
+   * counts as unset; any other non-numeric value fails closed at boot.
+   */
+  AGENTS_TRIAL_MONTHLY_SPEND_USD: z.preprocess(
+    (v) => (v === '' || v === undefined ? undefined : v),
+    z.coerce.number().positive().max(1_000_000).optional(),
+  ),
+  AGENTS_TRIAL_MONTHLY_EVENTS: z.preprocess(
+    (v) => (v === '' || v === undefined ? undefined : v),
+    z.coerce.number().int().positive().max(100_000_000).optional(),
+  ),
   /** AUTH-2.2: abuse cap on how many orgs one account may simultaneously own. */
   ORGS__MAX_OWNED_PER_ACCOUNT: positiveInt(20, 1_000),
   /**
@@ -180,7 +205,7 @@ const envSchema = z.object({
   // (verdict block) and stays permissive in development — availability
   // failures never silently pass content in prod.
   HARNESS__MODERATION_PROVIDER: z.enum(['noop', 'openai_compatible']).default('noop'),
-  HARNESS__MODERATION_BASE_URL: z.string().url().optional().default(''),
+  HARNESS__MODERATION_BASE_URL: optionalUrl(),
   HARNESS__MODERATION_API_KEY: z.string().optional().default(''),
   HARNESS__MODERATION_MODEL: z.string().default('omni-moderation-latest'),
   HARNESS__MODERATION_TIMEOUT_MS: positiveInt(3000, 30_000),
@@ -196,7 +221,7 @@ const envSchema = z.object({
   // and DEGRADES to fused order on failure (a reranker is a quality lever,
   // never an availability dependency).
   HARNESS__RERANKER_PROVIDER: z.enum(['noop', 'http']).default('noop'),
-  HARNESS__RERANKER_URL: z.string().url().optional().default(''),
+  HARNESS__RERANKER_URL: optionalUrl(),
   HARNESS__RERANKER_API_KEY: z.string().optional().default(''),
   HARNESS__RERANKER_TIMEOUT_MS: positiveInt(3000, 30_000),
 
@@ -208,12 +233,12 @@ const envSchema = z.object({
 
   // FL-2.6 — self-hosted extraction workers. Absent = the media family is
   // unsupported for ingest (loud failure at the pipeline, never garbage).
-  KNOWLEDGE_OCR_URL: z.string().url().optional().default(''),
-  KNOWLEDGE_TRANSCRIBE_URL: z.string().url().optional().default(''),
+  KNOWLEDGE_OCR_URL: optionalUrl(),
+  KNOWLEDGE_TRANSCRIBE_URL: optionalUrl(),
 
   // FL-3.5 — hosted web-search endpoint for the builtin tool (POST {query}
   // -> {results: [{title, url, snippet}]}).
-  HARNESS__WEB_SEARCH_URL: z.string().url().optional().default(''),
+  HARNESS__WEB_SEARCH_URL: optionalUrl(),
   // FL-3.10 — auto memory extraction proposer (flag-gated; proposes through
   // the existing memory-proposal pipeline, never durable truth by itself).
   HARNESS__AUTO_MEMORY_ENABLED: boolean(false),
@@ -221,25 +246,25 @@ const envSchema = z.object({
   // FL-3.7 — query rewriting port (multi-query expansion / HyDE-class).
   // Unset = identity (one variant, zero cost); failures degrade to the
   // original query (quality lever, never an availability dependency).
-  HARNESS__QUERY_REWRITE_URL: z.string().url().optional().default(''),
+  HARNESS__QUERY_REWRITE_URL: optionalUrl(),
   HARNESS__QUERY_REWRITE_TIMEOUT_MS: positiveInt(3000, 30_000),
 
   // FL-3.13 — online LLM-as-judge over sampled completed runs. The judge
   // endpoint receives bounded input/output texts (server-side seam); verdicts
   // land in run_judgments. Sampling is deterministic per run id.
   WORKERS__LLM_JUDGE_ENABLED: boolean(false),
-  HARNESS__LLM_JUDGE_URL: z.string().url().optional().default(''),
+  HARNESS__LLM_JUDGE_URL: optionalUrl(),
   HARNESS__LLM_JUDGE_SAMPLE_PCT: positiveInt(10, 100),
   HARNESS__LLM_JUDGE_TIMEOUT_MS: positiveInt(5000, 60_000),
   HARNESS__LLM_JUDGE_RUBRIC: z.string().max(2048).default('Rate the assistant reply for helpfulness, correctness and tone on a 0-1 scale.'),
 
   // FL-3.1 — outbound text-to-speech for voice-capable channels (WhatsApp
   // audio notes). POST {text, voice} -> {audio_base64, media_type}.
-  HARNESS__TTS_URL: z.string().url().optional().default(''),
+  HARNESS__TTS_URL: optionalUrl(),
   HARNESS__TTS_VOICE: z.string().default('alloy'),
   // FL-3.2 — hosted image-generation endpoint for the generate_image builtin
   // (POST {prompt} -> {image_base64, media_type}).
-  HARNESS__IMAGE_GEN_URL: z.string().url().optional().default(''),
+  HARNESS__IMAGE_GEN_URL: optionalUrl(),
 
   // Social login (doc-06 Δ1) — a provider is enabled exactly when its
   // credentials are present. Redirect URI per provider:

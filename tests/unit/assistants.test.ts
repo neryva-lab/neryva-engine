@@ -104,7 +104,7 @@ describe('export envelope hash parity (Phase 3 exit gate)', () => {
   });
 
   it('schema versions are pinned and aligned with the migrations', () => {
-    expect(ASSISTANT_SCHEMA_VERSION).toBe(1);
+    expect(ASSISTANT_SCHEMA_VERSION).toBe(2);
     expect(POLICY_SNAPSHOT_SCHEMA_VERSION).toBe(1);
   });
 });

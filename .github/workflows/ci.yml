@@ -5,11 +5,30 @@ on:
   push:
     branches: [main]
 
+# @neryva/mcp-contract is a sibling path dependency (package.json
+# "file:../products/neryva_mcp/neryva-mcp-contract"). CI must materialize that
+# sibling path or every install fails; set the repository variable
+# NERYVA_MCP_CONTRACT_REPO (e.g. "neryva/neryva-mcp") to enable the checkout.
+env:
+  NERYVA_MCP_CONTRACT_REPO: ${{ vars.NERYVA_MCP_CONTRACT_REPO }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: check out Neryva MCP contract (sibling path dependency)
+        if: env.NERYVA_MCP_CONTRACT_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NERYVA_MCP_CONTRACT_REPO }}
+          path: ../products/neryva_mcp
+      - name: fail loud when the contract dependency cannot resolve
+        if: env.NERYVA_MCP_CONTRACT_REPO == ''
+        run: |
+          echo "::error title=missing contract repo::pnpm install will fail: @neryva/mcp-contract is a file: dependency on ../products/neryva_mcp/neryva-mcp-contract."
+          echo "::error::Set the repository variable NERYVA_MCP_CONTRACT_REPO (e.g. neryva/neryva-mcp) so CI checks it out, or publish the contract to a registry and pin a version in package.json."
+          exit 1
       - uses: pnpm/action-setup@v4
         with:
           version: 9.12.0
@@ -21,11 +40,9 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run lint
       - run: pnpm run test:unit
-      # Contract and migration safety are gated here once they are introduced.
-      # Until then these steps degrade gracefully (no proto / no DB).
-      - name: buf lint (Neryva MCP — when contract is imported)
+      - name: buf lint (Neryva MCP — when contract is checked out)
         if: hashFiles('../products/neryva_mcp/neryva-mcp-contract/buf.yaml') != ''
-        run: pnpm --filter @neryva/mcp-contract exec buf lint || echo "buf not installed — skip"
+        run: pnpm --dir ../products/neryva_mcp/neryva-mcp-contract exec buf lint || echo "::warning::buf not installed — lint skipped"
 
   migration-smoke:
     runs-on: ubuntu-latest
@@ -45,6 +62,18 @@ jobs:
         ports: ['6379:6379']
     steps:
       - uses: actions/checkout@v4
+      - name: check out Neryva MCP contract (sibling path dependency)
+        if: env.NERYVA_MCP_CONTRACT_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NERYVA_MCP_CONTRACT_REPO }}
+          path: ../products/neryva_mcp
+      - name: fail loud when the contract dependency cannot resolve
+        if: env.NERYVA_MCP_CONTRACT_REPO == ''
+        run: |
+          echo "::error title=missing contract repo::pnpm install will fail: @neryva/mcp-contract is a file: dependency on ../products/neryva_mcp/neryva-mcp-contract."
+          echo "::error::Set the repository variable NERYVA_MCP_CONTRACT_REPO (e.g. neryva/neryva-mcp) so CI checks it out, or publish the contract to a registry and pin a version in package.json."
+          exit 1
       - uses: pnpm/action-setup@v4
         with:
           version: 9.12.0
@@ -62,4 +91,137 @@ jobs:
       - name: verify RLS (smoke)
         env:
           DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
-        run: node scripts/verify-rls.mjs || echo "verify-rls not yet — skip"
+        run: |
+          if [ -f scripts/verify-rls.mjs ]; then
+            node scripts/verify-rls.mjs
+          else
+            echo "::warning::scripts/verify-rls.mjs is not authored yet — RLS smoke skipped; tests/isolation/rls.test.ts in the db-suites job is the real gate"
+          fi
+
+  # REL-7.4 — OpenAPI drift gate: the exported contract must match the
+  # routes. Advisory until the first green run (the export boots a
+  # flag-minimal app), then flip continue-on-error to false.
+  openapi-drift:
+    needs: build
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check out Neryva MCP contract (sibling path dependency)
+        if: env.NERYVA_MCP_CONTRACT_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NERYVA_MCP_CONTRACT_REPO }}
+          path: ../products/neryva_mcp
+      - name: fail loud when the contract dependency cannot resolve
+        if: env.NERYVA_MCP_CONTRACT_REPO == ''
+        run: |
+          echo "::error title=missing contract repo::pnpm install will fail: @neryva/mcp-contract is a file: dependency on ../products/neryva_mcp/neryva-mcp-contract."
+          echo "::error::Set the repository variable NERYVA_MCP_CONTRACT_REPO (e.g. neryva/neryva-mcp) so CI checks it out, or publish the contract to a registry and pin a version in package.json."
+          exit 1
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: export + diff the OpenAPI artifact
+        run: |
+          pnpm exec tsx scripts/export-openapi.ts
+          git diff --exit-code docs/public/openapi.l2.yaml
+
+  # REL-7.5 — template quality gates (TPL-3.4): templates:lint over the 20
+  # BOMs + the registry drift check, from the products repo. Advisory until
+  # the first green run. Requires the third repo materialized (same decision
+  # family as REL-0.1: set NERYVA_AGENT_STUDIO_REPO).
+  template-gates:
+    needs: build
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      NERYVA_AGENT_STUDIO_REPO: ${{ vars.NERYVA_AGENT_STUDIO_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: check out the agent-studio templates repo
+        if: env.NERYVA_AGENT_STUDIO_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NERYVA_AGENT_STUDIO_REPO }}
+          path: ../products/agent-studio
+      - name: skip loudly when the templates repo is not configured
+        if: env.NERYVA_AGENT_STUDIO_REPO == ''
+        run: echo "::notice::NERVYA_AGENT_STUDIO_REPO unset — template gates skipped (set the repository variable to enable)"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: lint + registry drift check
+        if: env.NERYVA_AGENT_STUDIO_REPO != ''
+        run: |
+          pnpm install --frozen-lockfile --dir ../products/agent-studio || npm install --prefix ../products/agent-studio
+          pnpm --dir ../products/agent-studio run templates:lint
+          pnpm --dir ../products/agent-studio run templates:check
+
+  # REL-0.6 (2026-09-14) — now required: the first fully green run is the
+  # ledgers' "first full CI/DB run" gate (REL-0.5 → REL-0.6). Advisory period
+  # ended at eighth verification pass (pnpm test 11/69 green locally, lint 0
+  # errors). Red CI on a broken assertion must now be triaged, not ignored.
+  db-suites:
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: neryva
+          POSTGRES_PASSWORD: neryva
+          POSTGRES_DB: neryva
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U neryva -d neryva"
+          --health-interval=5s --health-timeout=2s --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+    steps:
+      - uses: actions/checkout@v4
+      - name: check out Neryva MCP contract (sibling path dependency)
+        if: env.NERYVA_MCP_CONTRACT_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NERYVA_MCP_CONTRACT_REPO }}
+          path: ../products/neryva_mcp
+      - name: fail loud when the contract dependency cannot resolve
+        if: env.NERYVA_MCP_CONTRACT_REPO == ''
+        run: |
+          echo "::error title=missing contract repo::pnpm install will fail: @neryva/mcp-contract is a file: dependency on ../products/neryva_mcp/neryva-mcp-contract."
+          echo "::error::Set the repository variable NERYVA_MCP_CONTRACT_REPO (e.g. neryva/neryva-mcp) so CI checks it out, or publish the contract to a registry and pin a version in package.json."
+          exit 1
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: fresh DB migrate
+        env:
+          DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
+          REDIS_URL: redis://127.0.0.1:6379
+          ENGINE_BASE_URL: http://localhost:3001
+        run: pnpm run migrate
+      - name: integration + isolation suites
+        env:
+          DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
+          TEST_DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
+          REDIS_URL: redis://127.0.0.1:6379
+          ENGINE_BASE_URL: http://localhost:3001
+        run: |
+          pnpm run test:integration
+          pnpm run test:isolation

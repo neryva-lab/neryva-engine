@@ -1,36 +1,31 @@
 {
-  "title": "Engine Data — RLS / DB / Outbox (Phase 1.7 skeleton)",
-  "description": "Lock waits, slow queries, outbox lag, dead letters, RLS violations. Fill after first load test.",
+  "title": "Engine Data — isolation / DB signals (REL-8.2 verified)",
+  "description": "Isolation and slow-query signals. The RLS-violation critical alert fires on neryva_engine_rls_violations_total (registry-reserved; emitted by the RLS harness path — wire a runtime emitter before relying on it beyond CI). DB pool has no engine gauge: use the managed-Postgres exporter, not an invented series (the old neryva_engine_pg_pool_* placeholder panel is removed — it never existed).",
+  "notes": "Reserved-but-unemitted names (no panel until a call site lands): neryva_engine_lock_waits_total, neryva_engine_slow_queries_total, neryva_engine_outbox_lag_seconds, neryva_engine_dead_letters_total (the dispatcher emits the unprefixed outbox_* equivalents — use those).",
   "panels": [
     {
-      "title": "outboxLagSeconds (oldest PENDING)",
-      "metric": "neryva_engine_outbox_lag_seconds",
-      "query": "max(neryva_engine_outbox_lag_seconds) by (aggregate_type)"
+      "title": "outboxAgeSeconds (oldest undispatched)",
+      "metric": "outbox_age_seconds",
+      "query": "max(outbox_age_seconds)",
+      "alert": "OutboxLagHigh / OutboxLagCritical"
     },
     {
-      "title": "deadLettersTotal",
-      "metric": "neryva_engine_dead_letters_total",
-      "query": "sum(rate(neryva_engine_dead_letters_total[5m])) by (aggregate_type, reason)"
+      "title": "outboxDeadLetters by event_type",
+      "metric": "outbox_dead_letter_total",
+      "query": "sum(rate(outbox_dead_letter_total[5m])) by (event_type)",
+      "alert": "OutboxDeadLetters"
     },
     {
-      "title": "lockWaitsTotal",
-      "metric": "neryva_engine_lock_waits_total",
-      "query": "sum(rate(neryva_engine_lock_waits_total[5m])) by (lock_type)"
-    },
-    {
-      "title": "slowQueriesTotal",
-      "metric": "neryva_engine_slow_queries_total",
-      "query": "sum(rate(neryva_engine_slow_queries_total[5m])) by (query_family)"
-    },
-    {
-      "title": "rlsViolationsTotal",
+      "title": "rlsViolationsTotal by table",
       "metric": "neryva_engine_rls_violations_total",
-      "query": "sum(rate(neryva_engine_rls_violations_total[5m])) by (table)"
+      "query": "sum(rate(neryva_engine_rls_violations_total[5m])) by (table)",
+      "alert": "RlsViolationDetected (critical, any increase)"
     },
     {
-      "title": "pg pool — placeholder (add pg pool exporter or app gauge)",
-      "metric": "neryva_engine_pg_pool_*",
-      "query": "avg_over_time(neryva_engine_pg_pool_size[5m])"
+      "title": "slowQueriesTotal by query_family (panel live once the emitter lands)",
+      "metric": "neryva_engine_slow_queries_total",
+      "query": "sum(rate(neryva_engine_slow_queries_total[5m])) by (query_family)",
+      "alert": "SlowQueriesBreaching"
     }
   ]
 }

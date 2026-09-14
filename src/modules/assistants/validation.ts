@@ -88,14 +88,19 @@ export type AssistantPayload = z.infer<typeof assistantPayloadSchema>;
 export type ModelParams = z.infer<typeof modelParamsSchema>;
 
 /**
- * Secret shapes that indicate pasted credential MATERIAL (assignment form).
- * Keys are never scanned — schema vocabulary legitimately contains these
- * words (max_output_tokens, max_total_tokens). Values match only in
- * `name: value` / `name = value` assignment shape, so prose mentions
- * ("token budget", "password reset flow") and numeric budgets pass while
- * pasted credentials ("api_key: sk-…", "password=hunter2") fail.
+ * Secret shapes that indicate pasted credential MATERIAL.
+ * - Values: assignment form `name: value` / `name = value` — so prose
+ *   mentions ("token budget", "password reset flow") and numeric budgets
+ *   pass while pasted credentials ("api_key: sk-…", "password=hunter2") fail.
+ * - Keys: a secret-named key carrying a non-empty string value (e.g.
+ *   `api_key: "sk-..."`) — the value alone would not match the assignment
+ *   shape, but the key reveals the secret. Schema vocabulary legitimately
+ *   contains "token" inside `max_output_tokens` / `max_total_tokens`; the
+ *   word-boundary check avoids flagging those while still catching true
+ *   secret keys (`api_key`, `secret`, `password`, `bearer`, `token`).
  */
 const SECRET_ASSIGNMENT = /\b(api[_-]?key|secret|password|bearer|token)\b\s*[:=]\s*\S{4,}/i;
+const SECRET_KEY = /\b(api[_-]?key|secret|password|bearer|token)\b/i;
 
 function containsSecretValue(value: unknown): string | null {
   if (typeof value === 'string') {
@@ -112,8 +117,11 @@ function containsSecretValue(value: unknown): string | null {
     return null;
   }
   if (value && typeof value === 'object') {
-    for (const item of Object.values(value as Record<string, unknown>)) {
-      const hit = containsSecretValue(item);
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_KEY.test(k) && typeof v === 'string' && v.trim().length >= 4) {
+        return `payload contains suspected secret material (key "${k}" carries a secret-like value)`;
+      }
+      const hit = containsSecretValue(v);
       if (hit) return hit;
     }
   }

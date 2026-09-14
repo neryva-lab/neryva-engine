@@ -17,13 +17,16 @@ import {
   POLICY_SNAPSHOT_SCHEMA_VERSION,
 } from './schema';
 import { validateAssistantPayload, assertPublishable, assistantPayloadSchema, rejectUnknownPayloadKeys, AssistantPayload } from './validation';
+import { evaluatePublishGate, throwGateRefusal } from './release-gate';
 import { TemplatesService } from './templates.service';
 import { ManifestResolutionService } from './manifest-resolution.service';
+import { ConversationsService } from '../conversations/conversations.service';
 import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
 import { EvalService } from '../knowledge/eval.service';
 import { toolCatalog } from './tool-catalog.schema';
 import { BUILT_IN_TOOLS } from './tool-catalog.service';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
+import { normalizeResidency, modelServesResidency, Residency } from './residency';
 
 /**
  * Assistants domain — Phase 3.1-3.3
@@ -51,6 +54,7 @@ export class AssistantsService {
     private readonly templates: TemplatesService,
     private readonly manifests: ManifestResolutionService,
     private readonly evals: EvalService,
+    private readonly conversations: ConversationsService,
   ) {}
 
   // ── Assistants (identity) ────────────────────────────────────────────────
@@ -807,17 +811,26 @@ export class AssistantsService {
       });
     }
 
-    // FL-2.19 — residency gate: the org's knowledge_config.residency pin must
-    // be covered by every referenced catalog model's `regions` list. Models
-    // without explicit regions only serve the 'default' residency class.
+    // FL-2.19 + REL-11.2 — residency gate: the org's knowledge_config.residency
+    // pin (or org_settings.preferences.residency) must be covered by every
+    // referenced catalog model's `regions` list. `eu` is strict: only models
+    // with `eu` or `global` serve eu. `default`/`us` remain permissive.
+    // Second region `eu` is now addressable — see residency.ts policy.
     const residencyConfig = await this.configPublish.latest(orgId, 'knowledge_config', null);
-    const residency = String((residencyConfig?.payload as { residency?: string } | undefined)?.residency ?? 'default');
+    const rawResidency =
+      String((residencyConfig?.payload as { residency?: string } | undefined)?.residency ?? 'default');
+    let residency: Residency;
+    try {
+      residency = normalizeResidency(rawResidency);
+    } catch {
+      throw ApiError.validation({ residency: `unknown residency: ${rawResidency}` });
+    }
     if (residency !== 'default') {
       const uncovered = payload.model_policy.allowed_models.filter((ref) => {
         const entry = catalog.models.find((m) => `${m.provider}/${m.model}` === ref);
         if (!entry) return false;
-        const regions = entry.regions ?? ['default'];
-        return !regions.includes(residency);
+        const regions = entry.regions ?? null;
+        return !modelServesResidency(residency, regions as string[] | null);
       });
       if (uncovered.length > 0) {
         throw ApiError.validation({
@@ -871,6 +884,107 @@ export class AssistantsService {
   }
 
   /**
+   * REL-2.4 — pre-publish test conversation: execute a version (DRAFT
+   * included) through the real conversation plane without publishing it.
+   * The run is run_kind='test': no quota reservation, no billable usage
+   * entry, invisible to end users and rollups. A draft version gets its
+   * policy snapshot materialized HERE (snapshots are publish artifacts —
+   * the test path synthesizes the same resolved set from the draft row so
+   * pinning has something to point at).
+   *
+   * Deliberately NOT one transaction: the snapshot must commit before
+   * acceptMessage (a separate transaction) can pin it. A failure after the
+   * snapshot leaves an orphan test conversation — harmless by construction.
+   */
+  async startTestRun(input: { orgId: string; assistantId: string; versionId: string; text: string; actor: string }): Promise<{
+    conversation_id: string;
+    message_id: string;
+    run_id: string | null;
+  }> {
+    assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    assertUuid(input.versionId);
+    const text = input.text.trim();
+    if (text.length === 0 || text.length > 8192) {
+      throw ApiError.validation({ text: 'must be 1..8192 chars' });
+    }
+
+    await this.db.withOrg(input.orgId, async (tx) => {
+      const versionRows = await tx
+        .select()
+        .from(assistantVersions)
+        .where(and(eq(assistantVersions.id, input.versionId), eq(assistantVersions.organizationId, input.orgId)))
+        .limit(1);
+      const version = versionRows[0];
+      if (!version || version.assistantId !== input.assistantId) {
+        throw ApiError.notFound('assistant version');
+      }
+      const existing = await tx.select({ id: policySnapshots.id }).from(policySnapshots).where(eq(policySnapshots.assistantVersionId, input.versionId)).limit(1);
+      if (existing.length === 0) {
+        const payload: AssistantPayload = {
+          model_policy: version.modelPolicy as AssistantPayload['model_policy'],
+          context_policy: version.contextPolicy as AssistantPayload['context_policy'],
+          tool_policy: version.toolPolicy as AssistantPayload['tool_policy'],
+          knowledge_policy: version.knowledgePolicy as AssistantPayload['knowledge_policy'],
+          guardrail_policy: version.guardrailPolicy as AssistantPayload['guardrail_policy'],
+          instructions: (version.instructions ?? undefined) as AssistantPayload['instructions'],
+          model_params: (version.modelParams ?? undefined) as AssistantPayload['model_params'],
+          budget_policy: (version.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
+        };
+        const validated = validateAssistantPayload(payload);
+        if (!validated.ok) {
+          throw ApiError.validation({ assistant: validated.issues });
+        }
+        const manifest = await this.manifests.resolveForPublish(tx, input.orgId, input.assistantId, validated.normalized);
+        await tx.insert(policySnapshots).values({
+          organizationId: input.orgId,
+          assistantVersionId: input.versionId,
+          snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
+          modelPolicy: version.modelPolicy,
+          contextPolicy: version.contextPolicy,
+          toolPolicy: version.toolPolicy,
+          guardrailPolicy: version.guardrailPolicy,
+          knowledgePolicy: version.knowledgePolicy ?? null,
+          instructions: version.instructions ?? null,
+          modelParams: version.modelParams ?? null,
+          budgetPolicy: version.budgetPolicy ?? null,
+          hash: version.hash,
+          toolBindings: manifest.toolBindings,
+          knowledgePins: manifest.knowledgePins,
+          modelRef: manifest.modelRef,
+          templateRef: manifest.templateRef,
+          manifestHash: manifest.manifestHash,
+        });
+      }
+    });
+
+    const conversation = await this.conversations.createConversation({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      createdBy: input.actor,
+      participantScope: 'org',
+    });
+    const accepted = await this.conversations.acceptMessage({
+      orgId: input.orgId,
+      principalId: input.actor,
+      conversationId: conversation.id,
+      content: { text },
+      pinVersionId: input.versionId,
+      runKind: 'test',
+    });
+    await this.audit.add({
+      action: 'assistant.test_run_started',
+      resourceType: 'assistant_version',
+      resourceId: input.versionId,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { conversation_id: conversation.id, run_id: accepted.run_id },
+    });
+    return { conversation_id: conversation.id, message_id: accepted.message_id, run_id: accepted.run_id };
+  }
+
+  /**
    * Shared publish/rollback commit — version row + resolved snapshot + active
    * pointer in ONE transaction (caller holds the advisory lock).
    *
@@ -898,6 +1012,10 @@ export class AssistantsService {
     const hash = hashPayload(input.normalized);
     await this.rejectNoOpPublish(tx, input.assistantId, hash);
     await this.rejectBlockedContent(tx, input.orgId, input.assistantId, hash);
+    // REL-3.2 (D1 adopted): a template release_policy that declares required
+    // checks makes a fresh PASS evaluation a publish precondition — the
+    // BLOCK gate alone was vacuous while nothing executed (GAP-04).
+    await this.rejectUnmetRequiredChecks(tx, input.orgId, input.assistantId, hash);
     const manifest = await this.manifests.resolveForPublish(tx, input.orgId, input.assistantId, input.normalized);
     const rows = await tx
       .insert(assistantVersions)
@@ -952,6 +1070,29 @@ export class AssistantsService {
   }
 
   /**
+   * REL-3.2 — the release-policy publish gate (D1 adopted, report §6.4.1).
+   * When the version's source template declares `required` checks in its
+   * release_policy, publishing demands the latest eval decision on THIS
+   * content hash to be PASS (WARN/BLOCK/absent all refuse). Templates
+   * without declared checks keep the legacy posture (BLOCK gate only) —
+   * the policy declares the bar; the gate enforces it. Canary WARN
+   * leniency is moot at publish time: a canary promotes a version that
+   * already had to PASS here.
+   */
+  private async rejectUnmetRequiredChecks(tx: NodePgDatabase, orgId: string, assistantId: string, hash: string): Promise<void> {
+    // Rule lives in release-gate.ts (REL-3.3 matrix) — this stays a thin
+    // throw-wrapper so the publish path and the tested evaluator cannot drift.
+    // Throwing on either refusal is behavior-preserving here: the BLOCK gate
+    // runs first in the publish sequence, so by the time this runs the BLOCK
+    // branch cannot fire — unless the caller sequence changes, in which case
+    // refusing is still the fail-closed answer.
+    const refusal = await evaluatePublishGate(tx, orgId, assistantId, hash);
+    if (refusal) {
+      throwGateRefusal(refusal, assistantId);
+    }
+  }
+
+  /**
    * BLOCK gate (TPL-6.1): the LATEST completed eval decision for this content
    * hash must not be BLOCK — critical failures are mathematically unpublishable
    * while they stand. Keyed by CONTENT hash (not row id), so the same bad
@@ -960,23 +1101,12 @@ export class AssistantsService {
    * BLOCK — publishability tracks the current verdict, not history.
    */
   private async rejectBlockedContent(tx: NodePgDatabase, orgId: string, assistantId: string, hash: string): Promise<void> {
-    const rows = await tx.execute(sql`
-      select er.decision
-      from eval_runs er
-      join assistant_versions av on av.id = er.assistant_version_id
-      where er.organization_id = ${orgId}::uuid
-        and av.assistant_id = ${assistantId}::uuid
-        and av.hash = ${hash}
-        and er.state = 'completed'
-        and er.decision is not null
-      order by er.finished_at desc nulls last, er.created_at desc
-      limit 1
-    `);
-    const decision = (rows.rows[0] as { decision?: string } | undefined)?.decision;
-    if (decision === 'BLOCK') {
-      throw ApiError.conflict('the latest evaluation of this content decided BLOCK — resolve the critical failures and re-evaluate before publishing', {
-        assistant_id: assistantId,
-      });
+    // Same evaluator as the required-checks gate (REL-3.3): in publish
+    // sequence this runs first, so a BLOCK refusal surfaces here with the
+    // BLOCK message before the required-checks rule is ever consulted.
+    const refusal = await evaluatePublishGate(tx, orgId, assistantId, hash);
+    if (refusal && refusal.gate === 'blocked_content') {
+      throwGateRefusal(refusal, assistantId);
     }
   }
 

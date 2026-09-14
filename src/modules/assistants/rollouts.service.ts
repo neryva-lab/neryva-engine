@@ -4,6 +4,9 @@ import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { assistantRollouts, assistantVersions, AssistantRollout, RolloutVariant } from './schema';
+import { assistantInstalls } from './schema';
+import { templatePlatformBlocks } from './template-blocks.schema';
+import { isNull } from 'drizzle-orm';
 import { evalRuns } from '../knowledge/eval.schema';
 import { ControlBlocksService } from './control-blocks.service';
 
@@ -80,6 +83,24 @@ export class RolloutsService {
       const exists = await tx.execute(sql`select 1 from assistants where id = ${input.assistantId}::uuid and organization_id = ${input.orgId}::uuid limit 1`);
       if (exists.rows.length === 0) {
         throw ApiError.notFound('assistant');
+      }
+      // REL-6.1 — platform kill, second effect point: a release pointer may
+      // not be (re)assigned for an assistant installed from a platform-
+      // blocked slug. The install record carries the slug provenance.
+      const install = await tx
+        .select({ slug: assistantInstalls.slug })
+        .from(assistantInstalls)
+        .where(eq(assistantInstalls.assistantId, input.assistantId))
+        .limit(1);
+      if (install.length > 0) {
+        const block = await tx
+          .select({ id: templatePlatformBlocks.id, reason: templatePlatformBlocks.reason })
+          .from(templatePlatformBlocks)
+          .where(and(eq(templatePlatformBlocks.slug, install[0].slug), isNull(templatePlatformBlocks.liftedAt)))
+          .limit(1);
+        if (block.length > 0) {
+          throw ApiError.forbidden(`template ${install[0].slug} is platform-blocked (${block[0].reason}) — new release pointers refuse`, { slug: install[0].slug });
+        }
       }
       for (const v of variants) {
         const version = await tx

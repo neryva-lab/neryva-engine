@@ -1,25 +1,29 @@
 {
-  "title": "Engine API — Phase 1.7 skeleton",
-  "description": "p95/p99 by route, auth failures, rate-limit, db pool. Fill queries per engine_architecture.md:516-531 after first spike.",
+  "title": "Engine API — REL-8.2 verified",
+  "description": "Every query below names a series the engine actually emits (src/common/observability/metrics.ts + interceptor/guard call sites). Thresholds follow ops/slo.md; alerts in ops/monitoring/alerts.yml.",
+  "notes": "Histogram buckets expose as neryva_engine_http_request_duration_seconds_bucket (Prometheus classic _bucket/_sum/_count suffixes).",
   "panels": [
     {
       "title": "httpRequestDuration p95/p99 by route",
       "metric": "neryva_engine_http_request_duration_seconds",
-      "query": "histogram_quantile(0.95, rate(neryva_engine_http_request_duration_seconds_bucket[5m])) by (route)"
+      "query": "histogram_quantile(0.95, sum(rate(neryva_engine_http_request_duration_seconds_bucket[5m])) by (route, le))",
+      "alert": "ApiLatencyP99Breach (p99 > 0.25s, 10m)"
     },
     {
       "title": "httpRequestsTotal by route/method/status",
       "metric": "neryva_engine_http_requests_total",
-      "query": "sum(rate(neryva_engine_http_requests_total[5m])) by (route, method, status)"
+      "query": "sum(rate(neryva_engine_http_requests_total[5m])) by (route, method, status)",
+      "alert": "ApiErrorRateHigh (5xx ratio > 2%, 10m)"
     },
     {
       "title": "authFailuresTotal by layer/reason",
       "metric": "neryva_engine_auth_failures_total",
-      "query": "sum(rate(neryva_engine_auth_failures_total[5m])) by (layer, reason)"
+      "query": "sum(rate(neryva_engine_auth_failures_total[5m])) by (layer, reason)",
+      "alert": "AuthFailureSurge (> 100 in 10m)"
     },
     {
-      "title": "rateLimit rejections",
-      "metric": "neryva_engine_http_requests_total{status=\"429\"}",
+      "title": "rateLimit rejections (429 by route)",
+      "metric": "neryva_engine_http_requests_total",
       "query": "sum(rate(neryva_engine_http_requests_total{status=\"429\"}[5m])) by (route)"
     }
   ]

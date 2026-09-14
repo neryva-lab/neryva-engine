@@ -108,6 +108,12 @@ export const runs = pgTable(
       .notNull()
       .references(() => policySnapshots.id),
     state: varchar('state', { length: 32 }).notNull().default('ACCEPTED'),
+    /**
+     * REL-2.2/REL-2.4 (drizzle/0052): standard = billable production traffic;
+     * test = pre-publish draft executions; eval = eval-harness executions.
+     * Non-standard runs are excluded from usage-ledger entries and rollups.
+     */
+    runKind: varchar('run_kind', { length: 16 }).notNull().default('standard'),
     /** Optimistic-concurrency counter backing the MCP wire contract's expected_version CAS. */
     version: integer('version').notNull().default(1),
     // Lease columns live on the row (pinned decision 2026-09-01); Phase 5 fills them.

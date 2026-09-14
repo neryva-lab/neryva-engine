@@ -1,5 +1,7 @@
 # Neryva MCP Implementation Ledger
 
+> **SNAPSHOT ANNOTATION (REL-10.2, 2026-09-13):** this engine-side mirror is NOT live tracking — it was snapshotted before implementation and shows 0 boxes checked while the Neryva MCP product is complete end-to-end (its own repo carries the phase0–8 test suites). The canonical execution record lives in the product repo; do not work this checklist here.
+
 ## Document status
 
 | Field | Value |

@@ -155,6 +155,26 @@ export class AssistantsController {
     return { eval_run_id: run.id };
   }
 
+  @Post(':assistantId/versions/:versionId/test-runs')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async startTestRun(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Param('versionId') versionId: string,
+    @Body() dto: { text?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    // REL-2.4 — pre-publish test conversation (draft versions allowed): the
+    // run is run_kind='test' (never billable, never user-visible). Poll the
+    // conversation stream / messages for the response like any conversation.
+    if (typeof dto.text !== 'string' || dto.text.trim().length === 0) {
+      throw ApiError.validation({ text: 'is required (1..8192 chars)' });
+    }
+    return this.assistants.startTestRun({ orgId, assistantId, versionId, text: dto.text, actor: principal.id });
+  }
+
   @Post(':assistantId/rollback')
   @Roles('owner', 'admin')
   @UseGuards(OrgRolesGuard)

@@ -26,6 +26,8 @@ import {
   RunEvent,
   MAX_MESSAGE_TEXT_LENGTH,
 } from './schema';
+import { approvals } from './mcp.schema';
+import { providerCredentials } from '../assistants/provider-credentials.schema';
 
 /** Wire enum (numeric string) → semantic SSE event names. */
 const SSE_EVENT_NAMES: Record<string, string> = {
@@ -51,6 +53,10 @@ import { assertRunTransition, isRunState, isTerminalRun } from './state-machine'
 import { EscalationsService } from './escalations.service';
 import { assistants, policySnapshots, runManifests } from '../assistants/schema';
 import { ControlBlocksService } from '../assistants/control-blocks.service';
+import { ModelCostService } from '../assistants/model-cost.service';
+import { estimateCostMicros, microsToLedgerString } from '../assistants/model-cost.schema';
+import { productEntitlements } from '../organizations/schema';
+import { quotaReservations } from '../billing/usage-ledger.schema';
 import { env } from '../../common/config/env';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { usageLedgerEntries } from '../billing/usage-ledger.schema';
@@ -194,6 +200,18 @@ export class ConversationsService {
     traceId?: string;
     /** FL-1.6 — validated MESSAGE_ATTACHMENT artifact ids to pin on the message. */
     attachments?: string[];
+    /**
+     * REL-2.2/REL-2.4 — non-standard run kinds (internal callers only; no
+     * public route passes this). test/eval runs skip quota reservation and
+     * billable usage entries.
+     */
+    runKind?: 'standard' | 'test' | 'eval';
+    /**
+     * REL-2.2/REL-2.4 — pin THIS version instead of the release-pointer
+     * selection (eval harness runs its pinned PUBLISHED version; test runs
+     * pin a draft whose snapshot the caller materialized first).
+     */
+    pinVersionId?: string;
   }): Promise<{ message_id: string; run_id: string | null; sequence: number; conversation_version: number; auto_responder?: 'paused'; replay?: boolean }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
@@ -241,6 +259,8 @@ export class ConversationsService {
       expectedConversationVersion?: number;
       traceId?: string;
       attachments?: string[];
+      runKind?: 'standard' | 'test' | 'eval';
+      pinVersionId?: string;
     },
   ): Promise<{ message_id: string; run_id: string | null; sequence: number; conversation_version: number; auto_responder?: 'paused' }> {
     // Row lock serializes sequence allocation + the one-active-turn policy.
@@ -273,9 +293,16 @@ export class ConversationsService {
     }
 
     // Pin the assistant's active published version + policy snapshot at acceptance.
+    // REL-2.2/REL-2.4: an explicit pinVersionId overrides the release-pointer
+    // selection — the eval harness pins ITS version (production pointers may
+    // disagree), and test runs pin a draft (snapshot materialized by the
+    // caller). Explicit pins still resolve a snapshot: no run without one.
     let pin: { version_id: string; snapshot_id: string; release: ReleasePointer } | null = null;
     if (!escalated) {
-      pin = await this.pickVersionPin(tx, conversation.assistantId, conversation.id, conversationReleaseChannel(conversation.channelBinding));
+      pin =
+        input.pinVersionId !== undefined
+          ? await this.pinExplicitVersion(tx, input.pinVersionId, input.runKind === 'test')
+          : await this.pickVersionPin(tx, conversation.assistantId, conversation.id, conversationReleaseChannel(conversation.channelBinding));
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
@@ -316,12 +343,21 @@ export class ConversationsService {
           assistantVersionId: activePin.version_id,
           policySnapshotId: activePin.snapshot_id,
           state: 'ACCEPTED',
+          runKind: input.runKind ?? 'standard',
         });
       } catch (err) {
         if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
           throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
         }
         throw err;
+      }
+
+      // REL-4.3 — the durable quota wall lives in THIS transaction: the
+      // reservation row commits with the run or not at all (invariant 4/7).
+      // test/eval runs never reserve (they are not billable traffic). The
+      // Redis counter plane stays the satellites' advisory layer.
+      if ((input.runKind ?? 'standard') === 'standard') {
+        await this.reserveQuota(tx, input.orgId, runId);
       }
 
       // TPL-5.6 — manifest commits atomically with the run: no run without it.
@@ -380,6 +416,101 @@ export class ConversationsService {
    * prod moves on" (plan §7.4). Fallback order: (production, channel) →
    * (production, default) → newest active row of any address.
    */
+  /**
+   * REL-2.2/REL-2.4 — explicit version pin (bypasses release pointers).
+   * allowDraft=true (test runs) accepts any version status; eval pins its
+   * PUBLISHED version. The snapshot must already exist — drafts get one
+   * materialized by the test-run entry point before this runs.
+   */
+  private async pinExplicitVersion(
+    tx: NodePgDatabase,
+    versionId: string,
+    allowDraft: boolean,
+  ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(versionId)) {
+      throw ApiError.validation({ pin_version_id: 'must be a uuid' });
+    }
+    const rows = await tx.execute(sql`
+      select av.id as version_id, ps.id as snapshot_id
+      from assistant_versions av
+      join policy_snapshots ps on ps.assistant_version_id = av.id
+      where av.id = ${versionId}::uuid
+        ${allowDraft ? sql`` : sql`and av.status = 'PUBLISHED'`}
+      limit 1
+    `);
+    const row = rows.rows[0] as { version_id: string; snapshot_id: string } | undefined;
+    return row ? { version_id: row.version_id, snapshot_id: row.snapshot_id, release: { type: 'active_pointer' } } : null;
+  }
+
+  /**
+   * REL-4.3 — durable quota wall, evaluated in the caller's transaction.
+   * Reads the plan limits from the org's `agents` entitlement row (absent
+   * row = no plan limits, matching quota.limitsFor semantics), counts this
+   * month's committed usage plus open reservations, and either inserts a
+   * RESERVED row that commits with the run or throws the typed wall
+   * (402 spend / 429 events). Redis stays the satellites' advisory plane.
+   */
+  private async reserveQuota(tx: NodePgDatabase, orgId: string, runId: string): Promise<void> {
+    const ent = await tx
+      .select({ limits: productEntitlements.limits })
+      .from(productEntitlements)
+      .where(and(eq(productEntitlements.orgId, orgId), eq(productEntitlements.product, 'agents')))
+      .limit(1);
+    if (ent.length === 0) {
+      return; // no plan row → no plan limits (the entitlement guard owns unentitled access)
+    }
+    const limits = (ent[0].limits ?? {}) as { monthly_spend_usd?: unknown; monthly_events?: unknown };
+    const spendLimit = typeof limits.monthly_spend_usd === 'number' ? limits.monthly_spend_usd : null;
+    const eventsLimit = typeof limits.monthly_events === 'number' ? limits.monthly_events : null;
+    if (spendLimit === null && eventsLimit === null) {
+      return;
+    }
+    const usage = await tx.execute<{ events: number; open_reservations: number }>(sql`
+      select
+        (select count(*)::int from usage_ledger_entries
+          where organization_id = ${orgId}::uuid and created_at >= date_trunc('month', now())) as events,
+        (select count(*)::int from quota_reservations
+          where organization_id = ${orgId}::uuid and state = 'RESERVED' and expires_at > now()) as open_reservations
+    `);
+    const row = usage.rows[0] as { events: number; open_reservations: number };
+    const eventsUsed = Number(row?.events ?? 0) + Number(row?.open_reservations ?? 0);
+    if (eventsLimit !== null && eventsUsed >= eventsLimit) {
+      throw ApiError.quotaExceeded('monthly_events', { limit: eventsLimit, used: eventsUsed });
+    }
+    if (spendLimit !== null) {
+      const spend = await tx.execute<{ spend: string | null }>(sql`
+        select coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0)::text as spend
+        from usage_ledger_entries
+        where organization_id = ${orgId}::uuid and created_at >= date_trunc('month', now())
+      `);
+      const spendUsed = Number((spend.rows[0] as { spend: string | null } | undefined)?.spend ?? 0);
+      if (spendUsed >= spendLimit) {
+        throw ApiError.quotaExceeded('monthly_spend', { limit_usd: spendLimit, used_usd: spendUsed });
+      }
+    }
+    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    await tx.insert(quotaReservations).values({
+      id: uuidv7(),
+      organizationId: orgId,
+      dimension: 'runs',
+      quantity: '1',
+      state: 'RESERVED',
+      runId,
+      reference: `run:${runId}`,
+      expiresAt,
+    });
+  }
+
+  /** REL-4.4 — terminal reservation transition (COMMITTED on success, RELEASED on failure). */
+  private async settleRunQuota(tx: NodePgDatabase, runId: string, committed: boolean): Promise<void> {
+    await tx.execute(sql`
+      update quota_reservations
+      set state = ${committed ? 'COMMITTED' : 'RELEASED'},
+          ${committed ? sql`committed_at` : sql`released_at`} = now()
+      where run_id = ${runId}::uuid and state = 'RESERVED'
+    `);
+  }
+
   private async pickVersionPin(
     tx: NodePgDatabase,
     assistantId: string,
@@ -1116,8 +1247,35 @@ export class ConversationsService {
 
       // Contract v1.1: usage rides the terminal commit — append-only ledger
       // entry in the SAME transaction. A replayed commit short-circuits above
-      // (COMPLETED) so the entry can never be written twice.
-      if (input.usage && input.usage.totalTokens > 0) {
+      // (COMPLETED) so the entry can never be written twice. REL-2.2/2.4:
+      // test/eval runs are not billable traffic — no entry at all.
+      // REL-4.5: the entry carries the estimated cost from the model cost
+      // catalog (GAP-06 — cost was priced at zero before this). Lookup is
+      // exact (provider, model); an unpriced model stays null and is filled
+      // by reconciliation, never invented.
+      // REL-11.1 (BYOK): the credential source (platform vs byok) is recorded
+      // in metadata so billing can apply D3 passthrough vs platform-fee
+      // accounting without a schema break — the ledger row itself stays the
+      // same shape, only the metadata gains `credential_source`.
+      await this.settleRunQuota(tx, run.id, true);
+      let estimatedCost: string | null = null;
+      if (run.runKind === 'standard' && input.usage && input.usage.totalTokens > 0) {
+        const point = await ModelCostService.latestForRunPricing(tx, input.usage.provider, input.usage.model);
+        if (point) {
+          estimatedCost = microsToLedgerString(
+            estimateCostMicros({ costMicrosPer1kInput: point.inputMicros, costMicrosPer1kOutput: point.outputMicros }, input.usage.promptTokens, input.usage.completionTokens),
+          );
+        }
+        // REL-11.1: resolve the active credential's source for BYOK accounting.
+        // No extra RLS — same tx, same org. Missing row -> 'unknown' (e.g. a
+        // run pinned to a model whose credential was revoked between accept
+        // and commit — the cost still lands, just without a source).
+        const credSourceRows = await tx
+          .select({ source: providerCredentials.source })
+          .from(providerCredentials)
+          .where(and(eq(providerCredentials.organizationId, input.orgId), eq(providerCredentials.provider, input.usage.provider), eq(providerCredentials.status, 'active')))
+          .limit(1);
+        const credentialSource = credSourceRows[0]?.source ?? 'unknown';
         await tx.insert(usageLedgerEntries).values({
           id: uuidv7(),
           organizationId: input.orgId,
@@ -1131,10 +1289,12 @@ export class ConversationsService {
           quantity: String(input.usage.totalTokens),
           provider: input.usage.provider.slice(0, 64),
           model: input.usage.model.slice(0, 128),
+          estimatedCost,
           idempotencyKey: `commit-usage:${run.id}`,
           metadata: {
             prompt_tokens: input.usage.promptTokens,
             completion_tokens: input.usage.completionTokens,
+            credential_source: credentialSource,
           },
         });
       }
@@ -1145,11 +1305,82 @@ export class ConversationsService {
         organizationId: input.orgId,
         eventType: 'run.completed',
         partitionKey: run.conversationId,
-        payload: { run_id: run.id, conversation_id: run.conversationId, message_id: messageId },
+        payload: { run_id: run.id, conversation_id: run.conversationId, message_id: messageId, run_kind: run.runKind },
       });
 
       return { message_id: messageId, run_id: run.id, replay: false };
     });
+  }
+
+  /**
+   * REL-5.1 — the pending-work surface: org-scoped approval list with a
+   * computed `expired` flag (expiry evaluated at READ time — no sweeper,
+   * same philosophy as control blocks; the decision path still enforces it).
+   */
+  async listApprovals(input: { orgId: string; state?: string }): Promise<Array<Record<string, unknown>>> {
+    assertUuid(input.orgId, 'orgId');
+    const stateFilter = input.state !== undefined;
+    const state = input.state ?? '';
+    if (stateFilter && !['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'].includes(state)) {
+      throw ApiError.validation({ state: 'must be one of PENDING|APPROVED|DENIED|EXPIRED' });
+    }
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const base = tx
+        .select({
+          id: approvals.id,
+          runId: approvals.runId,
+          approvalRef: approvals.approvalRef,
+          summary: approvals.summary,
+          actionType: approvals.actionType,
+          policyVersion: approvals.policyVersion,
+          state: approvals.state,
+          expiresAt: approvals.expiresAt,
+          decidedAt: approvals.decidedAt,
+          decisionActorId: approvals.decisionActorId,
+          createdAt: approvals.createdAt,
+        })
+        .from(approvals);
+      const rows = stateFilter
+        ? await base.where(eq(approvals.state, state)).orderBy(desc(approvals.createdAt)).limit(200)
+        : await base.orderBy(desc(approvals.createdAt)).limit(200);
+      const now = new Date().toISOString();
+      return rows.map((r) => ({ ...r, expired: r.state === 'PENDING' && r.expiresAt !== null && r.expiresAt < now }));
+    });
+  }
+
+  /**
+   * REL-5.3 — re-target a pending approval's decision window (the
+   * reassignment semantics that exist until approver-topology lands as
+   * REL-11.4: any owner/admin may decide; extending the window is the
+   * operator action that keeps work discoverable and SLA-honest).
+   */
+  async extendApproval(input: { orgId: string; approvalId: string; expiresAt: string; actor: string }): Promise<Record<string, unknown>> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.approvalId, 'approvalId');
+    const parsed = new Date(input.expiresAt);
+    if (Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) {
+      throw ApiError.validation({ expires_at: 'must be an ISO timestamp in the future' });
+    }
+    const rows = await this.db.withOrg(input.orgId, (tx) =>
+      tx
+        .update(approvals)
+        .set({ expiresAt: parsed.toISOString() })
+        .where(and(eq(approvals.id, input.approvalId), eq(approvals.organizationId, input.orgId), eq(approvals.state, 'PENDING')))
+        .returning(),
+    );
+    if (rows.length === 0) {
+      throw ApiError.conflict('approval is not pending (or does not exist) — expired/decided approvals cannot be extended');
+    }
+    await this.audit.add({
+      action: 'approval.extended',
+      resourceType: 'approval',
+      resourceId: rows[0].id,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { approval_ref: rows[0].approvalRef, new_expires_at: parsed.toISOString() },
+    });
+    return { ...rows[0], expired: false };
   }
 
   /**

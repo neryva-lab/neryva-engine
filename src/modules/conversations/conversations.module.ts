@@ -3,6 +3,7 @@ import { ConversationsService } from './conversations.service';
 import { EscalationsService } from './escalations.service';
 import { McpAuthorityService } from './mcp-authority.service';
 import { ConversationsController, RunsController } from './conversations.controller';
+import { ApprovalsController } from './approvals.controller';
 import { ConversationsPublicController } from './conversations.public.controller';
 import { PublicSharesController } from './conversations.public-shares.controller';
 import { EscalationsController } from './escalations.controller';
@@ -17,7 +18,7 @@ import { BillingModule } from '../billing/billing.module';
   // module, so no cycle. McpAuthorityService lives HERE (not in McpModule)
   // because RunsController needs it in this module's context.
   imports: [LifecycleModule, OrganizationsModule, KnowledgeModule, BillingModule],
-  controllers: [ConversationsController, RunsController, EscalationsController, ConversationsPublicController, PublicSharesController],
+  controllers: [ConversationsController, RunsController, EscalationsController, ConversationsPublicController, PublicSharesController, ApprovalsController],
   providers: [ConversationsService, EscalationsService, McpAuthorityService],
   exports: [ConversationsService, EscalationsService, McpAuthorityService],
 })

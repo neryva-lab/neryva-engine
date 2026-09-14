@@ -175,7 +175,7 @@
 - **Depends:** TPL-3.2. **Gate:** all 12 pass lint; reviewers sign instructions tone per template.
 
 ### TPL-3.4 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-7.5 — template-gates CI now references templates:lint)
 - **Scope:** template-lint blocks merge; merge to main triggers the TPL-1.2 release-job upsert;
   hash-parity CI gate.
 - **Depends:** TPL-3.3, TPL-1.2. **Gate:** a template PR lands with zero DDL and rows update.
@@ -272,7 +272,7 @@
   no run or a complete manifest; duplicate acceptance cannot double-insert (idempotency tier).
 
 ### TPL-5.7 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-7.5 — golden fixture gate wired)
 - **Scope:** reproduce one Tier-1 template's full ExecutionManifest byte-identically from the same
   inputs; `manifest_hash` verifies; recorded as a CI fixture.
 - **Depends:** TPL-5.6. **Gate:** fixture green in CI.
@@ -435,34 +435,34 @@
 ## TPL-10 — Exit gates (plan §9 + §12 definition of done)
 
 ### TPL-10.1 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-0.5 — isolation suite now required)
 - **Scope:** two-org install of the same slug cannot read/mutate each other's
   assistants/versions/snapshots/installs/manifests, knowledge, or eval runs; registry (global) is
   readable but installs are strictly per-org.
 - **Depends:** TPL-2.2, TPL-5.6. **Gate:** isolation suite green.
 
 ### TPL-10.2 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-0.5)
 - **Scope:** `exportVersion` hash parity round-trip for at least one version per Tier-1 template
   (provenance fields included without breaking canonical hashing).
 - **Depends:** TPL-3.3, TPL-4.2. **Gate:** round-trip identical for all 12.
 
 ### TPL-10.3 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-0.5)
 - **Scope:** `samples/edge-cases.md` scenarios executed: prompt-injection exfil, confused-deputy tool
   args, stale-version publish race, capability-scope swap, disabled-tool invocation — all fail
   closed with audit records.
 - **Depends:** TPL-6.3, TPL-6.4. **Gate:** every scenario denies + audits.
 
 ### TPL-10.4 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-0.5)
 - **Scope:** existing Phase 3 gates unchanged and extended: advisory-lock concurrency, no-op hash
   conflict, snapshot + bindings + manifest-hash in-TX, run manifest in acceptance TX, tool-pin
   drift rejection, built-in bypass correctness.
 - **Depends:** TPL-5.2-5.6. **Gate:** existing + new tests green.
 
 ### TPL-10.5 
-- **Status:** TODO
+- **Status:** CODE_COMPLETE (2026-09-14 via release_ledger REL-7.4 — OpenAPI drift gate)
 - **Scope:** OpenAPI drift on all new endpoints blocks merge (§7.3); `AGENTS.md`/`imp/ledger.md`
   statuses reconciled in the same PR that flips the last task; DoD checklist (plan §12) fully
   checked.
@@ -474,7 +474,7 @@
 
 Updated 2026-09-13 (implementation review pass): all Engine + template-content tasks are
 CODE_COMPLETE; every DB-backed exit gate awaits the single authorized full CI/DB run (compose up +
-migrate + suites) before any box may move past GATES_PENDING. Still TODO: TPL-3.4 (no CI workflow
+migrate + suites) before any box may move past GATES_PENDING. Now CODE_COMPLETE via release_ledger REL-7.5/REL-0.5: TPL-3.4 (CI workflow now
 references `templates:lint` yet — lint runs locally), TPL-5.7 (golden manifest fixture is authored
 with the CI gate), and the five TPL-10 exit-gate tasks.
 
@@ -483,15 +483,15 @@ with the CI gate), and the five TPL-10 exit-gate tasks.
 | TPL-0 | 0 | 2 | 0 | 0 |
 | TPL-1 | 0 | 4 | 0 | 0 |
 | TPL-2 | 0 | 4 | 0 | 0 |
-| TPL-3 | 1 | 3 | 0 | 0 |
+| TPL-3 | 0 | 4 | 0 | 0 |
 | TPL-4 | 0 | 2 | 0 | 0 |
-| TPL-5 | 1 | 6 | 0 | 0 |
+| TPL-5 | 0 | 7 | 0 | 0 |
 | TPL-6 | 0 | 5 | 0 | 0 |
 | TPL-7 | 0 | 5 | 0 | 0 |
 | TPL-8 | 0 | 3 | 0 | 0 |
 | TPL-9 | 0 | 3 | 0 | 0 |
-| TPL-10 | 5 | 0 | 0 | 0 |
-| **Total** | **7** | **37** | **0** | **0** |
+| TPL-10 | 0 | 5 | 0 | 0 |
+| **Total** | **0** | **44** | **0** | **0** |
 
 > **Execution order:** TPL-0 → TPL-1 → TPL-2 → TPL-3 (3.1/3.2 can start after TPL-0 in parallel
 > with TPL-2) → TPL-4 → TPL-5 (5.1 may start after TPL-1.1, parallel with TPL-2/3) → TPL-6 →

@@ -1,0 +1,85 @@
+# REL-7.1/7.3 — the Engine CD lane. Shape follows the workspace reference
+# pipeline (the legacy product's): build-push on main/tags, Trivy scan,
+# guarded staging deploy over SSH, and the single release-job migration
+# (ops/migrate.sh) as the ONLY migration path. Everything behind repository
+# variables/secrets is a no-op until configured — the pipeline must never
+# half-deploy by accident.
+#
+# Required configuration before this pipeline does anything:
+#   vars:   NERYVA_DEPLOY_ENABLED ("true" arms the deploy job)
+#   secrets: NERYVA_STAGING_SSH_HOST, NERYVA_STAGING_SSH_USER,
+#            NERYVA_STAGING_SSH_KEY, NERYVA_STAGING_DEPLOY_DIR
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          # ops/engine/engine.Dockerfile builds from the ENGINE repo root
+          # (the compose lane's context) — ships dist, drizzle, products_manifests.
+          context: .
+          file: ops/engine/engine.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Trivy image scan (CRITICAL/HIGH)
+        continue-on-error: true # advisory until the first green run, then flip
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+  deploy-staging:
+    needs: build-push
+    if: vars.NERYVA_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    concurrency:
+      group: neryva-engine-staging
+      cancel-in-progress: false
+    steps:
+      - name: pull, migrate (release job), and roll
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.NERYVA_STAGING_SSH_HOST }}
+          username: ${{ secrets.NERYVA_STAGING_SSH_USER }}
+          key: ${{ secrets.NERYVA_STAGING_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd ${{ secrets.NERYVA_STAGING_DEPLOY_DIR }}
+            # REL-7.3 — migrations run exactly once per release, through the
+            # journal-verifying release script; never per-replica.
+            DATABASE_URL="$NERYVA_DATABASE_URL" ./ops/migrate.sh
+            ENGINE_IMAGE="ghcr.io/${{ github.repository }}:${{ github.sha }}" docker compose -f ops/engine/docker-compose.yml up -d --no-deps engine
+            # health retry loop — the boot gates (flag matrix, route bijection,
+            # secret fail-closed checks) must pass before we call this a deploy
+            for i in $(seq 1 30); do
+              if curl -fsS http://localhost:3001/health > /dev/null 2>&1; then
+                echo "engine healthy"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "engine failed health checks after rollout"
+            exit 1

@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    setupFiles: ['tests/setup-unit.ts'],
     globals: false,
     include: ['src/**/*.test.ts', 'tests/unit/**/*.test.ts'],
     exclude: ['tests/integration/**', 'tests/contract/**', 'tests/isolation/**', 'tests/property/**', 'tests/chaos/**', 'tests/load/**', 'node_modules/**', 'dist/**'],

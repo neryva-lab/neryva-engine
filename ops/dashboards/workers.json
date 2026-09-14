@@ -1,31 +1,52 @@
 {
-  "title": "Engine Workers — Queues / Uploads (Phase 1.7 skeleton)",
-  "description": "Queue depth, upload orphans, deployment transitions. Per engine_architecture.md:516-531 and ledger 1.7.",
+  "title": "Engine Workers — outbox / delivery (REL-8.2 verified)",
+  "description": "Outbox dispatcher series come from src/common/infra/outbox/dispatcher.ts (unprefixed outbox_* names); delivery series from src/common/observability/metrics.ts call sites. Alerts in ops/monitoring/alerts.yml.",
+  "notes": "neryva_engine_queue_depth and neryva_engine_upload_orphans_total are reserved in the metrics registry but have no emitter yet — no panel until wired (an empty panel is a lie). neryva_engine_deployment_transitions_total is emitted by deployments.service.ts; neryva_engine_webhook_deliveries_total by webhook.worker.ts; neryva_engine_metering_ingest_rows_total by spend-ingest.service.ts (outcomes accepted/duplicate/rejected).",
   "panels": [
     {
-      "title": "queueDepth by namespace/state",
-      "metric": "neryva_engine_queue_depth",
-      "query": "max(neryva_engine_queue_depth) by (namespace, state)"
+      "title": "outboxAgeSeconds (oldest undispatched)",
+      "metric": "outbox_age_seconds",
+      "query": "max(outbox_age_seconds)",
+      "alert": "OutboxLagHigh (> 300s, 5m) / OutboxLagCritical (> 900s, 5m)"
     },
     {
-      "title": "uploadOrphansTotal",
-      "metric": "neryva_engine_upload_orphans_total",
-      "query": "sum(rate(neryva_engine_upload_orphans_total[5m])) by (reason)"
+      "title": "outboxPublishedTotal by event_type",
+      "metric": "outbox_published_total",
+      "query": "sum(rate(outbox_published_total[5m])) by (event_type)"
     },
     {
-      "title": "deploymentTransitions",
+      "title": "outboxRetryTotal by event_type",
+      "metric": "outbox_retry_total",
+      "query": "sum(rate(outbox_retry_total[5m])) by (event_type)"
+    },
+    {
+      "title": "outboxDeadLetters by event_type",
+      "metric": "outbox_dead_letter_total",
+      "query": "sum(rate(outbox_dead_letter_total[5m])) by (event_type)",
+      "alert": "OutboxDeadLetters (any increase, 15m)"
+    },
+    {
+      "title": "staleClaimRecoveries (worker crashes)",
+      "metric": "outbox_stale_claim_recovered_total",
+      "query": "sum(rate(outbox_stale_claim_recovered_total[15m]))",
+      "alert": "WorkerStaleClaims (any increase, 15m)"
+    },
+    {
+      "title": "webhookDeliveries by outcome",
+      "metric": "neryva_engine_webhook_deliveries_total",
+      "query": "sum(rate(neryva_engine_webhook_deliveries_total[5m])) by (outcome)",
+      "alert": "WebhookDeliveryBacklog (> 10 failed in 15m)"
+    },
+    {
+      "title": "meteringIngestRows by outcome",
+      "metric": "neryva_engine_metering_ingest_rows_total",
+      "query": "sum(rate(neryva_engine_metering_ingest_rows_total[5m])) by (outcome)",
+      "alert": "MeteringIngestRejections (any rejected in 30m)"
+    },
+    {
+      "title": "deploymentTransitions by from/to",
       "metric": "neryva_engine_deployment_transitions_total",
       "query": "sum(rate(neryva_engine_deployment_transitions_total[5m])) by (from, to)"
-    },
-    {
-      "title": "webhookDeliveries",
-      "metric": "neryva_engine_webhook_deliveries_total",
-      "query": "sum(rate(neryva_engine_webhook_deliveries_total[5m])) by (outcome)"
-    },
-    {
-      "title": "meteringIngestRows",
-      "metric": "neryva_engine_metering_ingest_rows_total",
-      "query": "sum(rate(neryva_engine_metering_ingest_rows_total[5m])) by (outcome)"
     }
   ]
 }

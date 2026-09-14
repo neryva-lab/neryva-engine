@@ -14,6 +14,9 @@ import { LlmJudgeConsumer } from './llm-judge.consumer';
 // @Optional() yields undefined.
 import { UsageLedgerConsumer } from './usage-ledger.consumer';
 import { LifecycleWebhookConsumer } from './lifecycle-webhook.consumer';
+import { EvalExecutorConsumer } from './eval-executor.consumer';
+import { EvalScoringConsumer } from './eval-scoring.consumer';
+import { HumanLoopNotifyConsumer } from './human-loop-notify.consumer';
 import { ChannelIngestConsumer } from '../modules/channels/ingest.service';
 import { ChannelOutboundService } from '../modules/channels/outbound.service';
 import { purgeExpiredIdempotencyRecords } from '../common/http/idempotency-records';
@@ -49,6 +52,11 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
     // (billing/webhooks flags) — same pattern as the channel consumers below.
     @Optional() @Inject(UsageLedgerConsumer) usageLedger?: UsageLedgerConsumer,
     @Optional() @Inject(LifecycleWebhookConsumer) lifecycleWebhook?: LifecycleWebhookConsumer,
+    // Eval-plane consumers (REL-2.1/2.2) join when conversations + knowledge
+    // modules are loaded (GAP-03 — the consumer `eval.run_requested` never had).
+    @Optional() @Inject(EvalExecutorConsumer) evalExecutor?: EvalExecutorConsumer,
+    @Optional() @Inject(EvalScoringConsumer) evalScoring?: EvalScoringConsumer,
+    @Optional() @Inject(HumanLoopNotifyConsumer) humanLoopNotify?: HumanLoopNotifyConsumer,
     // Channel-plane consumers join the dispatcher only when MODULES__CHANNELS_ENABLED.
     @Optional() @Inject(ChannelIngestConsumer) channelIngest?: ChannelIngestConsumer,
     @Optional() @Inject(ChannelOutboundService) channelOutbound?: ChannelOutboundService,
@@ -59,6 +67,12 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
     }
     if (lifecycleWebhook) {
       consumers.push(lifecycleWebhook);
+    }
+    if (evalExecutor) {
+      consumers.push(evalExecutor);
+    }
+    if (evalScoring) {
+      consumers.push(evalScoring);
     }
     if (channelIngest) {
       consumers.push(channelIngest);

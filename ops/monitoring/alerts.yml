@@ -1,0 +1,104 @@
+# REL-8.1 — alert rules derived from ops/slo.md, using ONLY metric names the
+# engine actually exports (metrics.ts + dispatcher gauges — verified 2026-09-13).
+# Route p95/p99 panels and thresholds follow ops/dashboards/api.json.
+groups:
+  - name: neryva-engine-isolation
+    rules:
+      - alert: RlsViolationDetected
+        expr: increase(neryva_engine_rls_violations_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'RLS / tenant-scope violation detected ({{ $labels.table }})'
+          runbook: ops/runbooks/cross-tenant-incident.md
+          description: 'The harness counted a tenant-scope violation. Treat as a security incident, not a bug.'
+
+  - name: neryva-engine-outbox
+    rules:
+      - alert: OutboxLagHigh
+        expr: outbox_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Outbox age {{ $value | printf "%.0f" }}s exceeds the 5-min SLO lag budget'
+          runbook: ops/runbooks/outbox-dead-letter.md
+      - alert: OutboxLagCritical
+        expr: outbox_age_seconds > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Outbox age {{ $value | printf "%.0f" }}s — runs are stalling in ACCEPTED'
+          runbook: ops/runbooks/outbox-dead-letter.md
+      - alert: OutboxDeadLetters
+        expr: increase(outbox_dead_letter_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Outbox events dead-lettered ({{ $labels.event_type }})'
+          runbook: ops/runbooks/outbox-dead-letter.md
+      - alert: WorkerStaleClaims
+        expr: increase(outbox_stale_claim_recovered_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'CLAIMED rows recovered after a worker crash — check worker health'
+          runbook: ops/runbooks/worker-crash-recovery.md
+
+  - name: neryva-engine-api
+    rules:
+      - alert: ApiErrorRateHigh
+        expr: sum(rate(neryva_engine_http_requests_total{status=~"5.."}[5m])) / sum(rate(neryva_engine_http_requests_total[5m])) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'HTTP 5xx ratio above 2% for 10 minutes (availability SLO 99.9%)'
+          runbook: ops/runbooks/README.md
+      - alert: ApiLatencyP99Breach
+        expr: histogram_quantile(0.99, sum(rate(neryva_engine_http_request_duration_seconds_bucket[5m])) by (le)) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'API p99 latency above the 250 ms message-accept budget'
+          runbook: ops/runbooks/README.md
+      - alert: AuthFailureSurge
+        expr: sum(increase(neryva_engine_auth_failures_total[10m])) > 100
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Authentication failures surging ({{ $labels.reason }}) — possible credential stuffing'
+          runbook: ops/runbooks/cross-tenant-incident.md
+
+  - name: neryva-engine-data
+    rules:
+      - alert: SlowQueriesBreaching
+        expr: increase(neryva_engine_slow_queries_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Statements exceeded statement_timeout ({{ $labels.query_family }}) — check EXPLAIN plans'
+          runbook: ops/runbooks/README.md
+      - alert: WebhookDeliveryBacklog
+        expr: sum(increase(neryva_engine_webhook_deliveries_total{outcome="failed"}[15m])) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Outbound webhook deliveries failing — consumer endpoints unhealthy?'
+          runbook: ops/runbooks/README.md
+      - alert: MeteringIngestRejections
+        expr: increase(neryva_engine_metering_ingest_rows_total{outcome="rejected"}[30m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Metering ingest rejected spend rows — satellites sending malformed usage?'
+          runbook: ops/runbooks/billing-webhook-reconciliation.md

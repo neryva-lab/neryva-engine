@@ -98,8 +98,14 @@ export class UsageLedgerService {
    * Compensating correction: a NEW entry with opposite quantity pointing at
    * the original via reversal_of. The original row keeps `discrepant` (or
    * stays as-is); "current usage" is the sum including compensations.
+   *
+   * Money corrections: pass `costDelta` (usually the negated original cost)
+   * so the reversal nets in invoice derivation (`buildUsageLedgerLineItems`
+   * sums `coalesce(settled_cost, estimated_cost, 0)`). Omitted (null) means
+   * a quantity-only correction — the correction carries no cost, exactly the
+   * pre-F1 behavior.
    */
-  async correct(input: { orgId: string; originalEntryId: string; reason: string; actor: string; quantityDelta?: number }): Promise<UsageLedgerEntry> {
+  async correct(input: { orgId: string; originalEntryId: string; reason: string; actor: string; quantityDelta?: number; costDelta?: number | null }): Promise<UsageLedgerEntry> {
     return this.db.withOrg(input.orgId, async (tx) => {
       const originals = await tx
         .select()
@@ -117,6 +123,9 @@ export class UsageLedgerService {
       if (delta === 0) {
         throw ApiError.validation({ quantity: 'correction must be non-zero' });
       }
+      if (input.costDelta !== undefined && input.costDelta !== null && !Number.isFinite(input.costDelta)) {
+        throw ApiError.validation({ cost: 'cost correction must be a finite number' });
+      }
       const correction = await tx
         .insert(usageLedgerEntries)
         .values({
@@ -132,6 +141,7 @@ export class UsageLedgerService {
           quantity: String(delta),
           provider: original.provider,
           model: original.model,
+          estimatedCost: input.costDelta == null ? null : String(input.costDelta),
           reversalOf: original.id,
           reconciliationState: 'corrected',
           metadata: { reason: input.reason, actor: input.actor, original_quantity: original.quantity },

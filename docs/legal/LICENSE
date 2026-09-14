@@ -1,0 +1,40 @@
+Neryva Engine — Proprietary Software License
+
+Copyright (c) 2026 Neryva. All Rights Reserved.
+
+IMPORTANT — READ BEFORE USE. THIS IS A DRAFT LICENSE (REL-9.1) PREPARED FOR
+REVIEW BY COUNSEL. IT IS NOT LEGAL ADVICE AND MUST BE REVIEWED AND APPROVED
+BY A QUALIFIED LAWYER BEFORE ANY DISTRIBUTION, PUBLICATION, OR COMMERCIAL
+OFFERING.
+
+1. Ownership. The Neryva Engine and its documentation ("Software") are the
+   proprietary work of Neryva. Neryva retains all right, title, and interest,
+   including all intellectual property rights.
+
+2. License grant. Neryva grants you a non-exclusive, non-transferable,
+   revocable license to install and run the Software solely as a hosted
+   service operated by Neryva, or under a separate written agreement
+   (e.g., an enterprise on-premise or reseller agreement).
+
+3. Restrictions. You may not copy, modify, merge, publish, distribute,
+   sublicense, sell, or create derivative works of the Software, in source or
+   binary form, except as expressly permitted by a written agreement with
+   Neryva. You may not remove or alter any proprietary notices. You may not
+   use the Software to provide a competing agent-governance platform.
+
+4. Third-party components. The Software incorporates third-party packages
+   under their own open-source licenses (see package manifests). Nothing in
+   this license restricts your rights under those licenses for the
+   third-party components themselves.
+
+5. Open-source posture decision (pending, REL-9.1): the package manifests
+   currently declare "UNLICENSED". If Neryva elects to release any component
+   under an OSI license, that election supersedes section 2–3 for the
+   released artifact and version only.
+
+6. Warranty disclaimer. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY
+   OF ANY KIND, EXPRESS OR IMPLIED. Counsel to confirm jurisdiction-specific
+   consumer protections before offering to consumers.
+
+7. Contact: legal@neryva.com (placeholder — confirm the domain and monitored
+   mailbox with counsel before publishing).

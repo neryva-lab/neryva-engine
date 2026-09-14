@@ -344,6 +344,55 @@
       "when": 1761246300019,
       "tag": "0049_release_governance",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1789257600000,
+      "tag": "0050_provider_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1789257600001,
+      "tag": "0051_model_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "6",
+      "when": 1789257600002,
+      "tag": "0052_eval_executions_and_run_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "6",
+      "when": 1789257600003,
+      "tag": "0053_model_cost_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "6",
+      "when": 1789257600004,
+      "tag": "0054_template_platform_blocks",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "6",
+      "when": 1789257600005,
+      "tag": "0055_agents_catalog_seed",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "6",
+      "when": 1789257600006,
+      "tag": "0056_advanced_approvals",
+      "breakpoints": true
     }
   ]
 }

@@ -11,6 +11,12 @@ import { ModuleFlags } from '../common/config/feature-flags';
 import { ChannelsModule } from '../modules/channels/channels.module';
 import { BillingModule } from '../modules/billing/billing.module';
 import { WebhooksModule } from '../modules/webhooks/webhooks.module';
+import { ConversationsModule } from '../modules/conversations/conversations.module';
+import { KnowledgeModule } from '../modules/knowledge/knowledge.module';
+import { NotificationsModule } from '../modules/notifications/notifications.module';
+import { EvalExecutorConsumer } from './eval-executor.consumer';
+import { EvalScoringConsumer } from './eval-scoring.consumer';
+import { HumanLoopNotifyConsumer } from './human-loop-notify.consumer';
 
 /**
  * Worker module — Phase 6.6 worker families live here (bounded concurrency,
@@ -28,8 +34,14 @@ import { WebhooksModule } from '../modules/webhooks/webhooks.module';
     ...(ModuleFlags.channels ? [ChannelsModule] : []),
     ...(ModuleFlags.billing ? [BillingModule] : []),
     ...(ModuleFlags.webhooks ? [WebhooksModule] : []),
+    // Eval plane (REL-2.1/2.2): the executor drives conversations, the
+    // scoring consumer folds results into EvalService.completeRun (GAP-03).
+    ...(ModuleFlags.conversations ? [ConversationsModule] : []),
+    ...(ModuleFlags.knowledge ? [KnowledgeModule] : []),
+    // Human-loop notifications (REL-5.2): approval/escalation fan-out.
+    ...(ModuleFlags.notifications ? [NotificationsModule] : []),
   ],
-  providers: [RunDispatchConsumer, TemplateProvisioningConsumer, RunCancelConsumer, AnalyticsRollupConsumer, MemoryProposerConsumer, LlmJudgeConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker],
+  providers: [RunDispatchConsumer, TemplateProvisioningConsumer, RunCancelConsumer, AnalyticsRollupConsumer, MemoryProposerConsumer, LlmJudgeConsumer, EvalExecutorConsumer, EvalScoringConsumer, HumanLoopNotifyConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker],
   exports: [OutboxDispatcherWorker],
 })
 export class WorkersModule {}

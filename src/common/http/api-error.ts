@@ -13,6 +13,7 @@ export const ERROR_CODES = {
   ENTITLEMENT_REQUIRED: 'entitlement_required',
   PAST_DUE: 'past_due',
   SEAT_LIMIT_REACHED: 'seat_limit_reached',
+  QUOTA_EXCEEDED: 'quota_exceeded',
   STEP_UP_REQUIRED: 'step_up_required',
   NOT_FOUND: 'not_found',
   VALIDATION: 'validation_failed',
@@ -92,6 +93,25 @@ export class ApiError extends HttpException {
       ERROR_CODES.SEAT_LIMIT_REACHED,
       `Payment required: all ${product} seats are in use — add seats to invite more members`,
       { product, reason: 'seat_limit_reached' },
+    );
+  }
+
+  /**
+   * REL-4.3 — the plan wall on the agent path: spend walls are 402 (money),
+   * event-count walls are 429 with retry guidance (try again next window).
+   */
+  static quotaExceeded(dimension: 'monthly_spend' | 'monthly_events', details?: Record<string, unknown>): ApiError {
+    if (dimension === 'monthly_spend') {
+      return new ApiError(HttpStatus.PAYMENT_REQUIRED, ERROR_CODES.QUOTA_EXCEEDED, 'Payment required: monthly spend limit reached for this plan', {
+        dimension,
+        ...(details ?? {}),
+      });
+    }
+    return new ApiError(
+      HttpStatus.TOO_MANY_REQUESTS,
+      ERROR_CODES.QUOTA_EXCEEDED,
+      'Monthly event limit reached for this plan — retry after the window resets',
+      { dimension, ...(details ?? {}) },
     );
   }
 

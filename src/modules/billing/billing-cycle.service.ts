@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
-import { BillingCreditsService } from './billing-credits.service';
+import { BillingCreditsService, previousMonthWindow } from './billing-credits.service';
 import { billingInvoices } from './schema';
 import { legacyTenants } from '../../common/infra/db/legacy-schema';
 
@@ -30,20 +30,33 @@ export class BillingCycleService {
    * be triggered manually for backfills.
    */
   async runForPreviousMonth(): Promise<{ drafted: number; skipped: number; total_usd: number }> {
-    const now = new Date();
-    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const from = periodStart.toISOString();
-    const to = periodEnd.toISOString();
+    const { from, to } = previousMonthWindow(new Date());
 
-    // Every (org, product) with spend in the window — engine-owned ledger rows only.
+    // Every (org, product) with usage in the window — satellite spend rows
+    // plus engine run-usage ledger rows (REL-9 F1: the ledger leg attributes
+    // to the `agents` product, the same product the quota wall reads, and
+    // carries token quantity so unpriced-but-real usage still surfaces).
+    // Half-open on both legs: an event exactly at the month boundary belongs
+    // to exactly one draft.
     const ledgers = await this.db.withBypass((tx) =>
       tx.execute<{ org_id: string; product: string; cost_usd: string }>(sql`
         select org_id, product, coalesce(sum(cost_usd), 0)::text as cost_usd
-        from billing.spend_events
-        where occurred_at >= ${from}::timestamptz and occurred_at < ${to}::timestamptz
+        from (
+          select org_id, product, cost_usd, 0::numeric as tokens
+          from billing.spend_events
+          where occurred_at >= ${from}::timestamptz and occurred_at < ${to}::timestamptz
+          union all
+          -- organization_id::text: spend org_id is varchar(36) while the
+          -- ledger key is uuid — the UNION needs one text shape (compare as
+          -- strings downstream; both carry canonical uuid text).
+          select organization_id::text as org_id, 'agents' as product,
+                 coalesce(settled_cost, estimated_cost, 0) as cost_usd,
+                 case when unit = 'tokens' then quantity else 0 end as tokens
+          from usage_ledger_entries
+          where created_at >= ${from}::timestamptz and created_at < ${to}::timestamptz
+        ) u
         group by org_id, product
-        having coalesce(sum(cost_usd), 0) > 0
+        having coalesce(sum(cost_usd), 0) > 0 or coalesce(sum(tokens), 0) > 0
       `),
     );
     void legacyTenants;
@@ -99,8 +112,12 @@ export class BillingCycleService {
       const invoiceId = inserted[0].id;
 
       const gross = await this.credits.buildLineItems(tx, input.orgId, input.product, input.from, input.to, invoiceId);
+      // REL-9 F1 — engine run usage joins the same draft (0 for every
+      // product except `agents`; the discovery leg above is what brings an
+      // agents-only org here in the first place).
+      const ledgerGross = await this.credits.buildUsageLedgerLineItems(tx, input.orgId, input.product, input.from, input.to, invoiceId);
       const adjustments = await this.credits.applyAdjustments(tx, input.orgId, input.product, invoiceId);
-      const dueBeforeCredit = Math.max(0, gross + adjustments);
+      const dueBeforeCredit = Math.max(0, gross + ledgerGross + adjustments);
       const creditApplied = await this.credits.applyToInvoice(tx, input.orgId, invoiceId, dueBeforeCredit);
       const total = Math.max(0, dueBeforeCredit - creditApplied);
       await tx.update(billingInvoices).set({ totalUsd: total.toFixed(2) }).where(sql`${billingInvoices.id} = ${invoiceId}`);

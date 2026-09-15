@@ -43,6 +43,47 @@ const CANDIDATE_POOL = 100;
 /** FL-3.7 — vector-leg cap across expanded variants (FTS legs are cheap; embeddings are not). */
 const MAX_VECTOR_VARIANTS = 3;
 
+/**
+ * P0-1 — source-ACL predicate (joins the scoring WHERE, never post-filter).
+ * A document WITH source-acl rows is restricted: admitted only for callers
+ * matching a listed principal by linked account or verified email. A
+ * document with NO rows keeps the legacy posture. Unknown principals
+ * default-deny; anonymous callers (no identity) see unrestricted docs only.
+ * Pure — unit-tested (fragment assertions, not full-SQL snapshots).
+ */
+export function buildSourceAclFilter(input: { orgId: string; accountId: string | null; emails: string[] }): ReturnType<typeof sql> {
+  const restricted = sql`exists (select 1 from document_source_acls s where s.document_id = d.id)`;
+  if (input.accountId === null && input.emails.length === 0) {
+    return sql`and (not ${restricted})`;
+  }
+  const emailList = input.emails.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0);
+  return sql`and ((not ${restricted}) or (exists (
+    select 1 from document_source_acls s
+    where s.document_id = d.id
+      and (
+        (${input.accountId === null ? sql`false` : sql`exists (
+          select 1 from external_identity_links l
+          where l.organization_id = ${input.orgId}::uuid
+            and l.provider = s.provider
+            and l.external_id = s.external_id
+            and l.account_id = ${input.accountId}::uuid
+        )`})
+        or (${emailList.length === 0
+          ? sql`false`
+          : sql`exists (
+          select 1 from external_principals p
+          where p.organization_id = ${input.orgId}::uuid
+            and p.provider = s.provider
+            and p.external_id = s.external_id
+            and lower(p.email) in (${sql.join(
+              emailList.map((e) => sql`${e}`),
+              sql`, `,
+            )})
+        )`})
+      )
+  )))`;
+}
+
 @Injectable()
 export class RetrievalService {
   constructor(
@@ -69,7 +110,24 @@ export class RetrievalService {
     };
   }
 
-  async searchKnowledge(input: { orgId: string; query: string; limit?: number; accountId?: string }): Promise<KnowledgeHit[]> {
+  /**
+   * E-1 — pin enforcement lives HERE, inside the scoring statements.
+   * `allowedDocumentVersionIds`: undefined = legacy org-wide posture (console
+   * test box, eval recall); [] = constrain to nothing (pins declared, none
+   * resolved — fail-closed); non-empty = chunks limited to those versions.
+   * The version predicate joins the same WHERE as tenant+ACL, before
+   * `<=>`/`ts_rank_cd` — never post-filtered. IDs are UUID-validated.
+   */
+  async searchKnowledge(input: {
+    orgId: string;
+    query: string;
+    limit?: number;
+    accountId?: string;
+    allowedDocumentVersionIds?: string[];
+    /** P0-1: caller external identities for source-ACL matching (email-based). */
+    callerEmails?: string[];
+    callerAccountId?: string;
+  }): Promise<KnowledgeHit[]> {
     assertUuid(input.orgId, 'orgId');
     const query = input.query.trim();
     if (query.length === 0) {
@@ -79,6 +137,18 @@ export class RetrievalService {
       throw ApiError.validation({ query: 'max 512 chars' });
     }
     const limit = Math.min(Math.max(1, input.limit ?? 5), 20);
+    // E-1: an explicitly empty allow-list constrains to nothing (fail-closed);
+    // undefined preserves the legacy org-wide posture for unpinned callers.
+    if (input.allowedDocumentVersionIds !== undefined && input.allowedDocumentVersionIds.length === 0) {
+      return [];
+    }
+    const allowedVersions =
+      input.allowedDocumentVersionIds === undefined
+        ? null
+        : input.allowedDocumentVersionIds.map((id) => {
+            assertUuid(id, 'allowedDocumentVersionIds[]');
+            return id;
+          });
     // FL-3.7 — multi-query expansion (identity when the port is unset). Each
     // variant contributes its own FTS leg; the vector legs are bounded to
     // MAX_VECTOR_VARIANTS so the amplification stays deterministic.
@@ -91,18 +161,33 @@ export class RetrievalService {
 
       // Shared tenant + ACL predicate — byte-identical shape across both legs
       // (the vector leg drives from `embeddings e`, the lexical leg from
-      // `chunks c`, hence the two anchor aliases).
+      // `chunks c`, hence the two anchor aliases). E-1 pin filter and P0-1
+      // source-ACL filter join the same WHERE — authorization before scoring.
+      const versionFilter =
+        allowedVersions === null
+          ? sql``
+          : sql`and c.document_version_id in (${sql.join(
+              allowedVersions.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})`;
+      const sourceAclFilter = buildSourceAclFilter({
+        orgId: input.orgId,
+        accountId: input.callerAccountId ?? accountId,
+        emails: input.callerEmails ?? [],
+      });
       const aclPredicate = (anchor: 'e' | 'c') => sql`
         left join retrieval_acl acl
           on acl.organization_id = d.organization_id
-         and acl.resource_type = 'document'
-         and acl.resource_id = d.id
+          and acl.resource_type = 'document'
+          and acl.resource_id = d.id
         where ${sql.raw(anchor)}.organization_id = ${input.orgId}::uuid
           and d.state = 'ready'
           and a.state = 'active'
           and (a.scan_status in ('clean', 'skipped'))
           and (a.expires_at is null or a.expires_at > now())
-          and (acl.visibility = 'organization' or (acl.visibility = 'private' and acl.scope_account_id = ${accountId}::uuid))`;
+          and (acl.visibility = 'organization' or (acl.visibility = 'private' and acl.scope_account_id = ${accountId}::uuid))
+          ${versionFilter}
+          ${sourceAclFilter}`;
 
       const vectorLegs: Array<Array<Record<string, unknown>>> = [];
       for (let i = 0; i < Math.min(variants.length, MAX_VECTOR_VARIANTS); i++) {

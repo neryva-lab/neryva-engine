@@ -35,7 +35,7 @@ export class ConnectorSyncWorker implements OnModuleInit, OnModuleDestroy {
       const accounts = await this.connectors.dueAccounts();
       for (const account of accounts) {
         try {
-          const result = await this.connectors.sync(account.organizationId, account);
+          const result = await this.connectors.sync(account.organizationId, account.id);
           if (result.synced > 0) {
             ConnectorSyncWorker.logger.log(`connector ${account.id} (${account.provider}) synced ${result.synced} document(s)`);
           }

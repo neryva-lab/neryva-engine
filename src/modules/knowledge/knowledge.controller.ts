@@ -14,6 +14,21 @@ import { ApiError } from '../../common/http/api-error';
 export class CreateUploadDto extends MediaDto {
   @IsIn(ARTIFACT_PURPOSES as unknown as string[])
   purpose!: string;
+
+  /**
+   * E-2: optional pin address for the future document (kebab 3-64).
+   * Reserved now (409 on collision); ingestion carries it verbatim.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  source_slug?: string;
+
+  /** Optional display title (defaults to the slug, else auto). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  title?: string;
 }
 
 export class DecideMemoryDto {
@@ -65,9 +80,11 @@ export class KnowledgeController {
       mediaType: dto.media_type,
       byteLength: dto.byte_length,
       sha256Hex: dto.sha256,
+      sourceSlug: dto.source_slug ?? null,
+      title: dto.title ?? null,
       createdBy: principal.id,
     });
-    return { session: { id: result.session.id, state: result.session.state }, upload: result.upload };
+    return { session: { id: result.session.id, state: result.session.state, source_slug: result.session.sourceSlug }, upload: result.upload };
   }
 
   @Post('uploads/:sessionId/complete')
@@ -101,6 +118,36 @@ export class KnowledgeController {
       accountId: principal.id,
     });
     return { hits };
+  }
+
+  /** E-2 mapping inventory: slug/title/state per document (setup UX reads this, not titles). */
+  @Get('documents')
+  @Roles('owner', 'admin', 'developer', 'reader', 'billing')
+  @UseGuards(OrgRolesGuard)
+  async listDocuments(@Param('orgId') orgId: string, @Query('limit') limit?: string) {
+    const take = limit === undefined ? undefined : Number.parseInt(limit, 10);
+    if (take !== undefined && (!Number.isInteger(take) || take < 1)) {
+      throw ApiError.validation({ limit: 'must be a positive integer' });
+    }
+    return { documents: await this.artifacts.listDocuments(orgId, take) };
+  }
+
+  /** E-2 mapping primitive: bind a pin address to a document (audited, 409 on collision). */
+  @Post('documents/:documentId/source-slug')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async renameDocumentSlug(
+    @Param('orgId') orgId: string,
+    @Param('documentId') documentId: string,
+    @Body() dto: { source_slug?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    if (typeof dto.source_slug !== 'string') {
+      throw ApiError.validation({ source_slug: 'must be a string' });
+    }
+    await this.artifacts.renameDocumentSourceSlug({ orgId, documentId, sourceSlug: dto.source_slug, actor: principal.id });
+    return { ok: true };
   }
 
   @Get('memories')

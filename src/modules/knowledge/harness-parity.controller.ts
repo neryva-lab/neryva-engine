@@ -185,9 +185,10 @@ export class HarnessParityController {
     @Param('orgId') orgId: string,
     @Query('kind') kind?: string,
     @Query('days') days?: string,
+    @Query('assistant_id') assistantId?: string,
   ) {
     assertUuid(orgId, 'orgId');
-    return { rollups: await this.analytics.rollups(orgId, kind, days ? Number(days) : undefined) };
+    return { rollups: await this.analytics.rollups(orgId, kind, days ? Number(days) : undefined, assistantId) };
   }
 
   // ── FL-2.28 memory management (GDPR-friendly) ─────────────────────────────

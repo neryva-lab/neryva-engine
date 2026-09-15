@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
@@ -6,7 +6,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
 import { uuidv7 } from '../../common/ids/uuidv7';
-import { conversations, messages, runEvents } from './schema';
+import { conversations, conversationSummaries, messages, runEvents, runs } from './schema';
 import { escalations, type Escalation } from './escalations.schema';
 import { nextMessageSequence } from './conversations.service';
 
@@ -80,6 +80,9 @@ export class EscalationsService {
         input.slaSeconds && input.slaSeconds > 0
           ? new Date(Date.now() + input.slaSeconds * 1000).toISOString()
           : null;
+      // P0-3 — immutable brief-at-handoff, composed in the same TX: the
+      // human arrives briefed even as the conversation moves on afterwards.
+      const brief = await this.composeBrief(tx, input.orgId, input.conversationId, input.runId ?? null);
       const inserted = await tx
         .insert(escalations)
         .values({
@@ -89,6 +92,7 @@ export class EscalationsService {
           runId: input.runId ?? null,
           reason,
           state: 'WAITING',
+          brief,
           ...(slaExpiresAt !== null ? { slaExpiresAt } : {}),
         })
         .returning();
@@ -142,8 +146,54 @@ export class EscalationsService {
     });
   }
 
-  /** Ordered queue (org + state, oldest first) — the agent console surface. */
-  async listQueue(input: {
+  /**
+   * P0-3 — brief inputs, read in the escalation TX: newest compaction
+   * summary, total message count, and the latest customer message excerpt.
+   * Bounded and role-filtered here so the stored brief is safe to render.
+   */
+  private async composeBrief(
+    tx: Parameters<Parameters<DbService['withOrg']>[1]>[0],
+    orgId: string,
+    conversationId: string,
+    runId: string | null,
+  ): Promise<Record<string, unknown>> {
+    const summaries = await tx
+      .select({ summary: conversationSummaries.summary, sourceSequence: conversationSummaries.sourceSequence })
+      .from(conversationSummaries)
+      .where(and(eq(conversationSummaries.organizationId, orgId), eq(conversationSummaries.conversationId, conversationId)))
+      .orderBy(desc(conversationSummaries.sourceSequence))
+      .limit(1);
+    const counts = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(messages)
+      .where(and(eq(messages.organizationId, orgId), eq(messages.conversationId, conversationId)));
+    const lastUser = await tx
+      .select({ content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.organizationId, orgId), eq(messages.conversationId, conversationId), eq(messages.role, 'user')))
+      .orderBy(desc(messages.sequence))
+      .limit(1);
+    let openRun: { id: string; state: string } | null = null;
+    if (runId) {
+      const runRows = await tx
+        .select({ id: runs.id, state: runs.state })
+        .from(runs)
+        .where(and(eq(runs.organizationId, orgId), eq(runs.id, runId)))
+        .limit(1);
+      if (runRows[0]) {
+        openRun = { id: runRows[0].id, state: runRows[0].state };
+      }
+    }
+    return buildEscalationBrief({
+      summary: summaries[0]?.summary ?? null,
+      summarySequence: summaries[0]?.sourceSequence ?? null,
+      messageCount: Number(counts[0]?.n ?? 0),
+      lastUserText: typeof (lastUser[0]?.content as { text?: unknown } | null)?.text === 'string' ? ((lastUser[0]?.content as { text: string }).text as string) : null,
+      openRun,
+    });
+  }
+
+  /** Ordered queue (org + state, oldest first) — the agent console surface. */  async listQueue(input: {
     orgId: string;
     state?: 'WAITING' | 'CLAIMED' | 'RESOLVED';
     limit?: number;
@@ -405,4 +455,25 @@ export class EscalationsService {
     }
     return escalation;
   }
+}
+
+/**
+ * P0-3 — immutable brief-at-handoff shape. Bounded (summary ≤4k, last
+ * customer message ≤2k) so the row stays small; nulls where data is absent
+ * (no summary yet, no open run) rather than invented text. Pure — tested.
+ */
+export function buildEscalationBrief(input: {
+  summary: string | null;
+  summarySequence: number | null;
+  messageCount: number;
+  lastUserText: string | null;
+  openRun: { id: string; state: string } | null;
+}): Record<string, unknown> {
+  return {
+    summary: input.summary === null ? null : input.summary.slice(0, 4000),
+    summary_sequence: input.summarySequence,
+    message_count: Math.max(0, Math.floor(input.messageCount)),
+    last_user_text: input.lastUserText === null ? null : input.lastUserText.slice(0, 2000),
+    open_run: input.openRun,
+  };
 }

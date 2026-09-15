@@ -6,7 +6,7 @@ import { PermanentConsumerError, type OutboxConsumer } from '../common/infra/out
 import { assistants, assistantVersions, assistantTemplates, assistantInstalls } from '../modules/assistants/schema';
 import { toolCatalog } from '../modules/assistants/tool-catalog.schema';
 import { BUILT_IN_TOOLS } from '../modules/assistants/tool-catalog.service';
-import { documents, artifacts } from '../modules/knowledge/schema';
+import { documents } from '../modules/knowledge/schema';
 import { evalCases, evalDatasets } from '../modules/knowledge/eval.schema';
 import { uuidv7 } from '../common/ids/uuidv7';
 
@@ -201,12 +201,11 @@ export class TemplateProvisioningConsumer implements OutboxConsumer {
 
   // ── (b) knowledge seeds ──────────────────────────────────────────────
   //
-  // A required seed matches a ready document by title equality or by slug
-  // segment of the source artifact's tenant-bound object key (keys embed the
-  // source slug per the storage layout). documents.state is lowercase 'ready'
+  // E-2: a required seed matches a ready document by exact source_slug
+  // (org-unique pin address). documents.state is lowercase 'ready'
   // (chk_documents_state) — the UPPER literals belong to upload_sessions.
-  // Missing seeds are retryable: ingesting the document unblocks the next
-  // delivery; sustained absence dead-letters for replay.
+  // Missing seeds are retryable: ingesting+mapping the document unblocks the
+  // next delivery; sustained absence dead-letters for replay.
 
   private async checkKnowledgeSeeds(tx: Tx, orgId: string, template: { slug: string; version: string; bindings: unknown }): Promise<void> {
     const bindings = (template.bindings ?? {}) as {
@@ -218,11 +217,11 @@ export class TemplateProvisioningConsumer implements OutboxConsumer {
       return;
     }
     const docs = await tx
-      .select({ title: documents.title, objectKey: artifacts.objectKey })
+      .select({ sourceSlug: documents.sourceSlug })
       .from(documents)
-      .leftJoin(artifacts, eq(artifacts.id, documents.sourceArtifactId))
       .where(and(eq(documents.organizationId, orgId), eq(documents.state, 'ready')));
-    const missing = seeds.filter((seed) => !docs.some((d) => d.title === seed || (d.objectKey != null && d.objectKey.split('/').includes(seed))));
+    const have = new Set(docs.map((d) => d.sourceSlug));
+    const missing = seeds.filter((seed) => !have.has(seed));
     if (missing.length > 0) {
       throw new Error(`template knowledge seeds without ready documents: ${missing.join(', ')}`);
     }

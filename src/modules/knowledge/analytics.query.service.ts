@@ -12,9 +12,13 @@ import { assertUuid } from './assert';
 export class AnalyticsQueryService {
   constructor(private readonly db: DbService) {}
 
-  async rollups(orgId: string, kind?: string, days?: number): Promise<Array<Record<string, unknown>>> {
+  async rollups(orgId: string, kind?: string, days?: number, assistantId?: string): Promise<Array<Record<string, unknown>>> {
     assertUuid(orgId, 'orgId');
+    if (assistantId !== undefined) {
+      assertUuid(assistantId, 'assistantId');
+    }
     const windowDays = Math.min(Math.max(1, days ?? 30), 365);
+    const assistantFilter = assistantId === undefined ? sql`` : sql`and scope->>'assistant_id' = ${assistantId}`;
     return this.db.withOrg(orgId, async (tx) => {
       const rows = kind
         ? await tx.execute(sql`
@@ -22,6 +26,7 @@ export class AnalyticsQueryService {
             from analytics_rollups
             where organization_id = ${orgId}::uuid and kind = ${kind}
               and period_start > current_date - ${windowDays}::int
+              ${assistantFilter}
             order by period_start desc, kind
             limit 400
           `)
@@ -30,6 +35,7 @@ export class AnalyticsQueryService {
             from analytics_rollups
             where organization_id = ${orgId}::uuid
               and period_start > current_date - ${windowDays}::int
+              ${assistantFilter}
             order by period_start desc, kind
             limit 400
           `);

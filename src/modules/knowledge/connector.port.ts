@@ -11,15 +11,42 @@
  * pretending to sync.
  */
 import { Logger } from '@nestjs/common';
+import {
+  ConfluenceAdapter,
+  GoogleDriveAdapter,
+  NotionAdapter,
+  SharePointGraphAdapter,
+  SlackAdapter,
+  ZendeskAdapter,
+} from './connector-adapters';
 
 export interface ConnectorDocument {
   /** Stable external identity — the cursor dedup key. */
   externalId: string;
   title: string;
   mediaType: string;
-  /** Extracted plain text — the pipeline stores it as SOURCE_DOCUMENT. */
+  /**
+   * Extracted plain text for text/* content. Binary content (PDF/images)
+   * travels in contentBytesB64 with the real mediaType so the extraction
+   * pipeline (OCR/transcribe) handles it like an upload.
+   */
   content: string;
+  contentBytesB64?: string;
   sourceUrl?: string;
+  /**
+   * Source permission verdict. Absent = open (org visibility). Restricted
+   * principals are matched by linked account or verified email at retrieval;
+   * unknown principals default-deny. Enforced inside the retrieval SQL.
+   */
+  acl?: { mode: 'open' } | { mode: 'restricted'; principals: SourcePrincipal[] };
+}
+
+/** An external user/group/domain known to the source system. */
+export interface SourcePrincipal {
+  kind: 'user' | 'group' | 'domain';
+  id: string;
+  email?: string;
+  display?: string;
 }
 
 export interface ConnectorFetchResult {
@@ -27,6 +54,10 @@ export interface ConnectorFetchResult {
   nextCursor: Record<string, unknown>;
   /** True when the source reported more changes than this sync consumed. */
   truncated: boolean;
+  /** External ids deleted at the source — tombstoned, never hard-dropped. */
+  deletedExternalIds?: string[];
+  /** Seen but not ingested (unsupported mime, oversize, fetch failure). */
+  skipped?: Array<{ externalId: string; title: string; reason: string }>;
 }
 
 export class ConnectorOAuthRequiredError extends Error {
@@ -134,10 +165,13 @@ export class OAuthConnectorStub implements ConnectorPort {
 
 export const CONNECTOR_PROVIDERS: ReadonlyMap<string, ConnectorPort> = new Map<string, ConnectorPort>([
   ['sitemap', new SitemapConnector()],
-  ['google_drive', new OAuthConnectorStub('google_drive')],
-  ['notion', new OAuthConnectorStub('notion')],
-  ['confluence', new OAuthConnectorStub('confluence')],
+  ['google_drive', new GoogleDriveAdapter()],
+  ['sharepoint', new SharePointGraphAdapter()],
+  ['confluence', new ConfluenceAdapter()],
+  ['notion', new NotionAdapter()],
+  ['zendesk', new ZendeskAdapter()],
+  ['slack', new SlackAdapter()],
 ]);
 
 /** The org-facing provider list — errors surface at sync, not at link time. */
-export const CONNECTOR_PROVIDER_IDS = ['sitemap', 'google_drive', 'notion', 'confluence'] as const;
+export const CONNECTOR_PROVIDER_IDS = ['sitemap', 'google_drive', 'sharepoint', 'confluence', 'notion', 'zendesk', 'slack'] as const;

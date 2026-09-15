@@ -492,7 +492,42 @@
     "connector_accounts": {
       "owner": "engine-ts",
       "since": "eng-0039",
-      "note": "FL-2.5: knowledge connector accounts (sitemap live; Drive/Notion/Confluence ports await per-tenant OAuth apps - documented seam). Sync flows through the existing upload-session pipeline; sealed credentials; RLS org-scoped."
+      "note": "FL-2.5: knowledge connector accounts (sitemap, Drive, SharePoint, Confluence, Notion, Zendesk, Slack live in 0057; sealed credentials incl. OAuth bundles; RLS org-scoped)."
+    },
+    "connector_oauth_apps": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "P0-1: org BYO OAuth apps (client_id + sealed secret) backing the connector OAuth dance + refresh; RLS org-scoped."
+    },
+    "connector_documents": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "P0-1: external-id to document map per connector account; drives source-delete tombstoning; RLS org-scoped."
+    },
+    "external_principals": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "P0-1: users/groups/domains known to external sources for permission-aware retrieval; matched by verified email then explicit link; default-deny; RLS org-scoped."
+    },
+    "external_identity_links": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "P0-1: explicit external-id to account links (auto-created on email equality at sync); RLS org-scoped."
+    },
+    "document_source_acls": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "P0-1: per-document source allow-lists; documents WITH rows admit only matching callers, enforced inside retrieval SQL; RLS org-scoped."
+    },
+    "documents.source_slug": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "E-2: immutable pin address (kebab, unique per org) replacing title-equality matching; backfilled from titles; expand-only column."
+    },
+    "escalations.brief": {
+      "owner": "engine-ts",
+      "since": "eng-0057",
+      "note": "P0-3: immutable brief-at-handoff (summary + open-run state + last customer message); nullable jsonb; expand-only column."
     },
     "eval_datasets": {
       "owner": "engine-ts",

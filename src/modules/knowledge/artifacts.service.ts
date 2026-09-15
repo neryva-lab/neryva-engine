@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
@@ -7,8 +7,9 @@ import { StorageService } from '../../common/infra/storage/storage.service';
 import { ApiError } from '../../common/http/api-error';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { env } from '../../common/config/env';
-import { artifacts, uploadSessions, Artifact, UploadSession } from './schema';
+import { artifacts, documents, uploadSessions, Artifact, UploadSession } from './schema';
 import { ARTIFACT_PURPOSES } from './schema';
+import { normalizeSourceSlug } from './source-slug';
 
 /**
  * Artifacts — the claim-check facade (Phase 7, ledger 7.1/7.2/7.9 + MCP 5.12).
@@ -60,6 +61,9 @@ export class ArtifactsService {
     byteLength: number;
     sha256Hex: string;
     createdBy: string;
+    /** E-2: optional pin address + display title intents. */
+    sourceSlug?: string | null;
+    title?: string | null;
   }): Promise<{ session: UploadSession; upload: { url: string; fields: Record<string, string>; expiresIn: number } }> {
     assertUuid(input.orgId, 'orgId');
     if (!(ARTIFACT_PURPOSES as readonly string[]).includes(input.purpose)) {
@@ -76,6 +80,29 @@ export class ArtifactsService {
     }
     if (!/^[0-9a-f]{64}$/i.test(input.sha256Hex)) {
       throw ApiError.validation({ sha256: 'must be 64 hex chars' });
+    }
+    // E-2: slug intent is validated + reserved NOW (fail fast at authorize
+    // time, not deep in the ingestion worker). NULL = derive at ingestion.
+    let sourceSlug: string | null = null;
+    if (input.sourceSlug !== undefined && input.sourceSlug !== null && input.sourceSlug !== '') {
+      sourceSlug = normalizeSourceSlug(input.sourceSlug);
+      const clash = await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .select({ id: documents.id })
+          .from(documents)
+          .where(and(eq(documents.organizationId, input.orgId), eq(documents.sourceSlug, sourceSlug as string)))
+          .limit(1),
+      );
+      if (clash.length > 0) {
+        throw ApiError.conflict('source_slug is already taken in this organization', { reason: 'source_slug_taken' });
+      }
+    }
+    let title: string | null = null;
+    if (input.title !== undefined && input.title !== null && input.title !== '') {
+      title = input.title.trim().slice(0, 256);
+      if (title.length === 0) {
+        throw ApiError.validation({ title: 'must not be blank' });
+      }
     }
     this.storage.requireAvailable();
 
@@ -119,6 +146,8 @@ export class ArtifactsService {
           mediaType: input.mediaType,
           byteLength: input.byteLength,
           state: 'CREATED',
+          sourceSlug,
+          title,
           expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
           createdBy: input.createdBy,
         })
@@ -133,7 +162,7 @@ export class ArtifactsService {
       actorType: 'account',
       actorId: input.createdBy,
       tenantId: input.orgId,
-      details: { purpose: input.purpose, media_type: input.mediaType, byte_length: input.byteLength },
+      details: { purpose: input.purpose, media_type: input.mediaType, byte_length: input.byteLength, ...(sourceSlug ? { source_slug: sourceSlug } : {}) },
     });
     return { session: result.session, upload };
   }
@@ -193,6 +222,71 @@ export class ArtifactsService {
     assertUuid(sessionId, 'sessionId');
     const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(uploadSessions).where(eq(uploadSessions.id, sessionId)).limit(1));
     return rows[0] ?? null;
+  }
+
+  // ── Documents (E-2 mapping surface) ─────────────────────────────────────
+
+  /** Org document inventory for the source-mapping UI (slug/title/state, newest first). */
+  async listDocuments(orgId: string, limit?: number): Promise<Array<Record<string, unknown>>> {
+    assertUuid(orgId, 'orgId');
+    const take = Math.min(Math.max(1, limit ?? 50), 200);
+    return this.db.withOrg(orgId, async (tx) => {
+      const rows = await tx.execute(sql`
+        select d.id, d.source_slug, d.title, d.state, d.updated_at,
+               (select max(dv.version) from document_versions dv where dv.document_id = d.id) as latest_version
+        from documents d
+        where d.organization_id = ${orgId}::uuid
+        order by d.updated_at desc
+        limit ${take}
+      `);
+      return rows.rows as Array<Record<string, unknown>>;
+    });
+  }
+
+  /**
+   * Bind a pin address to a document (E-2 mapping primitive for connector
+   * docs and template-required slugs). Existing pins referencing the OLD
+   * slug resolve visibly unresolved at next publish — rename never rewrites
+   * history. Collision → 409, never silent suffixing (explicit admin choice).
+   */
+  async renameDocumentSourceSlug(input: { orgId: string; documentId: string; sourceSlug: string; actor: string }): Promise<void> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.documentId, 'documentId');
+    const slug = normalizeSourceSlug(input.sourceSlug);
+    await this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .select({ id: documents.id, sourceSlug: documents.sourceSlug })
+        .from(documents)
+        .where(and(eq(documents.id, input.documentId), eq(documents.organizationId, input.orgId)))
+        .limit(1);
+      if (!rows[0]) {
+        throw ApiError.notFound('document');
+      }
+      if (rows[0].sourceSlug === slug) {
+        return;
+      }
+      const clash = await tx
+        .select({ id: documents.id })
+        .from(documents)
+        .where(and(eq(documents.organizationId, input.orgId), eq(documents.sourceSlug, slug)))
+        .limit(1);
+      if (clash.length > 0) {
+        throw ApiError.conflict('source_slug is already taken in this organization', { reason: 'source_slug_taken' });
+      }
+      await tx
+        .update(documents)
+        .set({ sourceSlug: slug, updatedAt: new Date().toISOString() })
+        .where(eq(documents.id, input.documentId));
+    });
+    await this.audit.add({
+      action: 'document.source_slug_renamed',
+      resourceType: 'document',
+      resourceId: input.documentId,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { to: slug },
+    });
   }
 
   // ── Claim-check facade (7 checks — ledger 4.11/5.12) ────────────────────

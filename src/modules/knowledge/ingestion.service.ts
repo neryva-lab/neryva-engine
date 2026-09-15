@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lte, or, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, or, isNull, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
@@ -6,7 +6,10 @@ import { StorageService } from '../../common/infra/storage/storage.service';
 import { env } from '../../common/config/env';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { artifacts, chunks, documentVersions, documents, embeddings, retrievalAcl, uploadSessions, UploadSession, EMBEDDING_MODEL } from './schema';
+import { artifacts, chunks, documentSourceAcls, documentVersions, documents, embeddings, externalIdentityLinks, externalPrincipals, retrievalAcl, uploadSessions, UploadSession, EMBEDDING_MODEL } from './schema';
+import { accounts } from '../identity/schema';
+import { connectorDocuments } from './connectors.schema';
+import { deriveSourceSlug, normalizeSourceSlug } from './source-slug';
 import { chunkText } from './text';
 import { buildExtractorChain, TextExtractorPort } from './extraction.port';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
@@ -189,31 +192,97 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     try {
       const text = await this.fetchObjectText(session);
       await this.db.withBypass(async (tx) => {
-        // Document: dedupe by source artifact (uq_documents_source_artifact).
-        const docRows = await tx
-          .insert(documents)
-          .values({
-            id: uuidv7(),
-            organizationId: session.organizationId,
-            sourceArtifactId: session.artifactId,
-            title: `${session.purpose.toLowerCase()}-${session.id.slice(0, 8)}`,
-          })
-          .onConflictDoNothing({ target: documents.sourceArtifactId })
-          .returning();
-        let documentId = docRows[0]?.id;
-        if (!documentId) {
-          const existing = await tx.select().from(documents).where(eq(documents.sourceArtifactId, session.artifactId)).limit(1);
-          documentId = existing[0].id;
+        // E-2: resolve the pin address BEFORE inserting. Explicit session
+        // intent wins; otherwise derive deterministically from the artifact
+        // (stable across worker retries of the same session).
+        const slug = session.sourceSlug ?? deriveSourceSlug(session.artifactId);
+        try {
+          normalizeSourceSlug(slug);
+        } catch {
+          throw new Error(`derived source slug is invalid for document addressing (session ${session.id})`);
+        }
+        const title = (session.title ?? '').trim().slice(0, 256) || slug;
+        // Document: dedupe by source artifact (uq_documents_source_artifact),
+        // or attach to the re-ingestion target (connector re-sync appends a
+        // new version instead of duplicating the document).
+        let documentId: string | undefined;
+        if (session.targetDocumentId) {
+          const target = await tx
+            .select({ id: documents.id })
+            .from(documents)
+            .where(and(eq(documents.id, session.targetDocumentId), eq(documents.organizationId, session.organizationId)))
+            .limit(1);
+          if (!target[0]) {
+            throw new Error('re-ingestion target document is gone (deleted or foreign org)');
+          }
+          documentId = target[0].id;
+        } else {
+          try {
+            const docRows = await tx
+              .insert(documents)
+              .values({
+                id: uuidv7(),
+                organizationId: session.organizationId,
+                sourceArtifactId: session.artifactId,
+                title,
+                sourceSlug: slug,
+              })
+              .onConflictDoNothing({ target: documents.sourceArtifactId })
+              .returning();
+            documentId = docRows[0]?.id;
+          } catch (err) {
+            if ((err as { code?: string }).code === '23505') {
+              throw new Error(`source_slug '${slug}' is already taken in this organization`);
+            }
+            throw err;
+          }
+          if (!documentId) {
+            const existing = await tx.select().from(documents).where(eq(documents.sourceArtifactId, session.artifactId)).limit(1);
+            documentId = existing[0].id;
+          }
+          // P0-1: connector provenance → external-id map (drives delete
+          // propagation + re-sync versioning). Best-effort within the stage:
+          // a mapping failure must not fail ingestion (the doc is still
+          // valid org content; the next sync re-asserts the map).
+          const connectorRef = (session.connectorRef ?? null) as { account_id?: unknown; provider?: unknown; external_id?: unknown } | null;
+          if (
+            typeof connectorRef?.account_id === 'string' &&
+            typeof connectorRef?.provider === 'string' &&
+            typeof connectorRef?.external_id === 'string'
+          ) {
+            await tx
+              .insert(connectorDocuments)
+              .values({
+                id: uuidv7(),
+                organizationId: session.organizationId,
+                connectorAccountId: connectorRef.account_id,
+                externalId: connectorRef.external_id,
+                documentId,
+              })
+              .onConflictDoNothing({
+                target: [connectorDocuments.organizationId, connectorDocuments.connectorAccountId, connectorDocuments.externalId],
+              });
+          }
         }
 
         const textSha256 = Buffer.from(sha256Hex(text), 'hex');
+        // Versions ascend per document: re-ingestion (connector re-sync via
+        // target_document_id) appends max+1 so pins resolve to the newest
+        // content at next publish; identical content rebuilds in place.
+        const maxVersionRows = await tx
+          .select({ version: documentVersions.version })
+          .from(documentVersions)
+          .where(eq(documentVersions.documentId, documentId))
+          .orderBy(desc(documentVersions.version))
+          .limit(1);
+        const nextVersion = (maxVersionRows[0]?.version ?? 0) + 1;
         const versionRows = await tx
           .insert(documentVersions)
           .values({
             id: uuidv7(),
             documentId,
             organizationId: session.organizationId,
-            version: 1,
+            version: nextVersion,
             sha256: textSha256,
             parserVersion: PARSER_VERSION,
           })
@@ -304,6 +373,10 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
             scopeAccountId: null,
           })
           .onConflictDoNothing();
+        // P0-1: source permission verdicts land here (replacing any prior
+        // set — sync is the authority on source truth). Open mode clears
+        // restrictions (permissions widened at the source).
+        await this.applySourceAcl(tx, session, docRows[0].id);
       }
     });
     KnowledgeIngestionWorker.logger.log(`upload session ${session.id} ingested (READY)`);
@@ -322,6 +395,81 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
       chunkSize: Math.min(Math.max(200, payload.chunk_size ?? CHUNK_CHARS), 8000),
       chunkOverlap: Math.min(Math.max(0, payload.chunk_overlap ?? 0), 1000),
     };
+  }
+
+  /**
+   * P0-1 — apply a connector's source-ACL verdict to a READY document.
+   * Open (or absent intent): delete any restriction rows (permissions
+   * widened). Restricted: upsert principals, auto-link emails to accounts,
+   * and REPLACE the document's restriction set (sync is the authority).
+   * Best-effort inside the stage TX — ACL failures must not fail ingestion;
+   * the document keeps the legacy org posture and the next sync retries.
+   */
+  private async applySourceAcl(
+    tx: Parameters<Parameters<DbService['withBypass']>[0]>[0],
+    session: UploadSession,
+    documentId: string,
+  ): Promise<void> {
+    const intent = (session.sourceAcl ?? null) as { mode?: unknown; principals?: unknown } | null;
+    const ref = (session.connectorRef ?? null) as { provider?: unknown } | null;
+    const provider = typeof ref?.provider === 'string' ? ref.provider : 'unknown';
+    if (!intent || intent.mode !== 'restricted') {
+      if (intent && (intent.mode as string) === 'open') {
+        await tx.delete(documentSourceAcls).where(eq(documentSourceAcls.documentId, documentId));
+      }
+      return;
+    }
+    const principals = Array.isArray(intent.principals) ? intent.principals : [];
+    const clean = principals
+      .filter((p): p is { kind: string; id: string; email?: string } => {
+        const r = (typeof p === 'object' && p !== null ? p : {}) as Record<string, unknown>;
+        return (r['kind'] === 'user' || r['kind'] === 'group' || r['kind'] === 'domain') && typeof r['id'] === 'string' && (r['id'] as string).length > 0;
+      })
+      .slice(0, 500);
+    for (const p of clean) {
+      await tx
+        .insert(externalPrincipals)
+        .values({
+          id: uuidv7(),
+          organizationId: session.organizationId,
+          provider,
+          externalId: p.id.slice(0, 512),
+          kind: p.kind,
+          email: typeof p.email === 'string' && p.email.includes('@') ? p.email.toLowerCase().slice(0, 320) : null,
+          display: null,
+        })
+        .onConflictDoUpdate({
+          target: [externalPrincipals.organizationId, externalPrincipals.provider, externalPrincipals.externalId],
+          set: {
+            kind: p.kind,
+            email: typeof p.email === 'string' && p.email.includes('@') ? p.email.toLowerCase().slice(0, 320) : null,
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      // Auto-link on verified-email equality (the common case) so account
+      // matching works without manual mapping. No link = default-deny.
+      const email = typeof p.email === 'string' && p.email.includes('@') ? p.email.toLowerCase() : null;
+      if (email) {
+        const owners = await tx.select({ id: accounts.id }).from(accounts).where(eq(accounts.email, email)).limit(1);
+        if (owners[0]) {
+          await tx
+            .insert(externalIdentityLinks)
+            .values({ id: uuidv7(), organizationId: session.organizationId, provider, externalId: p.id.slice(0, 512), accountId: owners[0].id })
+            .onConflictDoNothing({
+              target: [externalIdentityLinks.organizationId, externalIdentityLinks.provider, externalIdentityLinks.externalId],
+            });
+        }
+      }
+    }
+    await tx.delete(documentSourceAcls).where(eq(documentSourceAcls.documentId, documentId));
+    for (const p of clean) {
+      await tx
+        .insert(documentSourceAcls)
+        .values({ id: uuidv7(), organizationId: session.organizationId, documentId, provider, externalId: p.id.slice(0, 512) })
+        .onConflictDoNothing({
+          target: [documentSourceAcls.documentId, documentSourceAcls.provider, documentSourceAcls.externalId],
+        });
+    }
   }
 
   private async fail(session: UploadSession, message: string): Promise<void> {

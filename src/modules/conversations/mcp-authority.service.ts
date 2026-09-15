@@ -1429,16 +1429,18 @@ export class McpAuthorityService {
       // trigger message — user-scoped rows are NEVER visible across accounts.
       const memoryScopeRaw = typeof contextPolicy.memory_scope === 'string' ? contextPolicy.memory_scope : undefined;
       const memoryScope = memoryScopeRaw === 'user' || memoryScopeRaw === 'organization' || memoryScopeRaw === 'conversation' || memoryScopeRaw === 'none' ? memoryScopeRaw : undefined;
-      let userAccountId: string | null = null;
-      if (memoryScope === 'user') {
-        const triggerRows = await tx
-          .select({ createdBy: messages.createdBy })
-          .from(messages)
-          .where(eq(messages.id, run.inputMessageId))
-          .limit(1);
-        const createdBy = triggerRows[0]?.createdBy ?? null;
-        userAccountId = createdBy !== null && McpAuthorityService.UUID_RE.test(createdBy) ? createdBy : null;
-      }
+      // Run actor: the trigger message author when it is an account id.
+      // Drives user-scoped memory AND source-ACL identity (P0-1) — the two
+      // concerns share one lookup but diverge after: memory keeps the legacy
+      // scope default, source matching always uses the actor when known.
+      const triggerRows = await tx
+        .select({ createdBy: messages.createdBy })
+        .from(messages)
+        .where(eq(messages.id, run.inputMessageId))
+        .limit(1);
+      const triggerAuthor = triggerRows[0]?.createdBy ?? null;
+      const runActorAccountId = triggerAuthor !== null && McpAuthorityService.UUID_RE.test(triggerAuthor) ? triggerAuthor : null;
+      const userAccountId = memoryScope === 'user' ? runActorAccountId : null;
 
       // History — bounded by the pinned context policy (contract caps 20).
       const historyLimit = Math.min(Math.max(1, contextPolicy.history_limit ?? 20), 20);
@@ -1528,6 +1530,10 @@ export class McpAuthorityService {
             orgId: input.orgId,
             query,
             limit: Math.min(Math.max(1, knowledgePolicy.max_results ?? 5), 20),
+            // E-1: constrain to the snapshot's resolved pins (undefined =
+            // unpinned legacy versions keep the org-wide posture).
+            allowedDocumentVersionIds: McpAuthorityService.resolvedPinVersionIds(snapshot),
+            callerAccountId: runActorAccountId ?? undefined,
           });
           // FL-2.9 — the retrieval leg is a durable run event; CommitRunResult
           // reads it in the SAME TX as the terminal commit and pins bounded
@@ -1688,7 +1694,15 @@ export class McpAuthorityService {
       throw ApiError.validation({ query: 'must not be empty' });
     }
     const limit = Math.min(Math.max(1, input.maxResults), 20);
-    const hits = await this.retrieval.searchKnowledge({ orgId: input.orgId, query, limit });
+    const hits = await this.retrieval.searchKnowledge({
+      orgId: input.orgId,
+      query,
+      limit,
+      // E-1: same pin enforcement as manifest assembly — the run's snapshot
+      // decides the retrievable set, not the org pool.
+      allowedDocumentVersionIds: await this.pinnedVersionIdsForRun(input.orgId, input.runId),
+      callerAccountId: (await this.runActorAccountId(input.orgId, input.runId)) ?? undefined,
+    });
     await this.recordRetrievalEvent({ orgId: input.orgId, runId: input.runId, query, hits });
     return hits.map((h) => ({
       documentId: h.documentId,
@@ -1699,6 +1713,47 @@ export class McpAuthorityService {
       sourceRangeStart: h.sourceRange.byteStart,
       sourceRangeEnd: h.sourceRange.byteEnd,
     }));
+  }
+
+  /**
+   * E-1 — pin allow-list for retrieval. Returns undefined when the snapshot
+   * declares no pins (legacy org-wide posture preserved); otherwise the
+   * resolved document_version ids (possibly [] → retrieval matches nothing,
+   * fail-closed). Pure over the snapshot row — unit-tested.
+   */
+  private static resolvedPinVersionIds(snapshot: { knowledgePins?: unknown } | null): string[] | undefined {
+    return resolvedPinVersionIds(snapshot);
+  }
+
+  /** E-1 — run-scoped pin lookup for the agentic SearchKnowledge path. */
+  private async pinnedVersionIdsForRun(orgId: string, runId: string): Promise<string[] | undefined> {
+    const found = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ policySnapshotId: runs.policySnapshotId }).from(runs).where(eq(runs.id, runId)).limit(1),
+    );
+    const snapshotId = found[0]?.policySnapshotId ?? null;
+    if (!snapshotId) {
+      return undefined;
+    }
+    const snapshots = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ knowledgePins: policySnapshots.knowledgePins }).from(policySnapshots).where(eq(policySnapshots.id, snapshotId)).limit(1),
+    );
+    return McpAuthorityService.resolvedPinVersionIds((snapshots[0] ?? null) as { knowledgePins?: unknown } | null);
+  }
+
+  /** P0-1 — run actor account for source-ACL matching (trigger author iff an account id). */
+  private async runActorAccountId(orgId: string, runId: string): Promise<string | null> {
+    const found = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ inputMessageId: runs.inputMessageId }).from(runs).where(eq(runs.id, runId)).limit(1),
+    );
+    const messageId = found[0]?.inputMessageId ?? null;
+    if (!messageId) {
+      return null;
+    }
+    const trigger = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ createdBy: messages.createdBy }).from(messages).where(eq(messages.id, messageId)).limit(1),
+    );
+    const author = trigger[0]?.createdBy ?? null;
+    return author !== null && McpAuthorityService.UUID_RE.test(author) ? author : null;
   }
 
   /**
@@ -1863,4 +1918,19 @@ export class McpAuthorityService {
       McpAuthorityService.logger.warn(`audit write failed for ${event.action}: ${(err as Error).message}`);
     }
   }
+}
+
+/**
+ * E-1 — snapshot pin allow-list for retrieval. Undefined when the snapshot
+ * declares no pins (legacy org-wide posture preserved); otherwise the
+ * resolved document_version ids ([] constrains to nothing — fail-closed).
+ */
+export function resolvedPinVersionIds(snapshot: { knowledgePins?: unknown } | null): string[] | undefined {
+  const pins = snapshot?.knowledgePins;
+  if (!Array.isArray(pins)) {
+    return undefined;
+  }
+  return (pins as Array<{ resolved?: unknown; document_version_id?: unknown }>)
+    .filter((p) => p?.resolved === true && typeof p?.document_version_id === 'string' && (p.document_version_id as string).length > 0)
+    .map((p) => p.document_version_id as string);
 }

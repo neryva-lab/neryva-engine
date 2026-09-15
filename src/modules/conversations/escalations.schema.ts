@@ -1,4 +1,4 @@
-import { index, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { index, jsonb, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 import { conversations } from './schema';
 import { runs } from './schema';
 
@@ -30,6 +30,12 @@ export const escalations = pgTable(
     /** Queue SLA deadline for alerting — breach is observable, not auto-fatal. */
     slaExpiresAt: timestamp('sla_expires_at', { withTimezone: true, mode: 'string' }),
     resolutionNote: varchar('resolution_note', { length: 2048 }),
+    /**
+     * P0-3 — immutable brief-at-handoff: newest summary text + open-run
+     * state + last customer message excerpt, snapshotted at escalate() so
+     * the human arrives briefed even as the conversation moves on.
+     */
+    brief: jsonb('brief'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },

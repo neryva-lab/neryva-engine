@@ -1,4 +1,4 @@
-import { customType, index, integer, jsonb, numeric, pgTable, timestamp, uuid, varchar, bigint } from 'drizzle-orm/pg-core';
+import { customType, index, integer, jsonb, numeric, pgTable, timestamp, uniqueIndex, uuid, varchar, bigint } from 'drizzle-orm/pg-core';
 import { bytea } from '../conversations/mcp.schema';
 
 /**
@@ -83,6 +83,24 @@ export const uploadSessions = pgTable(
     lastError: varchar('last_error', { length: 4096 }),
     /** Processing lease for the ingestion worker (SKIP LOCKED on claim). */
     lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'string' }),
+    /**
+     * E-2: user-supplied source slug intent (kebab, validated at the API;
+     * collision → 409). Carried into documents.source_slug at ingestion.
+     * NULL = derive.
+     */
+    sourceSlug: varchar('source_slug', { length: 64 }),
+    /** Display title intent (connector titles; uploads default to the slug). NULL = auto. */
+    title: varchar('title', { length: 256 }),
+    /**
+     * P0-1: re-ingestion target. When set (connector re-sync of a mapped
+     * document), ingestion appends a new version onto this document instead
+     * of inserting a duplicate. Verified org-scoped at claim time.
+     */
+    targetDocumentId: uuid('target_document_id'),
+    /** P0-1: connector provenance {account_id, external_id} for the doc map. */
+    connectorRef: jsonb('connector_ref'),
+    /** P0-1: source ACL intent {mode, principals[]} applied at READY. */
+    sourceAcl: jsonb('source_acl'),
     createdBy: varchar('created_by', { length: 128 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -99,14 +117,24 @@ export const documents = pgTable(
       .notNull()
       .references(() => artifacts.id),
     title: varchar('title', { length: 256 }),
-    /** processing | ready | failed */
+    /** processing | ready | failed | retired (source-deleted tombstone; unreachable by retrieval) */
     state: varchar('state', { length: 32 }).notNull().default('processing'),
+    /**
+     * E-2: immutable pin address (kebab, unique per org). Set from the
+     * upload intent or derived at ingestion; renamable only through the
+     * explicit rename endpoint (old pins then resolve visibly unresolved).
+     * Display stays in `title` — slugs are addresses, not names.
+     */
+    sourceSlug: varchar('source_slug', { length: 64 }).notNull(),
     /** FL-2.2: embedding model the document's active vectors were computed with. */
     embeddingModel: varchar('embedding_model', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
-  (t) => [index('ix_documents_org_state').on(t.organizationId, t.state)],
+  (t) => [
+    index('ix_documents_org_state').on(t.organizationId, t.state),
+    uniqueIndex('uq_documents_org_slug').on(t.organizationId, t.sourceSlug),
+  ],
 );
 
 export const documentVersions = pgTable(
@@ -139,7 +167,10 @@ export const chunks = pgTable(
     chunkHash: varchar('chunk_hash', { length: 64 }).notNull(),
     text: varchar('text', { length: 8192 }).notNull(),
   },
-  (t) => [index('ix_chunks_version_seq').on(t.documentVersionId, t.sequence)],
+  (t) => [
+    index('ix_chunks_version_seq').on(t.documentVersionId, t.sequence),
+    index('ix_chunks_org_version').on(t.organizationId, t.documentVersionId),
+  ],
 );
 
 export const embeddings = pgTable(
@@ -203,4 +234,72 @@ export type Artifact = typeof artifacts.$inferSelect;
 export type UploadSession = typeof uploadSessions.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;
 export type Chunk = typeof chunks.$inferSelect;
+
+/**
+ * P0-1 — external principals: users/groups/domains known to an external
+ * source (Drive permission id, Graph identity, Confluence account). Matching
+ * to Engine callers happens by verified email first, then by explicit link.
+ */
+export const externalPrincipals = pgTable(
+  'external_principals',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    provider: varchar('provider', { length: 32 }).notNull(),
+    externalId: varchar('external_id', { length: 512 }).notNull(),
+    kind: varchar('kind', { length: 16 }).notNull(),
+    email: varchar('email', { length: 320 }),
+    display: varchar('display', { length: 256 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_external_principals_org_provider_external').on(t.organizationId, t.provider, t.externalId),
+    index('ix_external_principals_org_email').on(t.organizationId, t.email),
+  ],
+);
+
+/** Explicit external-id → account links (auto-created on email equality at sync). */
+export const externalIdentityLinks = pgTable(
+  'external_identity_links',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    provider: varchar('provider', { length: 32 }).notNull(),
+    externalId: varchar('external_id', { length: 512 }).notNull(),
+    accountId: uuid('account_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_external_identity_links').on(t.organizationId, t.provider, t.externalId),
+    index('ix_external_identity_links_account').on(t.organizationId, t.accountId),
+  ],
+);
+
+/**
+ * P0-1 — per-document source allow-lists. A document WITH rows here is
+ * restricted: retrieval admits it only for callers matching a listed
+ * principal (linked account or verified email). No rows = legacy posture
+ * (org visibility via retrieval_acl). Unknown principals default-deny.
+ */
+export const documentSourceAcls = pgTable(
+  'document_source_acls',
+  {
+    id: uuid('id').primaryKey(),
+    organizationId: uuid('organization_id').notNull(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    provider: varchar('provider', { length: 32 }).notNull(),
+    externalId: varchar('external_id', { length: 512 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_document_source_acls').on(t.documentId, t.provider, t.externalId),
+    index('ix_document_source_acls_org_doc').on(t.organizationId, t.documentId),
+  ],
+);
+
+export type ExternalPrincipal = typeof externalPrincipals.$inferSelect;
+export type DocumentSourceAcl = typeof documentSourceAcls.$inferSelect;
 export type MemoryItem = typeof memoryItems.$inferSelect;

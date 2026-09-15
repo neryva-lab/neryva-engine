@@ -232,13 +232,14 @@ export class ManifestResolutionService {
       embedding_model: null,
       knowledge_config: configRef,
     };
-    // Convention (shared with provisioning + compatibility): a seed slug
-    // matches the READY document carrying it as title. No title match means
-    // the corpus is not ingested — recorded unresolved, never invented.
+    // E-2 convention (deterministic): a seed slug matches the READY document
+    // carrying it as source_slug — exact, org-unique, immutable except via
+    // the explicit rename endpoint. No title match means the corpus is not
+    // ingested — recorded unresolved, never invented.
     const docs = await tx
       .select({ id: documents.id, embeddingModel: documents.embeddingModel })
       .from(documents)
-      .where(and(eq(documents.organizationId, orgId), eq(documents.title, slug), eq(documents.state, 'ready')))
+      .where(and(eq(documents.organizationId, orgId), eq(documents.sourceSlug, slug), eq(documents.state, 'ready')))
       .limit(1);
     if (docs.length === 0) {
       return unresolved;

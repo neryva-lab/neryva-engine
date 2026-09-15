@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
@@ -22,6 +22,7 @@ import { TemplatesService } from './templates.service';
 import { ManifestResolutionService, unresolvedPinSlugs } from './manifest-resolution.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
+import { documents } from '../knowledge/schema';
 import { EvalService } from '../knowledge/eval.service';
 import { toolCatalog } from './tool-catalog.schema';
 import { BUILT_IN_TOOLS } from './tool-catalog.service';
@@ -303,11 +304,22 @@ export class AssistantsService {
     const assistant = await this.requireAssistant(input.orgId, input.assistantId);
     void assistant;
 
-    const validated = validateAssistantPayload(input.payload);
+    // Strict chain, identical to definition-create and draft-update: unknown
+    // keys refuse (never silently stripped), then shape validation. A draft
+    // carrying template-only extensions must fail loudly at write time.
+    const strict = rejectUnknownPayloadKeys(input.payload as Record<string, unknown>);
+    const validated = validateAssistantPayload(strict);
     if (!validated.ok) {
       throw ApiError.validation({ assistant: validated.issues });
     }
     const hash = hashPayload(validated.normalized);
+
+    // DRAFT is always a new row; version is assigned only on publish. The
+    // (assistant_id, version=0) sentinel is unique — a second draft before
+    // the first is published surfaces as a typed 409, never a raw 23505.
+    // Unknown keys refuse here exactly like the definition-create path
+    // (rejectUnknownPayloadKeys runs inside validateAssistantPayload's
+    // callers — see updateDraft for the shared strict chain).
 
     // DRAFT is always a new row; version is assigned only on publish. The
     // (assistant_id, version=0) sentinel is unique — a second draft before
@@ -351,8 +363,153 @@ export class AssistantsService {
     return row;
   }
 
-  async getVersion(orgId: string, versionId: string): Promise<AssistantVersion | null> {
+  /**
+   * Iterative draft editing with optimistic concurrency. DRAFT rows are
+   * otherwise write-once (createVersion inserts; publish consumes), so two
+   * authors saving the same draft would silently clobber without this:
+   * the single-statement UPDATE matches id + DRAFT status + expected hash,
+   * and a miss resolves to 404 / 409-not-draft / 412-stale — never a silent
+   * overwrite. If-Match is REQUIRED (fail closed); the hash comes from any
+   * version GET. Same-hash saves succeed idempotently (autosave-safe).
+   */
+  async updateDraft(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    payload: unknown;
+    expectedHash: string;
+    actorId: string;
+  }): Promise<AssistantVersion> {
+    assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    assertUuid(input.versionId);
+    if (!input.expectedHash || typeof input.expectedHash !== 'string') {
+      throw ApiError.validation({ 'if-match': 'If-Match header with the draft hash is required' });
+    }
+    const strict = rejectUnknownPayloadKeys(input.payload as Record<string, unknown>);
+    const validated = validateAssistantPayload(strict);
+    if (!validated.ok) {
+      throw ApiError.validation({ assistant: validated.issues });
+    }
+    const hash = hashPayload(validated.normalized);
+    const rows = await this.db.withOrg(input.orgId, (tx) =>
+      tx
+        .update(assistantVersions)
+        .set({
+          modelPolicy: validated.normalized.model_policy,
+          contextPolicy: validated.normalized.context_policy,
+          toolPolicy: validated.normalized.tool_policy,
+          knowledgePolicy: validated.normalized.knowledge_policy ?? null,
+          guardrailPolicy: validated.normalized.guardrail_policy,
+          instructions: validated.normalized.instructions ?? null,
+          modelParams: validated.normalized.model_params ?? null,
+          budgetPolicy: validated.normalized.budget_policy ?? null,
+          hash,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(
+          and(
+            eq(assistantVersions.id, input.versionId),
+            eq(assistantVersions.assistantId, input.assistantId),
+            eq(assistantVersions.status, 'DRAFT'),
+            eq(assistantVersions.hash, input.expectedHash),
+          ),
+        )
+        .returning(),
+    );
+    if (rows[0]) {
+      await this.audit.add({
+        action: 'assistant.version_redrafted',
+        resourceType: 'assistant_version',
+        resourceId: rows[0].id,
+        actorType: 'account',
+        actorId: input.actorId,
+        tenantId: input.orgId,
+        details: { assistant_id: input.assistantId, from: input.expectedHash.slice(0, 16), to: hash.slice(0, 16) },
+      });
+      return rows[0];
+    }
+    const current = await this.getVersion(input.orgId, input.versionId);
+    throw draftWriteMissError({
+      existsSameAssistant: !!current && current.assistantId === input.assistantId,
+      status: current && current.assistantId === input.assistantId ? current.status : null,
+      expectedHash: input.expectedHash,
+      currentHash: current && current.assistantId === input.assistantId ? current.hash : null,
+    });
+  }
+
+  /**
+   * Abandon a DRAFT (audited). Published history is untouched — only the
+   * unshipped draft row is removed. Drafts carry no durable references
+   * (snapshots/manifests exist for published versions only), so removal is
+   * a single-row delete.
+   */
+  async discardDraft(input: { orgId: string; assistantId: string; versionId: string; actorId: string }): Promise<void> {
+    assertOrgId(input.orgId);
+    assertUuid(input.assistantId);
+    assertUuid(input.versionId);
+    const current = await this.getVersion(input.orgId, input.versionId);
+    if (!current || current.assistantId !== input.assistantId) {
+      throw ApiError.notFound('assistant version');
+    }
+    if (current.status !== 'DRAFT') {
+      throw ApiError.conflict(`only DRAFT versions can be discarded (status is ${current.status})`, { status: current.status });
+    }
+    await this.db.withOrg(input.orgId, (tx) => tx.delete(assistantVersions).where(eq(assistantVersions.id, input.versionId)));
+    await this.audit.add({
+      action: 'assistant.version_draft_discarded',
+      resourceType: 'assistant_version',
+      resourceId: input.versionId,
+      actorType: 'account',
+      actorId: input.actorId,
+      tenantId: input.orgId,
+      details: { assistant_id: input.assistantId },
+    });
+  }
+
+  /**
+   * Knowledge health for the operate view: the ACTIVE version's pins joined
+   * against live document states. Degraded = any declared pin unresolved or
+   * not READY (retired by a connector tombstone, failed ingestion, or never
+   * mapped). Computed read-only from committed rows — no new state, no
+   * worker. No active version = nothing serving = not degraded.
+   */
+  async getKnowledgeHealth(orgId: string, assistantId: string): Promise<{
+    degraded: boolean;
+    pins: Array<{ source_slug: string; resolved: boolean; document_id: string | null; state: string | null }>;
+  }> {
     assertOrgId(orgId);
+    assertUuid(assistantId);
+    const assistant = await this.get(orgId, assistantId);
+    const activeVersionId = assistant?.activeVersionId ?? null;
+    if (!assistant || !activeVersionId) {
+      return { degraded: false, pins: [] };
+    }
+    const snap = await this.getSnapshotForVersion(orgId, assistantId, activeVersionId);
+    const pins = (snap?.knowledgePins ?? []) as Array<{ source_slug?: unknown; resolved?: unknown; document_id?: unknown }>;
+    if (!Array.isArray(pins) || pins.length === 0) {
+      return { degraded: false, pins: [] };
+    }
+    const ids = pins.filter((p) => p?.resolved === true && typeof p?.document_id === 'string').map((p) => p.document_id as string);
+    const states = new Map<string, string>();
+    if (ids.length > 0) {
+      const rows = await this.db.withOrg(orgId, (tx) =>
+        tx.select({ id: documents.id, state: documents.state }).from(documents).where(inArray(documents.id, ids)),
+      );
+      for (const r of rows) {
+        states.set(r.id, r.state);
+      }
+    }
+    const view = pins.map((p) => {
+      const slug = typeof p?.source_slug === 'string' ? (p.source_slug as string) : '';
+      const resolved = p?.resolved === true && typeof p?.document_id === 'string';
+      const state = resolved ? (states.get(p.document_id as string) ?? 'deleted') : null;
+      return { source_slug: slug, resolved, document_id: resolved ? (p.document_id as string) : null, state };
+    });
+    return { degraded: view.some((v) => !v.resolved || v.state !== 'ready'), pins: view };
+  }
+
+  async getVersion(orgId: string, versionId: string): Promise<AssistantVersion | null> {    assertOrgId(orgId);
     assertUuid(versionId);
     const rows = await this.db.withOrg(orgId, (tx) =>
       tx.select().from(assistantVersions).where(eq(assistantVersions.id, versionId)).limit(1),
@@ -1224,4 +1381,26 @@ function assertName(name: string): void {
 
 function hashPayload(value: unknown): string {
   return canonicalHash(value);
+}
+
+/**
+ * OCC miss classification for draft writes (pure — unit-tested). See
+ * updateDraft: the conditional UPDATE either lands or this maps the miss to
+ * exactly one typed error — missing/foreign → 404, non-draft → 409, stale
+ * hash → 412 carrying both hashes for merge-or-reload UX. Never throws
+ * itself; the caller throws the returned error.
+ */
+export function draftWriteMissError(input: {
+  existsSameAssistant: boolean;
+  status: string | null;
+  expectedHash: string;
+  currentHash: string | null;
+}): ApiError {
+  if (!input.existsSameAssistant) {
+    return ApiError.notFound('assistant version');
+  }
+  if (input.status !== 'DRAFT') {
+    return ApiError.conflict(`only DRAFT versions are editable (status is ${input.status})`, { status: input.status });
+  }
+  return ApiError.precondition({ expected: input.expectedHash, current: input.currentHash });
 }

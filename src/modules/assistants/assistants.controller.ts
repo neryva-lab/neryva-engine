@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Post, Put, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
@@ -113,6 +113,61 @@ export class AssistantsController {
   async listVersions(@Param('orgId') orgId: string, @Param('assistantId') assistantId: string) {
     const rows = await this.assistants.listVersions(orgId, assistantId);
     return { versions: rows };
+  }
+
+  /**
+   * Knowledge health for the operate view: the ACTIVE version's pins joined
+   * against live document states. Computed read-only — see service.
+   */
+  @Get(':assistantId/knowledge-health')
+  @Roles('owner', 'admin', 'developer', 'reader', 'billing')
+  @UseGuards(OrgRolesGuard)
+  async knowledgeHealth(@Param('orgId') orgId: string, @Param('assistantId') assistantId: string) {
+    return this.assistants.getKnowledgeHealth(orgId, assistantId);
+  }
+
+  /**
+   * Iterative draft editing with optimistic concurrency (If-Match: <hash>
+   * from any version GET — REQUIRED). Stale hash → 412 with both hashes so
+   * the UI can offer merge-or-reload instead of silently clobbering a
+   * co-author's prompt engineering. Same-hash saves succeed idempotently.
+   */
+  @Put(':assistantId/versions/:versionId/draft')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async updateDraft(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Param('versionId') versionId: string,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Body() dto: CreateVersionDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const row = await this.assistants.updateDraft({
+      orgId,
+      assistantId,
+      versionId,
+      payload: dto as unknown as import('./validation').AssistantPayload,
+      expectedHash: ifMatch ?? '',
+      actorId: principal.id,
+    });
+    return { version: row };
+  }
+
+  /** Abandon a DRAFT (published history untouched, audited). */
+  @Delete(':assistantId/versions/:versionId/draft')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async discardDraft(
+    @Param('orgId') orgId: string,
+    @Param('assistantId') assistantId: string,
+    @Param('versionId') versionId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    await this.assistants.discardDraft({ orgId, assistantId, versionId, actorId: principal.id });
+    return { ok: true };
   }
 
   @Post(':assistantId/versions/:versionId/publish')

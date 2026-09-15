@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
+import { env } from '../../common/config/env';
 import { assistantRollouts } from './schema';
 import { assistants } from './schema';
 
@@ -24,9 +25,10 @@ import { assistants } from './schema';
  *
  * The check is idempotent and audited. A paused rollout stays paused until
  * an operator explicitly promotes again — the service never auto-resumes.
- * Execution is via the billing namespace worker (hourly cron in
- * `billing.worker.ts`) and via the manual staff/console trigger
- * `POST /internal/staff/burn-rate/check` and `POST /console/org/:orgId/assistants/:assistantId/burn-rate/check`.
+ * Execution is the hourly `billing.burn_sweep` job (spend-gated candidates)
+ * plus direct service calls. A manual promotion inside the resume cooldown
+ * suppresses re-pausing once (audited auto-pause + promotion audits tell the
+ * story; the suppression itself is debug-logged, not audit-spammed).
  */
 
 export interface BurnRateCheckResult {
@@ -36,7 +38,7 @@ export interface BurnRateCheckResult {
   baselineHourlyCost: number;
   threshold: number;
   triggered: boolean;
-  action: 'none' | 'paused_rollout';
+  action: 'none' | 'paused_rollout' | 'suppressed';
   rolloutId?: string;
 }
 
@@ -53,6 +55,92 @@ export class BurnRateService {
   static shouldTrigger(lastHourCost: number, baselineHourlyCost: number, multiplier: number, floor: number): boolean {
     const baseline = Math.max(baselineHourlyCost, floor);
     return lastHourCost > baseline * multiplier;
+  }
+
+  /**
+   * Hourly sweep candidates: assistants with an ACTIVE production/default
+   * rollout in orgs that spent in the last hour. Spend-gated so idle fleets
+   * cost one indexed query, not N cost aggregations. Bounded for the worker.
+   */
+  async sweepCandidates(limit = 500): Promise<Array<{ orgId: string; assistantId: string }>> {
+    const rows = await this.db.root.execute<{ organization_id: string; assistant_id: string }>(sql`
+      select distinct ro.organization_id, ro.assistant_id
+      from assistant_rollouts ro
+      where ro.state = 'active' and ro.environment = 'production' and ro.channel = 'default'
+        and exists (
+          select 1 from usage_ledger_entries u
+          where u.organization_id = ro.organization_id and u.created_at > now() - interval '1 hour'
+        )
+      limit ${Math.min(Math.max(1, limit), 5000)}
+    `);
+    return (rows.rows as Array<{ organization_id: string; assistant_id: string }>).map((r) => ({
+      orgId: String(r.organization_id),
+      assistantId: String(r.assistant_id),
+    }));
+  }
+
+  /**
+   * Pure helper — manual-resume suppression decision. Suppresses re-pausing
+   * when the ACTIVE rollout row is newer than our latest auto-pause audit for
+   * this assistant (i.e. a human intervened after our last action) and still
+   * inside the cooldown window. All timestamps ISO strings; cooldownMs <= 0
+   * disables suppression. Unit-tested.
+   */
+  static isSuppressedByManualResume(input: {
+    lastAutoPauseAt: string | null;
+    activeRolloutCreatedAt: string | null;
+    nowMs: number;
+    cooldownMs: number;
+  }): boolean {
+    if (input.cooldownMs <= 0 || !input.lastAutoPauseAt || !input.activeRolloutCreatedAt) {
+      return false;
+    }
+    const pausedAt = Date.parse(input.lastAutoPauseAt);
+    const resumedAt = Date.parse(input.activeRolloutCreatedAt);
+    if (!Number.isFinite(pausedAt) || !Number.isFinite(resumedAt)) {
+      return false;
+    }
+    return resumedAt > pausedAt && input.nowMs - resumedAt < input.cooldownMs;
+  }
+
+  /**
+   * Suppression read: latest auto-pause audit for this assistant vs the
+   * newest ACTIVE rollout row. A rollout created after our last auto-pause
+   * means a human intervened (promote/resume writes a fresh active row) —
+   * suppress re-pausing inside the cooldown so the operator is not trapped
+   * in a pause loop while the rolling window drains. No new state: the audit
+   * trail plus rollout rows already tell the story. Debug-logged, never
+   * audited per check (hourly audit spam would drown the signal).
+   */
+  private async suppressedByManualResume(orgId: string, assistantId: string): Promise<boolean> {
+    const cooldownMs = env.BURN_RATE_RESUME_COOLDOWN_SECONDS * 1000;
+    if (cooldownMs <= 0) {
+      return false;
+    }
+    const pauses = await this.db.root.execute<{ created_at: string }>(sql`
+      select created_at from audit_events
+      where tenant_id = ${orgId} and action = 'assistant.auto_rollback'
+        and details->>'assistant_id' = ${assistantId}
+      order by created_at desc limit 1
+    `);
+    const lastAutoPauseAt = (pauses.rows[0]?.created_at ?? null) as string | null;
+    if (!lastAutoPauseAt) {
+      return false;
+    }
+    const actives = await this.db.withOrg(orgId, (tx) =>
+      tx
+        .select({ createdAt: assistantRollouts.createdAt })
+        .from(assistantRollouts)
+        .where(and(eq(assistantRollouts.organizationId, orgId), eq(assistantRollouts.assistantId, assistantId), eq(assistantRollouts.state, 'active')))
+        .orderBy(desc(assistantRollouts.createdAt))
+        .limit(1),
+    );
+    return BurnRateService.isSuppressedByManualResume({
+      lastAutoPauseAt,
+      activeRolloutCreatedAt: actives[0]?.createdAt ?? null,
+      nowMs: Date.now(),
+      cooldownMs,
+    });
   }
 
   async checkAndMaybeRollback(input: {
@@ -97,6 +185,18 @@ export class BurnRateService {
 
     const baselineHourly = costs.lastDayCost / 24;
     const triggered = BurnRateService.shouldTrigger(costs.lastHourCost, baselineHourly, multiplier, floor);
+    if (triggered && (await this.suppressedByManualResume(orgId, assistantId))) {
+      BurnRateService.logger.debug(`burn-rate check ${orgId}/${assistantId} suppressed — operator resumed inside the cooldown window`);
+      return {
+        orgId,
+        assistantId,
+        lastHourCost: costs.lastHourCost,
+        baselineHourlyCost: baselineHourly,
+        threshold: Math.max(baselineHourly, floor) * multiplier,
+        triggered: true,
+        action: 'suppressed',
+      };
+    }
 
     if (!triggered) {
       BurnRateService.logger.debug(`burn-rate check ${orgId}/${assistantId}: lastHour $${costs.lastHourCost.toFixed(4)} baselineHourly $${baselineHourly.toFixed(4)} — no trigger`);

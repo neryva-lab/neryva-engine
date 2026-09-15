@@ -8,6 +8,7 @@ import { BillingCycleService } from './billing-cycle.service';
 import { QuotaService } from './quota.service';
 import { TrialExpiryService } from './trial-expiry.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BurnRateService } from '../assistants/burn-rate.service';
 import { DbService } from '../../common/infra/db/db.service';
 import { sql } from 'drizzle-orm';
 
@@ -18,6 +19,9 @@ import { sql } from 'drizzle-orm';
  *  - `billing.anomaly_scan` (repeatable, daily) — the B-5 cost-anomaly pass.
  *  - `billing.trial_sweep` (repeatable, hourly) — H-3 trial expiry.
  *  - `billing.quota_reconcile` (repeatable, hourly) — M-1 counter resync.
+ *  - `billing.burn_sweep` (repeatable, hourly) — REL-11.3 burn-rate auto-pause
+ *    over spend-gated candidates (assistants with an active production
+ *    rollout in orgs that spent in the last hour).
  *
  * Failures retry with backoff; after the final attempt the job lands in the
  * failed set (BullMQ's DLQ) and is logged loudly — a missed daily scan is
@@ -37,6 +41,7 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     private readonly db: DbService,
     private readonly trialExpiry: TrialExpiryService,
     private readonly quota: QuotaService,
+    private readonly burnRate: BurnRateService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -53,6 +58,8 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     await queue.add('billing.trial_sweep', {}, { repeat: { pattern: env.BILLING_TRIAL_SWEEP_CRON }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
     // M-1: quota-counter reconciliation — hourly at :20, after most ingest traffic.
     await queue.add('billing.quota_reconcile', {}, { repeat: { pattern: env.BILLING_QUOTA_RECONCILE_CRON }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
+    // REL-11.3: burn-rate auto-pause sweep — hourly at :50, after trial/quota passes.
+    await queue.add('billing.burn_sweep', {}, { repeat: { pattern: '50 * * * *' }, removeOnFail: { age: 30 * 86_400 }, removeOnComplete: { age: 7 * 86_400 } });
 
     this.worker = new Worker(
       bullQueueName('billing'),
@@ -95,6 +102,23 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
           const result = await this.quota.reconcileMonth();
           BillingWorker.logger.log(`quota reconcile: ${result.counters} counters resynced across ${result.ledgers} ledger(s)`);
           return result;
+        }
+        if (job.name === 'billing.burn_sweep') {
+          const candidates = await this.burnRate.sweepCandidates();
+          let paused = 0;
+          let suppressed = 0;
+          for (const c of candidates) {
+            const check = await this.burnRate.checkAndMaybeRollback({ orgId: c.orgId, assistantId: c.assistantId });
+            if (check.action === 'paused_rollout') {
+              paused += 1;
+            } else if (check.action === 'suppressed') {
+              suppressed += 1;
+            }
+          }
+          if (paused > 0 || suppressed > 0) {
+            BillingWorker.logger.warn(`burn sweep: ${paused} paused, ${suppressed} suppressed (manual-resume cooldown) across ${candidates.length} candidate(s)`);
+          }
+          return { checked: candidates.length, paused, suppressed };
         }
         BillingWorker.logger.warn(`unknown billing job "${job.name}" — discarding`);
       },

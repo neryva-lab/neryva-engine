@@ -25,6 +25,7 @@ import { UsageController } from './usage.controller';
 import { UsageQueryService } from './usage-query.service';
 import { UsageLedgerConsumer } from '../../workers/usage-ledger.consumer';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AssistantsModule } from '../assistants/assistants.module';
 
 /**
  * The billing & metering module (ledger billing-metering B-1…B-3, B-5):
@@ -39,9 +40,11 @@ import { NotificationsModule } from '../notifications/notifications.module';
  * org state).
  */
 // forwardRef: console ↔ billing reference each other (manifest registry ⇄
-// quota views); the deferred callback also breaks the CJS load-cycle TDZ.
+// quota views); assistants ↔ billing likewise (burn-rate sweep ⇄ usage
+// ledger/conversations reads) — and the deferred callback also breaks the
+// CJS load-cycle TDZ.
 @Module({
-  imports: [forwardRef(() => ConsoleModule), OrganizationsModule, NotificationsModule],
+  imports: [forwardRef(() => ConsoleModule), forwardRef(() => AssistantsModule), OrganizationsModule, NotificationsModule],
   controllers: [MeteringController, UsageController, BillingController, PriceCatalogController, StripeWebhookController],
   providers: [
     SpendIngestService,

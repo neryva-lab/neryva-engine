@@ -88,6 +88,14 @@ const envSchema = z.object({
   /** Billing: hourly quota-counter reconciliation from billing.spend_events (M-1). */
   BILLING_QUOTA_RECONCILE_CRON: z.string().default('20 * * * *'),
   /**
+   * Burn-rate manual-resume cooldown (seconds): after an operator promotes a
+   * fresh rollout following an auto-pause, the hourly sweep suppresses
+   * re-pausing until this elapses (default one burn window). 0 disables
+   * suppression. The ledger is immutable so the accumulator itself is never
+   * reset — suppression honors explicit human judgment temporarily instead.
+   */
+  BURN_RATE_RESUME_COOLDOWN_SECONDS: positiveInt(3600, 86_400),
+  /**
    * Stripe payment rail (H-1): off unless explicitly enabled AND a secret key
    * is present. The webhook secret verifies event signatures (fail-closed).
    */

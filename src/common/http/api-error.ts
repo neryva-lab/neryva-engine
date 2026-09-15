@@ -21,6 +21,7 @@ export const ERROR_CODES = {
   IDEMPOTENCY_IN_FLIGHT: 'idempotency_in_flight',
   IDEMPOTENCY_CONFLICT: 'idempotency_conflict',
   CONFLICT: 'conflict',
+  PRECONDITION_FAILED: 'precondition_failed',
   RESOURCE_PURGED: 'resource_purged',
   INTERNAL: 'internal_error',
   SERVICE_UNAVAILABLE: 'service_unavailable',
@@ -133,6 +134,13 @@ export class ApiError extends HttpException {
 
   static conflict(message: string, details?: unknown): ApiError {
     return new ApiError(HttpStatus.CONFLICT, ERROR_CODES.CONFLICT, message, details, { retryability: 'no-retry' });
+  }
+
+  /** Optimistic-concurrency refusal (If-Match mismatch): refetch, merge, retry. */
+  static precondition(details?: unknown): ApiError {
+    return new ApiError(HttpStatus.PRECONDITION_FAILED, ERROR_CODES.PRECONDITION_FAILED, 'Resource changed since it was read — refresh and retry', details, {
+      retryability: 'no-retry',
+    });
   }
 
   static serializationFailure(cause?: unknown): ApiError {

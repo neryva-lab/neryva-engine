@@ -119,7 +119,13 @@ export class BurnRateService {
       if (found.length === 0) throw ApiError.notFound('assistant');
       const updated = await tx
         .update(assistantRollouts)
-        .set({ state: 'paused', updatedAt: new Date().toISOString() })
+        .set({
+          state: 'paused',
+          pausedReason: `burn_rate: last-hour $${costs.lastHourCost.toFixed(2)} exceeded threshold $${(Math.max(baselineHourly, floor) * multiplier).toFixed(2)}`,
+          pausedBy: actor.slice(0, 128),
+          pausedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
         .where(
           and(
             eq(assistantRollouts.assistantId, assistantId),

@@ -199,7 +199,13 @@ export class RolloutsService {
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx
         .update(assistantRollouts)
-        .set({ state: 'paused', updatedAt: new Date().toISOString() })
+        .set({
+          state: 'paused',
+          pausedReason: 'operator',
+          pausedBy: input.actor.slice(0, 128),
+          pausedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
         .where(and(...clauses))
         .returning({ id: assistantRollouts.id }),
     );

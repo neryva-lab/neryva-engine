@@ -98,6 +98,16 @@ export interface ResolvedManifest {
   manifestHash: string;
 }
 
+/**
+ * Degraded-knowledge gate input: source slugs declared but unresolvable at
+ * publish time (no READY document carries the slug). Pure over the resolved
+ * manifest — unit-tested. The publish path refuses these (422) unless the
+ * caller explicitly acknowledges degraded knowledge (audited bypass).
+ */
+export function unresolvedPinSlugs(manifest: Pick<ResolvedManifest, 'knowledgePins'>): string[] {
+  return manifest.knowledgePins.filter((p) => !p.resolved).map((p) => p.source_slug);
+}
+
 /** Default retry posture, versioned with the snapshot (auditable, overridable later). */
 const RETRY_POLICY_V1 = {
   READ_ONLY: { max_attempts: 2, backoff_ms: 500 },

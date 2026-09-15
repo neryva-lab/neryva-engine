@@ -165,6 +165,17 @@ export const assistantRollouts = pgTable(
     /** active | paused */
     state: varchar('state', { length: 16 }).notNull().default('active'),
     /**
+     * Pause attribution (0058): WHY the rollout is paused, visible on reads
+     * so the console banners accurately without audit archaeology. Manual
+     * pauses record the actor; burn-rate records reason + costs. NULL on
+     * pre-attribution rows means operator-paused-legacy. Cleared on resume
+     * (re-activation writes a fresh active row per the single-active-row
+     * invariant — history stays in audit).
+     */
+    pausedReason: varchar('paused_reason', { length: 512 }),
+    pausedBy: varchar('paused_by', { length: 128 }),
+    pausedAt: timestamp('paused_at', { withTimezone: true, mode: 'string' }),
+    /**
      * TPL-6.2 — release addressability. Promotion is a pointer move over
      * (environment, channel): prod stays while staging/canary move, and a
      * dedicated channel pins one customer on an older version. Unique active

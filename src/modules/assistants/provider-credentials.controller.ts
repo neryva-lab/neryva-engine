@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
+import { RequireStepUp, StepUpGuard } from '../../common/policy/step-up.guard';
 import { Idempotent } from '../../common/http/idempotency';
 import { ApiError } from '../../common/http/api-error';
 import { ProviderCredentialsService, ProviderCredentialView } from './provider-credentials.service';
@@ -12,7 +13,11 @@ import { ProviderEnablement } from './provider-credentials.schema';
  * sealed material is write-only from here: create/rotate take the plaintext
  * secret over the TLS'd request body and nothing ever returns it — reads
  * carry fingerprints only. Owner/admin only for anything secret-bearing;
- * developer/reader see the fingerprint list.
+ * developer/reader see the fingerprint list. Secret-CHANGING writes
+ * (create/rotate) additionally require a fresh MFA proof: whoever holds
+ * these keys controls where every prompt (with customer context) is
+ * authenticated. Revoke stays proof-free on purpose — incident response
+ * must never wait on MFA.
  */
 @Controller('console/org/:orgId/provider-credentials')
 @AuthLayer('l1')
@@ -28,7 +33,8 @@ export class ProviderCredentialsController {
 
   @Post()
   @Roles('owner', 'admin')
-  @UseGuards(OrgRolesGuard)
+  @UseGuards(OrgRolesGuard, StepUpGuard)
+  @RequireStepUp()
   @Idempotent()
   async create(
     @Param('orgId') orgId: string,
@@ -59,7 +65,8 @@ export class ProviderCredentialsController {
 
   @Post(':credentialId/rotate')
   @Roles('owner', 'admin')
-  @UseGuards(OrgRolesGuard)
+  @UseGuards(OrgRolesGuard, StepUpGuard)
+  @RequireStepUp()
   @Idempotent()
   async rotate(
     @Param('orgId') orgId: string,

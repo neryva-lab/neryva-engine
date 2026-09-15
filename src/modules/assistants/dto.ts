@@ -133,6 +133,14 @@ export class RollbackDto {
   @IsString()
   @Length(36, 36)
   to_version_id!: string;
+
+  /**
+   * Audited degraded-knowledge bypass (same semantics as publish): restoring
+   * a version whose pins no longer resolve ships it anyway, explicitly.
+   */
+  @IsOptional()
+  @IsBoolean()
+  acknowledge_degraded_knowledge?: boolean;
 }
 
 /** Wire shape of an exported assistant version envelope (service verifies the hash). */

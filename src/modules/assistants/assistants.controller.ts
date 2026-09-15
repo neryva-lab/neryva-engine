@@ -123,9 +123,11 @@ export class AssistantsController {
     @Param('orgId') orgId: string,
     @Param('assistantId') assistantId: string,
     @Param('versionId') versionId: string,
+    @Body() dto: { acknowledge_degraded_knowledge?: unknown },
     @CurrentPrincipal() principal: L1Principal,
   ) {
-    const row = await this.assistants.publish({ orgId, assistantId, versionId, publishedBy: principal.id });
+    const acknowledged = dto?.acknowledge_degraded_knowledge === true;
+    const row = await this.assistants.publish({ orgId, assistantId, versionId, publishedBy: principal.id, acknowledgeDegradedKnowledge: acknowledged });
     return { version: row };
   }
 
@@ -185,7 +187,7 @@ export class AssistantsController {
     @Body() dto: RollbackDto,
     @CurrentPrincipal() principal: L1Principal,
   ) {
-    const row = await this.assistants.rollback({ orgId, assistantId, toVersionId: dto.to_version_id, publishedBy: principal.id });
+    const row = await this.assistants.rollback({ orgId, assistantId, toVersionId: dto.to_version_id, publishedBy: principal.id, acknowledgeDegradedKnowledge: dto.acknowledge_degraded_knowledge === true });
     return { version: row };
   }
 

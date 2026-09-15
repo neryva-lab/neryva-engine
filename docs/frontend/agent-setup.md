@@ -1,115 +1,116 @@
 # Agent Setup — Knowledge, Templates, Multi-Agent, Providers
 
-> Status: proposed plan (not yet implemented).
-> Owner: Frontend team + Engine platform team (+ Studio runtime team for E-1 verification).
-> Scope: **how teams set up agents end to end** — knowledge upload → source mapping → template install → provider/model choice → authoring → test → evaluate → publish → operate. Directly answers §0; every Engine claim cited; Engine changes explicitly listed in §6 (authorized in advance for quality).
-> Non-goals: changing tenancy/RLS, billing math, the MCP wire contract, or Studio execution internals. Per-resource ACLs and cross-agent orchestration stay out (see §8).
-> Research basis: Intercom Fin (per-agent source toggles, audience scoping, multi-agent via Workflows, content-gap feedback), Microsoft Copilot Studio (per-agent model picker, admin allow/block controls, Agent Library guided install with post-install connections, child-vs-connected guidance), Salesforce Agentforce (managed/BYOLLM model options, single-org multi-agent), plus the invite/onboarding patterns already adopted.
-> Verification: Engine citations re-checked against `engine/src` + `products/agent-studio` on 2026-09-15. Paths repo-root-relative. No phase DONE without exit-gate evidence.
+> Status: system IMPLEMENTED 2026-09-15 (code complete; DB-backed exit gates pending the first full CI/DB run, same as every ledger). This document is the setup-plane source of truth for the frontend build.
+> Owner: Frontend team + Engine platform team.
+> Scope: **how teams set up agents end to end** — knowledge (uploads + connectors + mapping) → template install → provider/model choice → authoring → test → evaluate → publish → operate → observe. Every Engine claim cited to `engine/src`; every role set copied from route decorators.
+> Non-goals: changing tenancy/RLS, billing math, the MCP wire contract, or Studio execution internals. Cross-agent orchestration stays out (§11).
+> Research basis: Intercom Fin (per-agent sources, audiences, Copilot, content gaps), Copilot Studio (per-agent picker, admin controls, Agent Library, child-vs-connected), Salesforce Agentforce (managed/BYOK duality, single-org multi-agent), Sierra/Decagon/KoreESTAMP (traces, evals, connectors, permission sync, outcome metrics).
+> Verification: all citations re-checked against `engine/src` + `products/agent-studio` on 2026-09-15 (this pass corrected 9 inaccuracies in the prior revision: step-up scope, burn-rate API, E-1/E-2 status, ACL-shape freeze, preview route shape, suspend matrix, fingerprint behavior, template count, reference line numbers). Paths repo-root-relative.
 
 ---
 
-## 0. Direct answers (then the plan proves each one)
+## 0. Direct answers
 
-1. **Knowledge upload for a customer-service agent — how?** Teams upload files org-wide (presigned POST → scan → extract → index → READY). The agent does NOT own the files; it **pins source slugs** in its version (`context_policy.knowledge_sources`), resolved at publish to exact document versions (`knowledgePins`: document/version IDs, sha256, parser + embedding versions). At runtime the agent retrieves only across its pins (after fix E-1; today retrieval is org-wide — §6).
-2. **Where does the template fit?** The template declares what knowledge the agent needs (`bindings.knowledge.required[]` slugs + seed documents + evaluators that cite them). Install copies the declaration; the provisioning worker verifies seeds against READY docs; publish pins slugs to document versions. Template = the contract, pins = the fulfillment, eval = the proof.
-3. **One org, many independent agents — yes.** `assistants` rows are per-org with unique names; each has own versions/snapshots/manifests; conversations bind exactly one assistant; runs pin that assistant's version+snapshot. Independence dimensions: instructions, tools, knowledge pins, models, budgets, guardrails, releases, kill switches. Shared dimensions (by design): the document pool, the tool catalog, provider credentials, billing — governed once, consumed per-agent.
-4. **How do teams choose providers/models?** Two-tier, exactly like Copilot Studio's admin-controls + per-agent picker: **admins govern** (org model allowlist via published `model_catalog`, BYOK credentials with sealed secrets, per-provider enablements, residency pin, cost catalog + trial caps + burn-rate), **makers pick** per agent (`allowed_models` within the governed set, validated at publish with per-model disable reasons). Developers draft; owner/admin publish and own keys.
+1. **Knowledge for a customer-service agent:** teams add documents two ways — **uploads** (presigned POST → scan → extract → index → READY) and **connectors** (Drive, SharePoint, Confluence, Notion, Zendesk, Slack, sitemap with incremental sync, OAuth or sealed static credentials). Every document carries an immutable org-unique **`source_slug`** pin address. The agent declares slugs per version (`context_policy.knowledge_sources`); publish resolves them to exact document versions (`knowledgePins`: IDs, sha256, parser/embedding versions, manifest hash); runtime retrieval is constrained to pinned versions inside the scoring query, with source-permission allow-lists enforced in the same statement.
+2. **Template fit:** the template declares knowledge (`bindings.knowledge.required[]` slugs + seeds + evaluators that cite them). Install copies the declaration; the provisioning worker verifies seeds against READY slugs (retryable); publish pins slugs to versions; eval proves grounding. Template = contract, pins = fulfillment, eval = proof. Imports never go live by themselves (install writes DRAFT v0; the active pointer is untouched).
+3. **One org, many independent agents — yes, natively.** `assistants` rows per org with unique names; own versions/snapshots/manifests; `conversations.assistantId NOT NULL`; runs pin version+snapshot. Independent: instructions, tools, knowledge pins, models, budgets, guardrails, releases, kills. Shared by design: document pool, tool catalog, provider credentials, billing.
+4. **Provider choice, two tiers:** admins govern (org model allowlist, BYOK sealed keys, enablements, residency, cost catalog, trial caps); makers pick per agent (`allowed_models`, publish-validated with per-model disable reasons). Draft roles: owner/admin/developer. Publish and keys: owner/admin. Provider-credential create/rotate additionally require a fresh MFA proof; revoke stays proof-free so incident response never waits.
 
 ---
 
-## 1. How setup works today (no new code — the machine already exists)
+## 1. Data model (exact)
 
-- **Identity/multiplicity:** `assistants.organizationId NOT NULL`, unique `(organization_id, name)` (`assistants/schema.ts:16,31`); versions/snapshots per assistant; `conversations.assistantId NOT NULL` (`conversations/schema.ts:16-18`). One org → N agents is the native shape, not an extension.
-- **Knowledge pool:** uploads → `artifacts` → `documents` → `document_versions` → `chunks` → `embeddings`, all org-scoped with `retrieval_acl` (organization|private) enforced **inside** the retrieval SQL before scoring (`retrieval.service.ts:95-145`). Default grant on READY is org-visible.
-- **Per-agent binding:** `context_policy.knowledge_sources: string[]` per version + `knowledge_policy{retrieval_enabled (default false), max_results}` gate; publish resolves slugs → `knowledgePins` (exact version IDs + hashes) into the snapshot; `run_manifests` carries the manifest hash per run. Retrieval is logged as a durable run event with bounded citations.
-- **Templates:** 20 BOMs + `registry.json` (hash-paritied with Engine canonical hash); release-job sync (zero-migration bumps); `install` = one-TX copy + provisioning outbox; compatibility reasons per template (`required_model_capability_missing`, `required_tool_missing`, `knowledge_source_missing`, `provider_credential_missing`); provision worker checks tool pins + knowledge seeds (retryable).
-- **Providers:** platform model catalog (staff) × org governance allowlist (published `model_catalog`) × per-agent `allowed_models` (publish-validated with residency) × BYOK sealed credentials (fingerprints-only lists) × enablements (default on) × cost catalog (micros) × trial caps × burn-rate auto-rollback. Roles: reads for all, drafts for owner/admin/developer, publish + keys for owner/admin (+step-up for keys, admin-role invites, publishes of governed catalogs).
-- **Quality loop:** test-runs (no quota/billing) → eval runs with provenance + PASS/WARN/BLOCK → BLOCK refuses publish AND rollout/release promotion (latest-wins) → control blocks + platform kills enforced at accept/tool/context/credential/install → burn-rate pauses production rollout, never auto-resumes.
+- `assistants(id, organization_id NOT NULL, name, active_version_id, disabled_at, kill flag)` — unique `(organization_id, name)`; duplicate install/create → 409.
+- `assistant_versions(id, assistant_id, organization_id, version int, instructions, model/context/tool/guardrail/knowledge policies, model_params, budget_policy, hash, status, rollback_of)` — immutable; statuses DRAFT → … → PUBLISHED → RETIRED; rollback points at a prior immutable row (restoring non-active payload legitimate; republishing identical content rejected as no-op).
+- `policy_snapshots(id, assistant_version_id UNIQUE, *-policy mirrors, toolBindings, knowledgePins, modelRef, templateRef, manifestHash)` — materialized in the publish TX, 1:1 with the published version.
+- `run_manifests(run_id PK, version/snapshot ids, manifest jsonb, manifestHash)` — written in the run-acceptance TX (accept/regenerate/edit); heavy truth stays on the snapshot.
+- **Serve path (how traffic finds the agent):** channels require `default_assistant_id` (validated + routability-checked at bind time — a channel conversation pins its account's assistant); every conversation carries a mandatory `assistantId` (no default at create — the caller chooses); each run resolves its version via `pickVersionPin`: channel release pointer → rollout weighted variants → active published version (PUBLISHED-only; drafts/retired never serve). Run acceptance additionally refuses disabled assistants and assistant-level blocks with typed conflicts.
+- `documents(id, organization_id, source_artifact_id UNIQUE, title display-only, state processing|ready|failed|retired, source_slug NOT NULL UNIQUE per org, embedding_model)` → `document_versions(document, version int ascending, sha256, parser_version)` → `chunks(version, sequence, text ≤8192, source_range byte offsets)` → `embeddings(chunk, model, vector<1536>)`. Naming convention (intentional, matches DDL — do not rename): documents.embedding_model names the active model; embeddings rows key by model with the vector in embedding.
+- `retrieval_acl(document, organization|private)` + `document_source_acls(document, provider, external_id)` allow-lists + `external_principals` + `external_identity_links` (auto-created on email equality at sync).
+- `upload_sessions` carry intent into ingestion: `source_slug`, `title`, `target_document_id` (re-ingest appends a version), `connector_ref`, `source_acl`.
+- `connector_accounts(provider, sealed credentials, cursor, state)` + `connector_oauth_apps(org, provider)` (BYO apps) + `connector_documents` (external-id map for tombstoning).
+- `control_blocks(assistant|version|tool|template|capability, reason, expiry)` — no warn mode; expiry needs no worker.
+- Eval: datasets/cases/runs/results + `decision` PASS|WARN|BLOCK + provenance + `run_judgments`.
+- Analytics: `analytics_rollups(org, kind, period, scope, metrics)` — org kinds (`csat_daily`, `conversation_outcomes`, `usage_daily`) + per-assistant twins (`assistant_*`, scope `{"assistant_id"}`).
 
-## 2. Industry mapping (what we adopt, attributed)
-
-- **Intercom Fin → per-agent source control + audiences.** Fin's Sources tab toggles each source per surface (AI Agent vs Copilot vs Help Center) with audience filters; multiple agents serve different audiences from one workspace. Adopted as: per-version `knowledge_sources` UI (toggle matrix of org docs × this agent) + `memory_scope`/visibility equivalents already in context policy. Intercom's content-gap feedback (failed answers → missing-topic recommendations) maps to our eval `must_not` misses + run judgments → new-doc tasks; specify as a future checklist item, not this plan.
-- **Copilot Studio → admin-governed models + per-agent picker.** Admins allow/block model classes per environment; makers pick per agent from what's left. Adopted 1:1 onto our catalog/governance/picker split (§4). Copilot's Agent Library flow (guided install → prerequisites → post-install connections/env-vars → explicit publish; imports are NOT auto-published) is adopted verbatim for our template install UX (§3).
-- **Copilot child-vs-connected → our single model, stated.** Copilot splits agents when teams, models, lifecycles, or channels diverge. Our answer: one agent = one independently versioned/published/released/killed unit already, so no second construct is needed — but the setup UI must make per-agent model/settings/channels visibly independent (the exact confusion child/agents cause when they share settings). Cross-agent handoff/orchestration (SOMA-style planners) is explicitly out (§8).
-- **Salesforce BYOLLM → our BYOK + platform duality.** Platform-managed models plus bring-your-own-credentials routed through the same gateway with trust-layer intact. Adopted as-is: `provider_credentials{source: platform|byok}` + `GetToolCredential` scoping + cost normalization through one ledger.
-
-## 3. Setup flow slice A — knowledge-first (the customer-service walkthrough)
+## 2. Setup state machine (the funnel)
 
 ```text
-Agent page → Knowledge tab
-  "Required by template" section (from BOM bindings.knowledge.required + eval citations):
-    each slug → status chip: PINNED (doc title + version + sha) | MISSING (no READY match)
-  "Agent sources" matrix (org READY docs × this agent, toggles write knowledge_sources):
-    toggling ON a MISSING slug routes to upload/mapping, not silent failure
-  Upload (owner/admin/developer): purpose + allowlist + byte bound + sha256 →
-    presigned POST → direct PUT → complete → stage tracker
-    (CREATED→…→READY / QUARANTINED|FAILED with reason copy)
-  Map: required slug → pick existing READY doc OR the just-uploaded one
-    (match preview shows title/version/updated-at BEFORE publish)
-  Test retrieval: query box → top-k with doc titles + scores (search endpoint,
-    same clamp 1–20) — makers SEE what the agent will see
-  Publish: pins resolve in-TX; unresolved pins render as blocking warnings
-    (decision §7); manifest hash + provenance recorded; eval re-runs
+INSTALL (template copy → DRAFT v0, or blank definition)
+  → CONFIGURE (instructions/tools/knowledge/models/guardrails/budgets — validated live, §5)
+  → MAP KNOWLEDGE (required slugs → READY docs via upload/rename/connector, §3)
+  → TEST-RUN (run_kind='test': no quota, no billing, pinned to draft)
+  → EVALUATE (decision + provenance; BLOCK/WARN surface with re-run paths)
+  → PUBLISH (atomic pointer swing; BLOCK refuses; manifest hash recorded)
+  → OPERATE (rollout/release pointers, kills, burn-rate, per-assistant metrics)
 ```
 
-Rules: `retrieval_enabled` defaults OFF and stays a deliberate toggle (secure default — no silent org-wide fallback after E-1); snippets are PII-redacted + spotlighted as untrusted in context; citations pin doc-version + byte ranges; deleted/quarantined/expired docs vanish from retrieval before purge completes (server-enforced, UI states it).
+Every transition is explicit and audited; nothing auto-publishes; in-flight runs stay pinned to superseded versions.
 
-## 4. Setup flow slice B — template install (guided, never auto-published)
+## 3. Slice A — knowledge (uploads + connectors + mapping + enforced pins)
 
-```text
-Gallery (cards: scenario, family, status, version) → detail:
-  BOM tabs (definition / tool bindings w/ effect+approval / knowledge reqs /
-  channels+caps / eval rubric + release policy) + compatibility panel
-  (per-reason rows: model caps, missing tools, missing knowledge, missing
-  credential — each row links its fix: catalog, upload, BYOK, enablement)
-  + [Install] (name field, default = template name; duplicate → 409 guidance)
-→ install TX (one shot) → post-install checklist (Copilot pattern):
-    ① knowledge: map MISSING slugs (§3)  ② tools: catalog pins auto-resolved,
-    missing schemas flagged  ③ models: pick within allowed (reasons shown)
-    ④ credentials: BYOK or platform (owner/admin)  ⑤ test-run  ⑥ evaluate
-→ publish (explicit button; imports never go live by themselves)
-```
+- **Uploads** (owner/admin/developer): `POST …/uploads {purpose, media_type, byte_length, sha256, source_slug?, title?}` → presigned POST (exact size/sha window) → direct PUT → `POST …/complete` (server verifies bytes + bound sha) → stage tracker (`GET …/uploads/:id`: CREATED→…→READY / QUARANTINED|FAILED with reason). Slug: kebab 3–64, reserved now (409 `source_slug_taken`); omitted → derived `doc-{artifact8}`; title defaults to slug, else auto.
+- **Inventory + mapping:** `GET …/documents` (slug/title/state/latest version, newest first) + `POST …/documents/:id/source-slug` (owner/admin/developer, audited, 409 on collision; old pins referencing the prior slug resolve visibly unresolved next publish — history never rewritten).
+- **Connectors** (link: owner/admin/developer; OAuth apps + dance: owner/admin): sitemap (no auth) + Drive (per-org OAuth dance) + SharePoint (Entra client-credentials) + Confluence/Notion/Zendesk/Slack (sealed static credentials, shape-validated at link: Drive rejects pasted secrets with a dance pointer). Sync: fresh credentials (auto-refresh with skew) → bounded fetch (pagination + iteration caps, per-doc skips with reasons, never sync failures) → mapping-aware versioning (no duplicates) → tombstones for source deletions (`retired`, mapping kept for resurrection) → cursor + counts. Sealed material never appears in list responses (`hasCredentials` only).
+- **Permission sync:** adapters capture source verdicts (Drive/Graph open on anyone/domain, else user/group principals; Confluence restrictions; Zendesk segments; Slack public-share; Notion workspace-scoped open, documented) → ingestion upserts principals, auto-links on email equality, replaces per-doc allow-lists. Retrieval admits restricted docs only to linked accounts or matching verified emails; anonymous callers see unrestricted docs; unknown principals default-deny. All inside the scoring WHERE — never post-filtered.
+- **Runtime pins (E-1):** `allowedDocumentVersionIds` = undefined (unpinned legacy: org-wide) or resolved IDs ([] = fail-closed to nothing); enforced in both vector and lexical legs; both MCP paths (context assembly + `SearchKnowledge`) pass the run's snapshot pins; console search and eval recall stay explicitly unconstrained. Reranker reorders only, never widens.
+- **Rules that stay:** `retrieval_enabled` defaults OFF (deliberate toggle, no silent fallback); snippets PII-redacted + spotlighted untrusted; citations pin version + byte ranges; non-READY/retired/expired/quarantined docs unreachable by construction; retrieval legs logged as durable run events.
 
-## 5. Setup flow slice C — provider/model configuration (two tiers, role-split)
+## 4. Slice B — template install (guided, never auto-published)
 
-- **Govern tier (owner/admin):** model allowlist editor (published `model_catalog`: entries, enablement, fallback order, regions, cost ceilings) + residency pin (`default` permissive / `eu` strict — strict fails closed on unserved models) + BYOK credentials (create/rotate/revoke, fingerprints-only lists, sealed at rest, step-up on writes) + per-provider enablements + trial caps/budgets view. Staff plane (`internal/staff/*`) is never linked.
-- **Maker tier (owner/admin/developer):** per-agent `allowed_models` multi-picker sourced from `GET …/models` (usable + reasons); reasons render as disable-reasons inline (credential missing → link BYOK; not enabled → link govern tier; residency → explain). Draft-time is advisory; publish-time is enforcement — the editor pre-checks publish rules live so publish rarely surprises.
-- **Money guardrails visible at setup:** per-agent budgets (tokens/cost/wall-clock/tool calls, fleet caps documented), cost preview from the cost catalog where priced (unpriced = labeled, never zero-implied), burn-rate status on the operate tab.
+Gallery (20 BOMs: scenario/family/status/version + compatibility panel) → detail (BOM tabs: definition, tool bindings with effect+approval, knowledge reqs, channels+caps, eval rubric + release policy; per-reason rows — `required_model_capability_missing`, `required_tool_missing`, `knowledge_source_missing`, `provider_credential_missing` — each linking its fix) → Install (name, default = template name; duplicate → 409) → one-TX copy (assistant + DRAFT v0 + install row + provisioning outbox) → post-install checklist: ① map MISSING slugs (§3) ② tool pins auto-resolved, drift flagged ③ models picked with reasons ④ credentials (owner/admin) ⑤ test-run ⑥ evaluate → explicit publish. Provisioning retries tool/seed gaps; sustained absence dead-letters for replay.
 
-## 6. Engine changes (authorized — minimal, enumerated, no migration beyond two)
+## 5. Slice C — providers (govern tier + maker tier)
 
-- **E-1 REQUIRED — enforce pins at retrieval (IMPLEMENTED 2026-09-15).** `searchKnowledge` takes `allowedDocumentVersionIds` (`mcp-authority.service.ts:1410`) but `searchKnowledge` is called org-wide (`:1527-1531`) — pins are recorded/provenance, not enforcement. `searchKnowledge` filters chunks to pinned versions inside both scoring legs (plus a composite `(organization_id, document_version_id)` index), with undefined pins preserving the legacy posture and [] failing closed. Both MCP call sites pass the run snapshot's pins. Studio needs no change. Acceptance: two agents, disjoint pins, identical query → disjoint citations (proven by construction); unpinned docs never surface for pinned agents; eval recall green.
-- **E-2 RECOMMENDED — explicit `source_slug` on documents (IMPLEMENTED 2026-09-15).** Pins now match `documents.title == slug` with no org-unique constraint and ingestion auto-titles (`purpose-id8`) — rename/duplicates now 409 or mis-resolve visibly instead of silently. Shipped: `source_slug` column (unique per org, set at upload with 409 on collision, mutable only via the audited rename endpoint) matched exactly at publish; backfilled from title-or-generated; connector re-sync appends versions to the mapped document; title stays display-only.
-- **E-3 POLICY (no code until decided, §7):** unresolved-pin posture at publish — warn (ship, retrieval simply excludes) vs refuse (template declares required checks). Engine already refuses WARN/BLOCK/absent where templates declare checks; E-3 only extends that posture choice to knowledge explicitly.
+- **Govern (owner/admin):** published `model_catalog` allowlist (entries, fallback order, regions, cost ceilings) + residency pin (`default` permissive / `eu` strict, fail-closed) + BYOK credentials (create/rotate/revoke, fingerprints-only lists, envelope-sealed, roles-only guard) + per-provider enablements (default on) + trial caps/budgets view. Staff plane never linked. Config-catalog publishes carry step-up; provider-credential writes do not.
+- **Maker (owner/admin/developer):** `allowed_models` picker from `GET …/models` (usable + reasons as inline disable-reasons). Draft advisory, publish enforcement (`rejectUnknownModels` + residency + `assertToolPins` + `assertPublishable` in one ordered gate).
+- **Money visible at setup:** per-agent budgets (tokens ≤2M, cost, wall-clock ≤24h, tool calls ≤1000, model calls ≤200), cost preview where priced (unpriced labeled, never zero-implied), trial caps from env (unset = unlimited, non-numeric fails closed at boot).
 
-NOT changing: pool storage/ACL shape, pin metadata shape, eval gate precedence (BLOCK wins, latest wins), catalog/credential/role split, trial/burn-rate mechanics.
+## 6. Slice D — authoring reference (the strict core)
 
-## 7. Open decisions (yours — everything else is specified)
+- **Caps (contract-enforced, tighter wins):** instructions ≤20,000 (Engine type allows 32,768; publish requires non-empty); models 1–16 (`provider/model` shape); tools ≤32 entries `{name ^[a-z0-9_]+$, access read|write, approval required|none default none, schema_hash? 64hex}`; history 1–100 (default 30); retrieval results 1–20 (default 5); budgets per §5.
+- **Vocabulary mapping (single module, never per view):** consumer `never|on_effect|always` → Engine `optional|required` + catalog `REQUIRED`; `memory_scope` `org` → `organization` (Engine `user` has no consumer value — omit); `max_context_tokens`/`retrieval_policy`/`brand` are contract/consumer-side, never Engine version fields; tool entries carry only name/access/approval/schema_hash (effect class lives on the catalog row).
+- **Three gates:** shape (zod + contract schema, every write) → policy (publish TX: instructions, tool-pin freshness, model/residency allowlist, budgets, BLOCK latest-decision check, unresolved-pin refuse unless acknowledged) → runtime (run acceptance, `authorizeToolCall`, context assembly, credential issuance, install). Failures are typed 422/409 with reasons; secret shapes (credential-assignment patterns, secret-named keys) rejected before persistence; unknown keys 422 with dotted paths at every depth (never silently stripped).
+- **Studio mirror:** validator 7 classes (unknown capability/tool, effectful-without-approval, over-entitlement, unsupported context, unbounded recursion, instructions-authority) + compiler (hashes, per-tool schemas, `COMPILER_VERSION`). Template CI runs Studio first, Engine second.
 
-1. **Unresolved pins at publish: warn or refuse?** (Recommend: refuse when the installing template declares required knowledge checks — consistent with the existing required-checks rule; warn otherwise.)
-2. **E-2 now or with first enterprise pilot?** (Recommend now — one small migration before real customer docs land; backfill-while-empty is free.)
-3. **Operate UI (rollouts/releases/kills/burn-rate) in this plan or the next?** (Recommend next — publish+eval completes the setup funnel; operate deserves its own incident-grade spec.)
+## 7. Slice E — test → evaluate → publish → operate
 
-## 8. Explicitly out (with reason)
+- **Test-run** (`POST …/versions/:v/test-runs`, owner/admin/developer): `run_kind='test'`, pinned to draft, no quota/billing. **Evaluate** (`POST …/evaluate` → `eval_run_id`): rubric + cases + provenance → decision; promote/reject candidates feed the observe loop.
+- **Publish/rollback/retire** (owner/admin): advisory-locked atomic pointer moves; export/import deterministic with `schema_version`; snapshot/provenance reads for all roles. **Disable/enable/delete** (owner/admin); delete is lifecycle-gated, not instant.
+- **BLOCK semantics (latest-wins):** BLOCK refuses publish AND rollout/release promotion; a later PASS clears it; WARN blocks only where templates declare required checks. UI renders decision + provenance + re-evaluate path, never a bare error. Unresolved knowledge pins refuse the same way (422 with slugs) unless acknowledge_degraded_knowledge is set (audited bypass).
+- **Operate:** rollout set/pause (owner/admin; BLOCKed versions unassignable; platform kills second the effect), release pointers env×channel (owner/admin; channel-routability enforced), control blocks CRUD (owner/admin; enforced at run acceptance, release assignment, `authorizeToolCall`, context, credential issuance, install — terminal commits deliberately unsupported so runs never strand), assistant kill flag (blocks acceptance, audited). Rollouts support weighted variants (1–10 versions, positive-integer weights summing to exactly 100, sticky per conversation) — the built-in A/B + canary primitive; pause is the emergency lever. Day-1 emergency UI = exactly two toggles here (pause rollout + disable/kill) with confirm modals; analytics/anomaly/variant sliders stay deferred. **Burn-rate is service-only** (no controller routes exist — operate UI surfaces rollout state + audit, and triggers the existing service path; do not spec a burn-rate endpoint that isn't there). Paused rollouts carry paused_reason/by/at (manual = actor, burn-rate = reason+costs) — banner verbatim; NULL reason on pre-attribution rows reads as operator-paused.
+- **Observe:** per-assistant `assistant_*_daily` rollups (containment = completed ÷ (completed + escalated), null on empty; CSAT up/down/ratio; runs/tokens/cost) via `GET …/analytics/rollups?kind=&days=&assistant_id=`; briefed handoff (immutable brief-at-escalation: summary + open run + last customer message); knowledge-gap loop (eval misses + low-score legs + judgments → new-doc tasks) is next-build console work on existing events.
 
-Cross-agent handoff/orchestration (no planner primitive exists — adding one now would fork the run state machine); per-resource ACLs (org roles + retrieval ACL suffice until a contract demands more); SCIM/domain-claim (deal-gated, skeleton supports without migration); conversation-history-as-knowledge auto-ingest (memory proposals stay explicit — no "remember this" exfiltration by design); provider-managed conversation IDs as canonical (reconstruction stays Engine-side).
+## 8. Endpoint + role reference (setup scope)
 
----
+Assistants: create/list/get owner/admin/developer…reader/billing-read as marked — create+versions+test/evaluate/import `owner,admin,developer`; publish/rollback/retire/disable/enable/delete `owner,admin` (publish/rollback accept optional acknowledge_degraded_knowledge); reads (list/get/versions/export/snapshot/provenance) all roles incl. billing. Templates list/get all roles. Tools: upsert/from-template `owner,admin,developer`; enabled-toggle `owner,admin`; reads all-ish. Models read all roles. Provider credentials: list `owner,admin,developer`; create/rotate `owner,admin` + fresh MFA proof (revoke proof-free); enablements `owner,admin`. Knowledge: uploads/complete `owner,admin,developer`; documents list/search + uploads-status all roles; slug-rename `owner,admin,developer`; memory decisions `owner,admin`. Connectors: link/sync/state `owner,admin,developer`; OAuth apps + dance `owner,admin` (callback public, rate-limited). Rollouts/releases: reads all roles (rollout rows surface paused_reason/by/at); writes `owner,admin`. Control blocks: `owner,admin` throughout. Analytics reads include billing. Full paths live in the controllers cited in References; this table pins the role split the UI gates on (server enforces regardless).
 
-## Acceptance (ship gate for the setup funnel)
+## 9. Error catalog (render verbatim, never generic-toast)
 
-- [ ] Template install → mapped knowledge → test-run → PASS eval → publish completes with zero Dashboard/API errors on a clean org, first session, no entitlements (value-first holds).
-- [ ] Missing-slug template shows MISSING states + upload/map path (never silent); unresolved pins follow the §7 decision exactly.
-- [ ] Post E-1: disjoint-pin citation isolation proven (two agents, same query); post E-2: rename/duplicate-title cannot mis-resolve a pin.
-- [ ] Model picker disables with server-verbatim reasons; BYOK secret never appears in any response/log (grep-proven); owner/admin-only writes enforced (403-proven as developer/reader).
-- [ ] Publish BLOCK/WARN renders decision + provenance + re-evaluate path; rollback restores exact prior behavior (pinned-run test).
-- [ ] Contract caps enforced client-side before send (instructions 20k, models 16, tools 32); unknown keys 422 with paths; secret shapes rejected with field errors.
+`slug_taken`/`source_slug_taken`/`owner_already_present`/`ownership_cap_reached` (409 + fix guidance); `unknown keys rejected: <dotted paths>` (422); `tool pins rejected: <name>: <reason>` (422); `allowed_models not present in the published model catalog` / `residency '<r>' not served` (422); `BLOCK — resolve the critical failures and re-evaluate` (+ required-checks variant); `schema_hash drift` (re-pin flow); `unresolved knowledge sources cannot publish: <slugs>` (422; map docs or acknowledged bypass, audited as `assistant.publish_degraded_acknowledged`); seat/member caps + invite intact (retry, don't burn); step-up `step_up_required` → MFA modal → single retry.
+
+## 10. Locked decisions (two — everything else is specified)
+
+1. **Unresolved pins at publish: REFUSE (locked).** 422 with slugs unless `acknowledge_degraded_knowledge: true` (audited as `assistant.publish_degraded_acknowledged` from the committed snapshot). No warn-toast path — a silently context-less agent hallucinates.
+2. **Operate UI: split (locked).** Emergency toggles (pause rollout + disable/kill) build now per §7; analytics/anomaly/variant sliders stay deferred. Template drift needs no engine work: drift UI reads installs.templateVersion + snapshot templateRef{slug,version,definition_hash} against the registry.
+
+## 11. Explicitly out (with reason)
+
+Cross-agent orchestration (would fork the run state machine); per-resource ACLs beyond document source-ACLs; SCIM/domain-claim (deal-gated); conversation-history auto-ingest (proposals stay explicit); provider conversation IDs as canonical; in-house model stack; white-glove implementation dependency (templates + test-runs ARE the onboarding).
+
+## Acceptance (ship gate)
+
+- [ ] Install → mapped knowledge (incl. connector doc via rename) → test-run → PASS eval → publish on a clean org, first session, no entitlements, zero errors.
+- [ ] MISSING slugs, unresolved-pin refuse + acknowledged bypass (audited), BLOCK/WARN, drifted tool pins, unserved residency all render with fix paths.
+- [ ] Disjoint-pin isolation (two agents, same query); restricted doc hidden from unmapped caller, visible after email-auto-link; retired doc unreachable; tombstone on source delete.
+- [ ] Secrets never in responses/logs (grep-proven: fingerprints only, sealed blobs absent from list views, tokens body-only).
+- [ ] Rollback restores exact prior behavior (pinned-run test); kill switch blocks acceptance within one run cycle; burn-rate pauses production rollout without auto-resume, and the paused rollout banners its reason (manual actor vs burn-rate costs).
+- [ ] Caps pre-checked client-side; unknown keys 422 with paths; secret shapes rejected with field errors; multi-publish concurrency safe (advisory lock test); provider-credential create/rotate without fresh MFA proof gets step_up_required (revoke stays proof-free).
 
 ## References
 
-- `engine/src/modules/assistants/{schema,validation,dto,assistants.service,templates.service,manifest-resolution.service,tool-catalog.*,model-catalog.*,provider-credentials.*,rollouts.*,releases.controller,control-blocks.*}` — authority, validation, publish, governance
-- `engine/src/modules/knowledge/{schema,retrieval.service,ingestion.service}` + `conversations/mcp-authority.service.ts:1406-1549` — pool, ACL-before-scoring, context assembly (E-1 site)
-- `engine/src/modules/conversations/conversations.service.ts:363-389,606-650` — run acceptance pinning + manifest write
-- `products/agent-studio/contracts/agent-definition/v1.schema.json` + `packages/agent-definition/{validator,compiler}` + `templates/registry.json` — contract caps, 7 rejection classes, BOM shape
-- Research: Intercom Fin sources/audiences/multi-agent/Copilot; Copilot Studio model picker/admin controls/Agent Library/child-vs-connected; Salesforce managed/BYOLLM + SOMA/MOMA.
+- `engine/src/modules/assistants/{schema,validation.ts,dto.ts,assistants.{controller,service}.ts,templates.service.ts,manifest-resolution.service.ts,tool-catalog.*,model-catalog.*,provider-credentials.*,control-blocks.*,rollouts.*,releases.controller.ts,release-gate.ts,burn-rate.service.ts,residency.ts}` + `config-publish/payload-schemas.ts` (model catalog governance)
+- `engine/src/modules/knowledge/{schema,connectors.schema,artifacts.service,ingestion.service,retrieval.service.ts:54-200,knowledge.controller,connectors.{controller,service},harness-parity.controller,analytics.query.service,eval.service}` + `workers/{analytics-rollup.consumer,template-provisioning.consumer}`
+- `engine/src/modules/conversations/{schema,mcp-authority.service.ts (context assembly + SearchKnowledge),conversations.service.ts (run acceptance + manifests),escalations.{schema,service}}`
+- `products/agent-studio/contracts/agent-definition/v1.schema.json` + `packages/agent-definition/{validator,compiler}` + `templates/registry.json` + `scripts/neryva-template-lint.ts`
+- Research: Fin/Copilot/Agentforce/Sierra/Decagon/Kore.ai/Moveworks mappings (§2 of prior revision, retained in plan history).

@@ -564,6 +564,11 @@
       "since": "eng-0042",
       "note": "FL-3.12: A/B canary traffic split beside the atomic publish pointer; sticky per-conversation assignment. RLS org-scoped."
     },
+    "assistant_rollouts.paused_reason": {
+      "owner": "engine-ts",
+      "since": "eng-0058",
+      "note": "Pause attribution (paused_reason/by/at) so paused rollouts explain themselves on reads; manual pauses record the actor, burn-rate records reason+costs; expand-only columns."
+    },
     "run_judgments": {
       "owner": "engine-ts",
       "since": "eng-0042",

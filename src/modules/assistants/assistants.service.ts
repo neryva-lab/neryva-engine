@@ -19,7 +19,7 @@ import {
 import { validateAssistantPayload, assertPublishable, assistantPayloadSchema, rejectUnknownPayloadKeys, AssistantPayload } from './validation';
 import { evaluatePublishGate, throwGateRefusal } from './release-gate';
 import { TemplatesService } from './templates.service';
-import { ManifestResolutionService } from './manifest-resolution.service';
+import { ManifestResolutionService, unresolvedPinSlugs } from './manifest-resolution.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
 import { EvalService } from '../knowledge/eval.service';
@@ -378,7 +378,7 @@ export class AssistantsService {
    * Computes `nextVersion = max(version where status IN (PUBLISHED,RETIRED,ROLLED_BACK)) + 1`,
    * inserts a new PUBLISHED row, and moves `assistants.active_version_id` atomically.
    */
-  async publish(input: { orgId: string; assistantId: string; versionId: string; publishedBy: string }): Promise<AssistantVersion> {
+  async publish(input: { orgId: string; assistantId: string; versionId: string; publishedBy: string; acknowledgeDegradedKnowledge?: boolean }): Promise<AssistantVersion> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     assertUuid(input.versionId);
@@ -438,6 +438,7 @@ export class AssistantsService {
         normalized: validated.normalized,
         publishedBy: input.publishedBy,
         rollbackOf: null,
+        acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
       });
     });
 
@@ -450,6 +451,7 @@ export class AssistantsService {
       tenantId: input.orgId,
       details: { assistant_id: input.assistantId, version: published.version, hash: published.hash.slice(0, 16) },
     });
+    await this.auditDegradedBypass(input.orgId, published.id, input.publishedBy, input.acknowledgeDegradedKnowledge === true);
     AssistantsService.logger.log(`assistant ${input.assistantId} published v${published.version} for org ${input.orgId}`);
     return published;
   }
@@ -511,6 +513,7 @@ export class AssistantsService {
     assistantId: string;
     toVersionId: string;
     publishedBy: string;
+    acknowledgeDegradedKnowledge?: boolean;
   }): Promise<AssistantVersion> {
     const target = await this.getVersion(input.orgId, input.toVersionId);
     if (!target || target.assistantId !== input.assistantId) {
@@ -556,6 +559,7 @@ export class AssistantsService {
         normalized: validated.normalized,
         publishedBy: input.publishedBy,
         rollbackOf: target.id,
+        acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
       });
     });
     await this.audit.add({
@@ -567,6 +571,7 @@ export class AssistantsService {
       tenantId: input.orgId,
       details: { assistant_id: input.assistantId, to_version: target.version, new_version: published.version },
     });
+    await this.auditDegradedBypass(input.orgId, published.id, input.publishedBy, input.acknowledgeDegradedKnowledge === true);
     return published;
   }
 
@@ -997,6 +1002,31 @@ export class AssistantsService {
    * Resolution failures (missing pins, drifted catalog) abort the TX —
    * nothing half-publishes.
    */
+  /**
+   * Post-commit degraded-knowledge audit. Reads the COMMITTED snapshot (no
+   * TOCTOU — the gate already enforced inside the TX) and records the
+   * acknowledged slugs only when the bypass flag was actually set. Silent
+   * when unneeded so the audit stream stays signal-dense.
+   */
+  private async auditDegradedBypass(orgId: string, versionId: string, actorId: string, acknowledged: boolean): Promise<void> {
+    if (!acknowledged) {
+      return;
+    }
+    const snapRows = await this.db.withOrg(orgId, (tx) =>
+      tx.select({ knowledgePins: policySnapshots.knowledgePins }).from(policySnapshots).where(eq(policySnapshots.assistantVersionId, versionId)).limit(1),
+    );
+    const slugs = unresolvedPinSlugs({ knowledgePins: (snapRows[0]?.knowledgePins ?? []) as never });
+    await this.audit.add({
+      action: 'assistant.publish_degraded_acknowledged',
+      resourceType: 'assistant_version',
+      resourceId: versionId,
+      actorType: 'account',
+      actorId,
+      tenantId: orgId,
+      details: { unresolved_slugs: slugs },
+    });
+  }
+
   private async insertPublishedVersion(
     tx: NodePgDatabase,
     input: {
@@ -1007,6 +1037,7 @@ export class AssistantsService {
       normalized: AssistantPayload;
       publishedBy: string;
       rollbackOf: string | null;
+      acknowledgeDegradedKnowledge: boolean;
     },
   ): Promise<AssistantVersion> {
     const hash = hashPayload(input.normalized);
@@ -1017,6 +1048,16 @@ export class AssistantsService {
     // BLOCK gate alone was vacuous while nothing executed (GAP-04).
     await this.rejectUnmetRequiredChecks(tx, input.orgId, input.assistantId, hash);
     const manifest = await this.manifests.resolveForPublish(tx, input.orgId, input.assistantId, input.normalized);
+    // Degraded-knowledge gate: unresolved pins mean the agent would ship
+    // without context the maker assumes it has (retrieval fails closed).
+    // Refuse with the slugs — unless explicitly acknowledged (audited at the
+    // call site from the committed snapshot).
+    const degraded = unresolvedPinSlugs(manifest);
+    if (degraded.length > 0 && !input.acknowledgeDegradedKnowledge) {
+      throw ApiError.validation({
+        knowledge_pins: `unresolved knowledge sources cannot publish: ${degraded.join(', ')} — ingest and map the documents, or acknowledge degraded knowledge explicitly`,
+      });
+    }
     const rows = await tx
       .insert(assistantVersions)
       .values({

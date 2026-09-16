@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { makePool, TEST_DATABASE_URL } from '../helpers/db';
+import { makePool, withBypassRaw, TEST_DATABASE_URL } from '../helpers/db';
 
 /**
  * Phase 6 integration — outbox dispatcher, inbox dedup, dead-letter, replay.
@@ -70,42 +70,32 @@ describeIfDb('outbox dispatcher (requires DATABASE_URL)', () => {
   });
 
   afterAll(async () => {
-    const client = await pool.connect();
-    try {
-      await client.query(`select set_config('app.engine_bypass', 'on', true)`);
+    await withBypassRaw(pool, async (client) => {
       await client.query(`delete from outbox_events where organization_id = $1::uuid`, [orgId]);
       await client.query(`delete from inbox_events where consumer_name like 'test-%'`);
-    } finally {
-      client.release();
-      await pool.end();
-    }
+    });
+    await pool.end();
   });
 
   async function insertEvent(eventType: string): Promise<string> {
     const eventId = randomUUID();
-    const client = await pool.connect();
-    try {
-      await client.query(`select set_config('app.engine_bypass', 'on', true)`);
+    await withBypassRaw(pool, async (client) => {
       await client.query(
         `insert into outbox_events (event_id, aggregate_type, aggregate_id, organization_id, event_type, partition_key)
          values ($1::uuid, 'test', gen_random_uuid(), $2::uuid, $3, $4::uuid)`,
         [eventId, orgId, eventType, orgId],
       );
-    } finally {
-      client.release();
-    }
+    });
     return eventId;
   }
 
   async function statusOf(eventId: string): Promise<string> {
-    const client = await pool.connect();
-    try {
-      await client.query(`select set_config('app.engine_bypass', 'on', true)`);
+    let status = 'missing';
+    await withBypassRaw(pool, async (client) => {
       const res = await client.query(`select status from outbox_events where event_id = $1::uuid`, [eventId]);
-      return res.rows[0]?.status ?? 'missing';
-    } finally {
-      client.release();
-    }
+      status = (res.rows[0] as { status?: string } | undefined)?.status ?? 'missing';
+    });
+    return status;
   }
 
   it('publishes to registered consumers and records inbox dedup', async () => {
@@ -115,10 +105,9 @@ describeIfDb('outbox dispatcher (requires DATABASE_URL)', () => {
     expect(recorded.filter((r) => r.eventId === eventId)).toHaveLength(1);
 
     // Redelivery of the same event skips the consumer (inbox PROCESSED).
-    const client = await pool.connect();
-    await client.query(`select set_config('app.engine_bypass', 'on', true)`);
-    await client.query(`update outbox_events set status='PENDING', next_attempt_at=now() where event_id=$1::uuid`, [eventId]);
-    client.release();
+    await withBypassRaw(pool, async (client) => {
+      await client.query(`update outbox_events set status='PENDING', next_attempt_at=now() where event_id=$1::uuid`, [eventId]);
+    });
     await dispatcher.tick();
     expect(recorded.filter((r) => r.eventId === eventId)).toHaveLength(1); // still once
   });
@@ -135,11 +124,10 @@ describeIfDb('outbox dispatcher (requires DATABASE_URL)', () => {
     expect(await statusOf(eventId)).toBe('RETRY_WAIT');
 
     // Force next_attempt_at now; the consumer succeeds on the retry.
-    const client = await pool.connect();
-    await client.query(`select set_config('app.engine_bypass', 'on', true)`);
     handled.push(eventId);
-    await client.query(`update outbox_events set next_attempt_at=now() where event_id=$1::uuid`, [eventId]);
-    client.release();
+    await withBypassRaw(pool, async (client) => {
+      await client.query(`update outbox_events set next_attempt_at=now() where event_id=$1::uuid`, [eventId]);
+    });
     await dispatcher.tick();
     expect(await statusOf(eventId)).toBe('PUBLISHED');
   });

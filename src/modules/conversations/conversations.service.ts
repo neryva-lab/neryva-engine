@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
@@ -1925,14 +1926,8 @@ function normalizeFollowups(input?: string[]): string[] {
 }
 
 function isUniqueViolation(err: unknown, constraint: string): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === '23505' &&
-    'constraint' in err &&
-    (err as { constraint?: unknown }).constraint === constraint
-  );
+  const pg = pgViolation(err);
+  return pg.code === '23505' && pg.constraint === constraint;
 }
 
 function validateMessageContent(content: unknown): void {

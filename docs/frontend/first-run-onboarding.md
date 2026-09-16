@@ -1,6 +1,6 @@
 # First-Run Flow — Account → Organization → Dashboard
 
-> Status: proposed plan (not yet implemented).
+> Status: spec DONE 2026-09-15 (build pending; Engine seam `PATCH /auth/me` `@Idempotent` landed 47d6cd8 — `engine/src/modules/identity/account.controller.ts:99-108`).
 > Owner: Frontend team + Engine platform team.
 > Scope: **the first 60 seconds** — what a brand-new customer sees between OAuth callback and a working Agent Studio dashboard. Decides the open question: auto-org vs setup form.
 > Non-goals: changing Engine creation semantics, billing/entitlement math, or the MCP contract. All Engine behavior cited below already exists; this plan only sequences UI around it.

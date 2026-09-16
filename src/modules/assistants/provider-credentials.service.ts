@@ -1,6 +1,7 @@
 import { and, eq, ne } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { envelopeEncrypt, sha256Hex } from '../../common/infra/crypto/envelope';
@@ -56,7 +57,7 @@ function assertSecret(secret: string): void {
 
 /** The DB never returns raw 23505s — an (org, provider, external_ref) collision is a client conflict. */
 function mapCredentialUniqueViolation(err: unknown): never {
-  const code = (err as { code?: string } | null)?.code;
+  const { code } = pgViolation(err);
   if (code === '23505') {
     throw ApiError.conflict('a credential with this external ref already exists for this org and provider');
   }

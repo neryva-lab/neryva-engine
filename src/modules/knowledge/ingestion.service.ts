@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, lte, or, isNull, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { env } from '../../common/config/env';
 import { uuidv7 } from '../../common/ids/uuidv7';
@@ -231,7 +232,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
               .returning();
             documentId = docRows[0]?.id;
           } catch (err) {
-            if ((err as { code?: string }).code === '23505') {
+            if (pgViolation(err).code === '23505') {
               throw new Error(`source_slug '${slug}' is already taken in this organization`);
             }
             throw err;

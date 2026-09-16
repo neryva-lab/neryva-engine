@@ -81,10 +81,37 @@ export class JwksCustody {
     const { publicKeys } = this.load();
     return { keys: [...publicKeys.entries()].map(([kid, key]) => publicJwk(kid, key)) };
   }
+
+  /**
+   * Full private JWKs for the OP server constructor only (oidc-provider
+   * signs with these; its RSA validator requires d/p/q/dp/dq/qi).
+   * NEVER serve this over HTTP — the public `jwks()` stays the only
+   * published key set.
+   */
+  privateJwks(): { keys: Array<Record<string, unknown>> } {
+    const { privateKeys } = this.load();
+    return { keys: [...privateKeys.entries()].map(([kid, key]) => privateJwk(kid, key)) };
+  }
 }
 
 /** Export a public RSA KeyObject as an RFC 7517 JWK. */
 function publicJwk(kid: string, key: KeyObject): Record<string, unknown> {
   const jwk = key.export({ format: 'jwk' }) as { kty: string; n: string; e: string };
   return { kty: jwk.kty, n: jwk.n, e: jwk.e, use: 'sig', alg: 'RS256', kid };
+}
+
+/** Export a private RSA KeyObject as a full JWK (OP signing custody only). */
+function privateJwk(kid: string, key: KeyObject): Record<string, unknown> {
+  const jwk = key.export({ format: 'jwk' }) as {
+    kty: string;
+    n: string;
+    e: string;
+    d: string;
+    p: string;
+    q: string;
+    dp: string;
+    dq: string;
+    qi: string;
+  };
+  return { kty: jwk.kty, n: jwk.n, e: jwk.e, d: jwk.d, p: jwk.p, q: jwk.q, dp: jwk.dp, dq: jwk.dq, qi: jwk.qi, use: 'sig', kid };
 }

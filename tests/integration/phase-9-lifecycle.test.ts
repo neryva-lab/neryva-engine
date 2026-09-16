@@ -28,6 +28,7 @@ async function pgReachable(): Promise<boolean> {
 const describeIfDb = (await pgReachable()) ? describe : describe.skip;
 
 const payloadA = {
+  instructions: 'You are a helpful customer-support assistant. Be concise, friendly, and cite knowledge sources when used.',
   model_policy: { allowed_models: ['neryva-core-1'] },
   context_policy: {},
   tool_policy: {},
@@ -48,14 +49,13 @@ describeIfDb('lifecycle workflows (requires DATABASE_URL + migrations)', () => {
   beforeAll(async () => {
     const { DbService } = await import('../../src/common/infra/db/db.service');
     const { AuditService } = await import('../../src/common/audit/audit.service');
-    const { AssistantsService } = await import('../../src/modules/assistants/assistants.service');
-    const { ConversationsService } = await import('../../src/modules/conversations/conversations.service');
     const { RetentionPurgeService } = await import('../../src/modules/lifecycle/retention-purge.service');
     const { LifecycleService } = await import('../../src/modules/lifecycle/lifecycle.service');
+    const { buildAssistantsService, buildConversationsService } = await import('../helpers/db');
     db = new DbService();
     const audit = new AuditService(db);
-    assistants = new AssistantsService(db, audit);
-    conversations = new ConversationsService(db, audit);
+    assistants = await buildAssistantsService(db);
+    conversations = await buildConversationsService(db);
     retention = new RetentionPurgeService(db, { requireAvailable: () => undefined, deleteObject: async () => true } as never, audit);
     lifecycle = new LifecycleService(db, { requireAvailable: () => undefined, deleteObject: async () => true } as never, audit);
   });
@@ -63,12 +63,12 @@ describeIfDb('lifecycle workflows (requires DATABASE_URL + migrations)', () => {
   afterAll(async () => {
     await db.withBypass(async (tx) => {
       const { sql } = await import('drizzle-orm');
-      for (const id of assistantIds) {
-        await tx.execute(sql`delete from assistants where id = ${id}::uuid`);
-      }
       for (const id of conversationIds) {
         await tx.execute(sql`delete from tombstones where resource_id = ${id}::uuid`);
         await tx.execute(sql`delete from conversations where id = ${id}::uuid`);
+      }
+      for (const id of assistantIds) {
+        await tx.execute(sql`delete from assistants where id = ${id}::uuid`);
       }
       await tx.execute(sql`delete from purge_tasks where organization_id = ${orgId}::uuid`);
       await tx.execute(sql`delete from legal_holds where organization_id = ${orgId}::uuid`);
@@ -79,9 +79,14 @@ describeIfDb('lifecycle workflows (requires DATABASE_URL + migrations)', () => {
   });
 
   async function newConversation(): Promise<string> {
-    const assistant = await assistants.create({ orgId, name: `lc-${randomUUID().slice(0, 8)}`, createdBy: actor });
+    const { assistant } = await assistants.create({ orgId, name: `lc-${randomUUID().slice(0, 8)}`, createdBy: actor });
     assistantIds.push(assistant.id);
-    const draft = await assistants.createVersion({ orgId, assistantId: assistant.id, payload: payloadA, createdBy: actor });
+    const draft = await assistants.createVersion({
+      orgId,
+      assistantId: assistant.id,
+      payload: payloadA as unknown as import('../../src/modules/assistants/validation').AssistantPayload,
+      createdBy: actor,
+    });
     await assistants.publish({ orgId, assistantId: assistant.id, versionId: draft.id, publishedBy: actor });
     const conversation = await conversations.createConversation({ orgId, assistantId: assistant.id, createdBy: actor });
     conversationIds.push(conversation.id);
@@ -110,7 +115,7 @@ describeIfDb('lifecycle workflows (requires DATABASE_URL + migrations)', () => {
     expect(tombstone).not.toBeNull();
 
     // Stale ID reads are rejected after purge.
-    await expect(retention.assertNotTombstoned('conversation', conversationId)).rejects.toMatchObject({ code: 'conflict' });
+    await expect(retention.assertNotTombstoned('conversation', conversationId)).rejects.toMatchObject({ code: 'resource_purged' });
   });
 
   it('an active legal hold blocks the purge; release unblocks', async () => {

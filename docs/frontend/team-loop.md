@@ -1,10 +1,10 @@
 # Team Loop — Invite → Accept → First Collaborative Action
 
-> Status: proposed plan (not yet implemented).
+> Status: spec DONE + Engine work-list IMPLEMENTED 2026-09-15 (build pending; adee441 + 885fe36 + bc8bd82 landed).
 > Owner: Frontend team + Engine platform team.
 > Scope: **the complete membership lifecycle in the console** — invite creation, email delivery, accept (new + existing users), role model and admin powers, the new-member dashboard experience, suspension/removal/leave/transfer, and the audit/notification evidence for each step.
 > Non-goals: changing Engine membership semantics (all cited behavior already exists), SCIM/domain-claim/SSO-JIT (deferred until deal-size justifies — hooks noted in §7), per-resource ACLs (org roles only this release).
-> Explicitly IN scope as specified engine additions (§8 work-list, not yet implemented): delivery-method flag on invite create/resend + one-time `accept_url`, and the public invite-preview endpoint. Everything else cited already exists.
+> Explicitly IN scope as specified-then-implemented engine additions (§8 work-list, IMPLEMENTED 2026-09-15): delivery-method flag on invite create/resend + one-time `accept_url` (`engine/src/modules/organizations/invites.service.ts:61-108`), and the public invite-preview endpoint (`POST console/org/invites/:inviteId/preview`, body token — `engine/src/modules/organizations/org.controller.ts:191-199`). Everything else cited already exists.
 > Research basis: stateful-pending-grant invite pattern (server-side grant + short-lived claim token + atomic accept binding session-email to invited-email), least-privilege role ladders (owner/admin/member/viewer + billing/developer here), suspend-before-remove offboarding, single-org-context enforcement.
 > Verification: Engine citations re-checked against `engine/src` on 2026-09-15. Paths repo-root-relative.
 
@@ -153,7 +153,7 @@ SCIM provisioning/deprovisioning, domain-claim auto-join, SSO-JIT, guest/restric
 
 ## 8. Engine work-list (IMPLEMENTED 2026-09-15 — was "specified, not yet implemented")
 
-Both landed, additive only (no migration, no semantic change to existing paths):
+All three landed, additive only (no migration, no semantic change to existing paths):
 
 1. **Delivery flag + one-time URL** (`org-members.controller.ts` DTOs, `invites.service.ts` create/resend). `delivery?: 'email'|'manual'` whitelisted at the DTO boundary and re-validated fail-closed in the service (`normalizeInviteDelivery`). Default `email` = previous behavior byte-for-byte. Manual skips `sendInviteEmail` and returns `{inviteId, email, accept_url, expires_at}` once; resend mirrors it. List/detail/extend/audit untouched and URL-free.
 2. **Public invite preview** (`POST console/org/invites/:inviteId/preview`, body `{token}`, `org.controller.ts` + `invites.service.ts` preview). Hash-only lookup, uniform `404 invitation` for every non-usable state (missing/bad-token/revoked/accepted/expired/locked included), no attempt registration, no audit row, IP-scoped `org-invite-preview` rate limit, masked `email_hint` (`maskInviteEmail`: first local char + full domain). POST-not-GET deliberately: proxies/CDNs and Engine's own Fastify request lines log url+query outside the redact paths — bodies appear in neither.

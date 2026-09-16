@@ -40,6 +40,13 @@ const PLATFORM_PREFIXES: readonly string[] = [
   '/webhooks/stripe', // the H-1 payment rail's provider callback (HMAC-authenticated)
   '/webhooks/channels', // the channel plane's platform callbacks (signature/secret-authenticated)
   '/v1/deployments', // the deployment product's engine-owned runtime plane
+  '/v1/conversations', // the conversation plane's engine-owned REST surface (messages, runs, event streams)
+  // the Neryva MCP authority/observation RPC surface (ConnectRPC, run-scoped
+  // capability auth). One entry per service: the dotted service path means a
+  // bare package prefix can never match, so each service declares itself and
+  // a future service fails boot loudly until declared here.
+  '/neryva.mcp.run.v1.RunAuthorityService',
+  '/neryva.mcp.run.v1.RunObservationService',
   '/metrics', // observability exposition
 ];
 

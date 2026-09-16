@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { assistantRollouts, assistantVersions, AssistantRollout, RolloutVariant } from './schema';
@@ -164,7 +165,7 @@ export class RolloutsService {
       if (err instanceof ApiError) throw err;
       // Concurrent promotion at the same address: the partial unique index
       // admits one active row — the loser retries against fresh state.
-      if (typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505') {
+      if (typeof err === 'object' && err !== null && pgViolation(err).code === '23505') {
         throw ApiError.conflict('concurrent release update at this address — reload and retry', { environment, channel });
       }
       throw err;

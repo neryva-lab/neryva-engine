@@ -7,7 +7,7 @@ import { ApiError } from '../../common/http/api-error';
 import { createHash } from 'node:crypto';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { conversations, messages, runs } from '../conversations/schema';
-import { dataAccessRecords, exportRequests, ExportRequest, legalHolds, LegalHold, tombstones } from './lifecycle.schema';
+import { dataAccessRecords, exportRequests, ExportRequest, legalHolds, LegalHold, purgeTasks, tombstones } from './lifecycle.schema';
 import { assertUuid } from './assert';
 
 /**
@@ -68,6 +68,27 @@ export class LifecycleService {
     if (rows.length === 0) {
       throw ApiError.notFound('active legal hold');
     }
+    const hold = rows[0];
+    // Re-arm purges this hold was blocking: tasks parked in `blocked` for the
+    // released scope return to `check_holds` so the next worker tick resumes
+    // them. Without this, `blocked` is a dead end — claimOne only picks up
+    // pending/in_progress — and release would never unblock anything.
+    // Scope predicate mirrors stepCheckHolds: org-wide holds cover every task
+    // in the org, scoped holds cover their exact (scopeType, scopeId).
+    const scopeMatch =
+      hold.scopeType === 'organization' || hold.scopeId === null
+        ? undefined
+        : and(eq(purgeTasks.scopeType, hold.scopeType), eq(purgeTasks.scopeId, hold.scopeId));
+    await this.db.withBypass(async (tx) => {
+      await tx
+        .update(purgeTasks)
+        .set({ state: 'in_progress', step: 'check_holds', lastError: null, lockedAt: null })
+        .where(
+          scopeMatch === undefined
+            ? and(eq(purgeTasks.organizationId, input.orgId), eq(purgeTasks.state, 'blocked'))
+            : and(eq(purgeTasks.organizationId, input.orgId), eq(purgeTasks.state, 'blocked'), scopeMatch),
+        );
+    });
     await this.audit.add({
       action: 'legal_hold.released',
       resourceType: 'legal_hold',
@@ -77,7 +98,7 @@ export class LifecycleService {
       tenantId: input.orgId,
       details: {},
     });
-    return rows[0];
+    return hold;
   }
 
   async listHolds(orgId: string): Promise<LegalHold[]> {

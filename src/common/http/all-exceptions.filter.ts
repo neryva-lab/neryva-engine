@@ -1,6 +1,6 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
-import { FastifyReply } from 'fastify';
 import { ApiError } from './api-error';
+import { asReplySurface } from './reply-surface';
 import { captureEngineError } from '../observability/sentry';
 
 /**
@@ -18,7 +18,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
-    const response = ctx.getResponse<FastifyReply>();
+    // Raw ServerResponse under middie/getResponse paths, FastifyReply under
+    // @Res() — the adapter normalizes both (see reply-surface.ts).
+    const response = asReplySurface(ctx.getResponse());
     const request = ctx.getRequest<{ requestId?: string; url?: string }>();
 
     const requestId = request?.requestId ?? 'unknown';

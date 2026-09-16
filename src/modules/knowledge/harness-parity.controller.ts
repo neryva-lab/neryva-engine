@@ -193,14 +193,6 @@ export class HarnessParityController {
 
   // ── FL-2.28 memory management (GDPR-friendly) ─────────────────────────────
 
-  @Get('memories')
-  @Roles('owner', 'admin', 'developer', 'reader')
-  @UseGuards(OrgRolesGuard)
-  async memories(@Param('orgId') orgId: string) {
-    assertUuid(orgId, 'orgId');
-    return { memories: await this.memory.list(orgId, { limit: 100 }) };
-  }
-
   @Post('memories')
   @Roles('owner', 'admin', 'developer')
   @UseGuards(OrgRolesGuard)

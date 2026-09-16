@@ -38,13 +38,15 @@ async function pgReachable(): Promise<boolean> {
 const describeIfDb = (await pgReachable()) ? describe : describe.skip;
 
 const payloadA = {
+  instructions: 'You are a helpful customer-support assistant. Be concise, friendly, and cite knowledge sources when used.',
   model_policy: { allowed_models: ['neryva-core-1'] },
   context_policy: { history_limit: 20 },
-  tool_policy: { tools: [{ name: 'search_docs', access: 'read' }] },
+  tool_policy: { tools: [{ name: 'search_knowledge', access: 'read' }] },
   guardrail_policy: { input_policy: 'default', output_policy: 'brand-safe' },
 };
 
 const payloadB = {
+  instructions: 'You are a strict customer-support assistant. Be concise and friendly.',
   model_policy: { allowed_models: ['neryva-core-2'] },
   context_policy: { history_limit: 40 },
   tool_policy: { tools: [] },
@@ -60,10 +62,9 @@ describeIfDb('assistants publish invariants (requires DATABASE_URL + migrations)
 
   beforeAll(async () => {
     const { DbService } = await import('../../src/common/infra/db/db.service');
-    const { AuditService } = await import('../../src/common/audit/audit.service');
-    const { AssistantsService } = await import('../../src/modules/assistants/assistants.service');
+    const { buildAssistantsService } = await import('../helpers/db');
     db = new DbService();
-    service = new AssistantsService(db, new AuditService(db));
+    service = await buildAssistantsService(db);
   });
 
   afterAll(async () => {
@@ -78,13 +79,18 @@ describeIfDb('assistants publish invariants (requires DATABASE_URL + migrations)
   });
 
   async function newAssistant(name: string): Promise<string> {
-    const row = await service.create({ orgId, name, createdBy: actor });
-    createdAssistantIds.push(row.id);
-    return row.id;
+    const { assistant } = await service.create({ orgId, name, createdBy: actor });
+    createdAssistantIds.push(assistant.id);
+    return assistant.id;
   }
 
   async function draft(assistantId: string, payload: typeof payloadA | typeof payloadB) {
-    return service.createVersion({ orgId, assistantId, payload, createdBy: actor });
+    return service.createVersion({
+      orgId,
+      assistantId,
+      payload: payload as unknown as import('../../src/modules/assistants/validation').AssistantPayload,
+      createdBy: actor,
+    });
   }
 
   it('publish materializes a hash-equal policy snapshot in the same transaction', async () => {
@@ -108,8 +114,11 @@ describeIfDb('assistants publish invariants (requires DATABASE_URL + migrations)
     const first = await draft(assistantId, payloadA);
     await service.publish({ orgId, assistantId, versionId: first.id, publishedBy: actor });
 
-    const samePayload = await draft(assistantId, payloadA);
-    await expect(service.publish({ orgId, assistantId, versionId: samePayload.id, publishedBy: actor })).rejects.toMatchObject({
+    // One-draft workspace: the same content is re-saved through updateDraft
+    // (same-hash save succeeds idempotently), then re-published.
+    const current = await service.getVersion(orgId, first.id);
+    await service.updateDraft({ orgId, assistantId, versionId: first.id, payload: payloadA, expectedHash: current!.hash, actorId: actor });
+    await expect(service.publish({ orgId, assistantId, versionId: first.id, publishedBy: actor })).rejects.toMatchObject({
       code: 'conflict',
     });
   });
@@ -119,21 +128,24 @@ describeIfDb('assistants publish invariants (requires DATABASE_URL + migrations)
     const d1 = await draft(assistantId, payloadA);
     const published = await service.publish({ orgId, assistantId, versionId: d1.id, publishedBy: actor });
 
-    await draft(assistantId, payloadB);
+    const current = await service.getVersion(orgId, d1.id);
+    await service.updateDraft({ orgId, assistantId, versionId: d1.id, payload: payloadB, expectedHash: current!.hash, actorId: actor });
+    const v2 = await service.publish({ orgId, assistantId, versionId: d1.id, publishedBy: actor });
     const reread = await service.getVersion(orgId, published.id);
     expect(reread!.hash).toBe(published.hash);
     expect(reread!.modelPolicy).toEqual(published.modelPolicy);
 
     const active = await service.get(orgId, assistantId);
-    expect(active!.activeVersionId).toBe(published.id);
+    expect(active!.activeVersionId).toBe(v2.id);
   });
 
   it('rollback inserts a NEW published version restoring the target payload', async () => {
     const assistantId = await newAssistant(`pub-rb-${randomUUID().slice(0, 8)}`);
     const v1draft = await draft(assistantId, payloadA);
     const v1 = await service.publish({ orgId, assistantId, versionId: v1draft.id, publishedBy: actor });
-    const v2draft = await draft(assistantId, payloadB);
-    const v2 = await service.publish({ orgId, assistantId, versionId: v2draft.id, publishedBy: actor });
+    const current = await service.getVersion(orgId, v1draft.id);
+    await service.updateDraft({ orgId, assistantId, versionId: v1draft.id, payload: payloadB, expectedHash: current!.hash, actorId: actor });
+    const v2 = await service.publish({ orgId, assistantId, versionId: v1draft.id, publishedBy: actor });
 
     const rolled = await service.rollback({ orgId, assistantId, toVersionId: v1.id, publishedBy: actor });
     expect(rolled.version).toBe(3);
@@ -150,30 +162,35 @@ describeIfDb('assistants publish invariants (requires DATABASE_URL + migrations)
     expect(v2.status).toBe('PUBLISHED');
   });
 
-  it('concurrent publishes serialize to distinct fully-written versions (advisory lock)', async () => {
+  it('concurrent publishes serialize: one wins fully-written, the loser gets a typed conflict (advisory lock)', async () => {
+    // One-draft workspace: two publishes of the SAME draft race. The
+    // per-assistant advisory lock serializes the transactions, so exactly
+    // one inserts v1 and the loser deterministically hits the no-op guard
+    // (the winner already moved the active pointer onto this hash) — a
+    // typed 409, never a partial row or a raw 23505.
     const assistantId = await newAssistant(`pub-conc-${randomUUID().slice(0, 8)}`);
     const c1 = await draft(assistantId, payloadA);
-    const c2 = await draft(assistantId, payloadB);
 
     const settled = await Promise.allSettled([
       service.publish({ orgId, assistantId, versionId: c1.id, publishedBy: actor }),
-      service.publish({ orgId, assistantId, versionId: c2.id, publishedBy: actor }),
+      service.publish({ orgId, assistantId, versionId: c1.id, publishedBy: actor }),
     ]);
 
     const fulfilled = settled.filter((s) => s.status === 'fulfilled') as PromiseFulfilledResult<import('../../src/modules/assistants/schema').AssistantVersion>[];
-    expect(fulfilled).toHaveLength(2);
+    const rejected = settled.filter((s) => s.status === 'rejected') as PromiseRejectedResult[];
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0].reason as { code?: string }).code).toBe('conflict');
 
-    const versions = fulfilled.map((s) => s.value.version).sort((a, b) => a - b);
-    expect(versions).toEqual([1, 2]);
-    for (const v of fulfilled.map((s) => s.value)) {
-      // No partially written rows: every published version carries hash + policies + snapshot.
-      expect(v.hash).toHaveLength(64);
-      expect(v.publishedAt).not.toBeNull();
-      const snapshot = await service.getSnapshotForVersion(orgId, assistantId, v.id);
-      expect(snapshot).not.toBeNull();
-    }
+    const winner = fulfilled[0].value;
+    expect(winner.version).toBe(1);
+    // No partially written rows: the published version carries hash + policies + snapshot.
+    expect(winner.hash).toHaveLength(64);
+    expect(winner.publishedAt).not.toBeNull();
+    const snapshot = await service.getSnapshotForVersion(orgId, assistantId, winner.id);
+    expect(snapshot).not.toBeNull();
 
     const active = await service.get(orgId, assistantId);
-    expect([c1.id, c2.id]).toContain(active!.activeVersionId);
+    expect(active!.activeVersionId).toBe(winner.id);
   });
 });

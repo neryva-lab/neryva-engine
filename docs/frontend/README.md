@@ -21,11 +21,11 @@ The **complete, build-ready specification set for the Neryva console and product
 1. **`frontend_implementation_plan.md`** (277 lines) — the master plan. Three-shell layout (marketing static pages stay JSON-fed; `/platform` org admin; `/agent-studio` product console), OAuth-only auth migration (delete password/OTP stack, test bypasses, legacy axios client), per-view Engine endpoint map, React Query/SSE/RBAC/step-up conventions, static-pages freeze, quality gates per milestone, M0→M6 build order. Start here for any console work.
 2. **`first-run-onboarding.md`** (169 lines) — the first 60 seconds: OAuth callback → one prefilled screen (display name → `PATCH /auth/me`, workspace name → `PATCH settings`) → dashboard + live checklist. Invited-user path (redeem → land in inviter org, no setup screen), stash lifecycle, failure-copy table with exact Engine semantics, locked decisions (§6: activation = first successful run; value-first trial; user-created projects; template-first activation).
 3. **`team-loop.md`** (172 lines) — the complete membership lifecycle: invite create (email+role+delivery), URL-first manual delivery with shown-once links + `mailto:` drafts, atomic email-bound redeem, role matrix with owner-only reserves, suspend-before-remove offboarding, new-member dashboard, notification wiring, acceptance gates. Includes the specified-then-implemented Engine work (§8).
-4. **`agent-setup.md`** (116 lines) — agent authoring + knowledge + providers: data model, setup state machine, knowledge-first flow (uploads/connectors/mapping/enforced pins/permission sync), template install, two-tier provider config, authoring validation reference, test→evaluate→publish→operate, full endpoint+role table, error catalog. See §10 for the two still-open decisions.
+4. **`agent-setup.md`** (117 lines) — agent authoring + knowledge + providers: data model, setup state machine, knowledge-first flow (uploads/connectors/mapping/enforced pins/permission sync), template install, two-tier provider config, authoring validation reference, test→evaluate→publish→operate, full endpoint+role table, error catalog. §10 locked (refuse pins, operate split — see Locked decisions below).
 
 ## Locked decisions (do not relitigate without new evidence)
 
-- OAuth-only auth; no passwords/OTP in console; tokens never in `localStorage`.
+- OAuth-only auth; no passwords/OTP in console; session tokens never in `localStorage` (sole exception: short-TTL single-purpose `neryva.pending_invite` stash per `team-loop.md` accept flow — not a session token).
 - Personal org auto-created on signup; first run renames in place (no second org, no personal→team conversion).
 - Value-first trial (runs work with no entitlement row); user-created projects; template-first activation.
 - URL-first invite delivery (email retained); per-email binding is the real control; open reusable links rejected.
@@ -33,10 +33,10 @@ The **complete, build-ready specification set for the Neryva console and product
 - Per-agent knowledge enforced at retrieval (pins), immutable slugs, permission sync default-deny.
 - Engine stays system of record; Studio stays headless; no second runtime/state machine, ever.
 
-## Still open (the only undecided items across all four files)
+## Still open (none — both prior items locked 2026-09-15 in `agent-setup.md:92-95`)
 
-1. Unresolved knowledge pins at publish: warn vs refuse (§10 of agent-setup.md).
-2. Operate UI in the setup plan vs a later incident-grade spec (§10 of agent-setup.md).
+1. ~~Unresolved knowledge pins at publish: warn vs refuse~~ → **REFUSE (locked).** 422 with slugs unless `acknowledge_degraded_knowledge: true` (audited as `assistant.publish_degraded_acknowledged` — `engine/src/modules/assistants/assistants.service.ts:1212-1216`).
+2. ~~Operate UI split~~ → **SPLIT (locked).** Emergency toggles (pause rollout + disable/kill) build now; analytics/anomaly/variant sliders deferred. Burn-rate is service-only (`engine/src/modules/billing/billing.worker.ts:61-62` hourly `billing.burn_sweep`); operate UI surfaces rollout state + `paused_reason/by/at` + `GET :assistantId/knowledge-health` (`engine/src/modules/assistants/assistants.controller.ts:122-127`).
 
 ## Working rules (how to keep quality up)
 
@@ -44,7 +44,7 @@ The **complete, build-ready specification set for the Neryva console and product
 - **Paths are repo-root-relative** (`neryva_studio/`): Engine files as `engine/src/...`, website as `console/neryva-website/src/...`, Studio/MCP as `products/...`.
 - **Docs describe; code decides.** If doc and code disagree, code wins and the doc gets amended in the same session. Never edit Engine behavior to match a doc — spec the change as a work-list item first.
 - **No new Engine endpoints invented in passing.** A missing surface gets a named subsection (contract, roles, errors, acceptance) marked `REQUIRED ENGINE ADDITION` until implemented, then flipped to implemented with the commit reference.
-- **Frontend never:** holds provider secrets, canonical state, MCP capability tokens, or authz decisions; imports `@neryva_data/products/*` as runtime data; stores tokens in `localStorage`; invents IDs/versions/entitlements.
+- **Frontend never:** holds provider secrets, canonical state, MCP capability tokens, or authz decisions; imports `@neryva_data/products/*` as runtime data; stores session tokens in `localStorage` (`neryva.pending_invite` invite-stash excepted); invents IDs/versions/entitlements.
 - **Every mutation spec includes:** idempotency-key behavior, exact error strings with UI copy, role gating (UI hide + server enforce), and the retry/conflict path. Skipped states (seat-full, expired invite, BLOCK decision) always specify the exit, never a dead end.
 - **Commit hygiene:** docs changes commit with the code they describe; one ledger/task ID per PR where applicable; run `typecheck` + relevant `vitest` before claiming done.
 

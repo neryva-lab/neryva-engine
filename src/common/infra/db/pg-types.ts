@@ -17,3 +17,28 @@ types.setTypeParser(1114, keepAsString);
 types.setTypeParser(3802, keepAsString);
 
 export const PG_TYPE_PARSERS_INSTALLED = true;
+
+/**
+ * Unwrap a PostgreSQL violation out of drizzle's error envelope.
+ *
+ * drizzle-orm wraps driver failures in DrizzleQueryError ("Failed query:
+ * ...") with the node-postgres DatabaseError at `.cause` — reading .code /
+ * .constraint off the wrapper always yields undefined, so every unique-
+ * violation mapper MUST go through here or raw 23505s escape as 500s.
+ * Walks the cause chain (mocked drivers nest deeper) and returns the first
+ * {code, constraint} pair found, or nulls when there is no PG violation.
+ */
+export function pgViolation(err: unknown): { code?: string; constraint?: string } {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth += 1) {
+    const shaped = current as { code?: unknown; constraint?: unknown; cause?: unknown };
+    if (typeof shaped.code === 'string') {
+      return {
+        code: shaped.code,
+        constraint: typeof shaped.constraint === 'string' ? shaped.constraint : undefined,
+      };
+    }
+    current = shaped.cause;
+  }
+  return {};
+}

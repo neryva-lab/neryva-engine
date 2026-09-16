@@ -407,6 +407,20 @@
       "when": 1789257600008,
       "tag": "0058_rollout_pause_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1789482523490,
+      "tag": "0059_legacy_standalone",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1789496866901,
+      "tag": "0060_rls_empty_tenant_guard",
+      "breakpoints": true
     }
   ]
 }

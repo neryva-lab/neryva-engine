@@ -141,16 +141,19 @@
       "note": "durable push-notification ledger for satellite config fanout; satellites ACK after applying; the satellites sweeper reads it for config_drift incidents (documented read-only seam); ACKed rows age out per CONFIG_NOTIFICATION_RETENTION_DAYS."
     },
     "tenants": {
-      "owner": "python",
-      "shared": "engine INSERTs new orgs (personal-org autocreation); UPDATEs features jsonb (staff flags, deletion markers — documented seam); Python remains the DDL authority. DDL transfer at agent-runtime handover A-1."
+      "owner": "engine-ts",
+      "since": "eng-0059",
+      "shared": "standalone-engine DDL (drizzle/0059): no Python service exists in engine-only lanes, so engine-ts owns creation with the exact Python TenantModel column set (legacy-schema.ts, models.py 2026-08-23) — IF NOT EXISTS, forward-compatible. Engine INSERTs orgs, UPDATEs features jsonb. If the shared-DB topology returns, Python Alembic re-asserts evolution authority."
     },
     "api_keys": {
-      "owner": "python",
-      "shared": "engine READS for L2 verification; the keys module WRITES issue/revoke rows and org deletion revokes org keys (dual-write seam, opened engine-side pre-A-1 per the EEP P5 note); additive columns project_id/owner_account_id/org_id land via Python Alembic 0017; full write authority transfers at handover A-1."
+      "owner": "engine-ts",
+      "since": "eng-0059",
+      "shared": "standalone-engine DDL (drizzle/0059): engine READS for L2 verification and the keys module WRITES issue/revoke rows (dual-write seam opened pre-A-1); column set mirrors Python models.py 2026-08-23. If the shared-DB topology returns, Python Alembic re-asserts evolution authority (incl. project_id/owner_account_id/org_id additive columns)."
     },
     "audit_events": {
-      "owner": "python",
-      "shared": "engine APPENDS identity/org events to the single hash-chained trail (doc-06 §10.7) using byte-identical chain semantics; never UPDATEs/DELETEs. DDL transfer with policy publishing (A-4)."
+      "owner": "engine-ts",
+      "since": "eng-0059",
+      "shared": "standalone-engine DDL (drizzle/0059): engine APPENDS identity/org events to the single hash-chained trail (doc-06 §10.7) using byte-identical chain semantics; never UPDATEs/DELETEs. If the shared-DB topology returns, both writers keep byte-identical semantics and Python Alembic re-asserts evolution authority."
     },
     "spend_events": {
       "owner": "python",

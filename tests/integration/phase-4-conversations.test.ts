@@ -28,9 +28,10 @@ async function pgReachable(): Promise<boolean> {
 const describeIfDb = (await pgReachable()) ? describe : describe.skip;
 
 const payloadA = {
+  instructions: 'You are a helpful customer-support assistant. Be concise, friendly, and cite knowledge sources when used.',
   model_policy: { allowed_models: ['neryva-core-1'] },
   context_policy: { history_limit: 20 },
-  tool_policy: { tools: [{ name: 'search_docs', access: 'read' }] },
+  tool_policy: { tools: [{ name: 'search_knowledge', access: 'read' }] },
   guardrail_policy: { input_policy: 'default', output_policy: 'brand-safe' },
 };
 
@@ -45,23 +46,21 @@ describeIfDb('conversation plane (requires DATABASE_URL + migrations)', () => {
 
   beforeAll(async () => {
     const { DbService } = await import('../../src/common/infra/db/db.service');
-    const { AuditService } = await import('../../src/common/audit/audit.service');
-    const { AssistantsService } = await import('../../src/modules/assistants/assistants.service');
-    const { ConversationsService } = await import('../../src/modules/conversations/conversations.service');
+    const { buildAssistantsService, buildConversationsService } = await import('../helpers/db');
     db = new DbService();
-    const audit = new AuditService(db);
-    assistants = new AssistantsService(db, audit);
-    conversations = new ConversationsService(db, audit);
+    assistants = await buildAssistantsService(db);
+    conversations = await buildConversationsService(db);
   });
 
   afterAll(async () => {
-    if (assistantIds.length > 0) {
+    // Children before parents: conversations FK-reference assistants.
+    if (assistantIds.length > 0 || conversationIds.length > 0) {
       await db.withBypass(async (tx) => {
-        for (const id of assistantIds) {
-          await tx.execute((await import('drizzle-orm')).sql`delete from assistants where id = ${id}::uuid`);
-        }
         for (const id of conversationIds) {
           await tx.execute((await import('drizzle-orm')).sql`delete from conversations where id = ${id}::uuid`);
+        }
+        for (const id of assistantIds) {
+          await tx.execute((await import('drizzle-orm')).sql`delete from assistants where id = ${id}::uuid`);
         }
       });
     }
@@ -69,9 +68,14 @@ describeIfDb('conversation plane (requires DATABASE_URL + migrations)', () => {
   });
 
   async function publishedAssistant(): Promise<string> {
-    const assistant = await assistants.create({ orgId, name: `conv-${randomUUID().slice(0, 8)}`, createdBy: actor });
+    const { assistant } = await assistants.create({ orgId, name: `conv-${randomUUID().slice(0, 8)}`, createdBy: actor });
     assistantIds.push(assistant.id);
-    const draft = await assistants.createVersion({ orgId, assistantId: assistant.id, payload: payloadA, createdBy: actor });
+    const draft = await assistants.createVersion({
+      orgId,
+      assistantId: assistant.id,
+      payload: payloadA as unknown as import('../../src/modules/assistants/validation').AssistantPayload,
+      createdBy: actor,
+    });
     await assistants.publish({ orgId, assistantId: assistant.id, versionId: draft.id, publishedBy: actor });
     return assistant.id;
   }
@@ -159,10 +163,12 @@ describeIfDb('conversation plane (requires DATABASE_URL + migrations)', () => {
     const events = await conversations.listRunEvents(orgId, accepted.run_id);
     expect(events.events.some((e) => e.eventType === 'run.completed')).toBe(true);
 
-    // Terminal run accepts no further turns.
-    await expect(
-      conversations.acceptMessage({ orgId, principalId: actor, conversationId: conversation.id, content: { text: 'again' } }),
-    ).rejects.toBeTruthy();
+    // A completed run frees the conversation for the next turn — the
+    // one-active-turn invariant is per-concurrent-run, not per-conversation
+    // lifetime (the pagination test drives 3 sequential turns the same way).
+    const again = await conversations.acceptMessage({ orgId, principalId: actor, conversationId: conversation.id, content: { text: 'again' } });
+    expect(again.message_id).toBeDefined();
+    expect(again.run_id).not.toBe(accepted.run_id);
   });
 
   it('cancel transitions a live run and rejects terminal reruns', async () => {

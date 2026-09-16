@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
@@ -555,7 +556,7 @@ export class AssistantsService {
       model_policy: draft.modelPolicy as AssistantPayload['model_policy'],
       context_policy: draft.contextPolicy as AssistantPayload['context_policy'],
       tool_policy: draft.toolPolicy as AssistantPayload['tool_policy'],
-      knowledge_policy: draft.knowledgePolicy as AssistantPayload['knowledge_policy'],
+      knowledge_policy: (draft.knowledgePolicy ?? undefined) as AssistantPayload['knowledge_policy'],
       guardrail_policy: draft.guardrailPolicy as AssistantPayload['guardrail_policy'],
       instructions: (draft.instructions ?? undefined) as AssistantPayload['instructions'],
       model_params: (draft.modelParams ?? undefined) as AssistantPayload['model_params'],
@@ -686,7 +687,7 @@ export class AssistantsService {
       model_policy: target.modelPolicy as AssistantPayload['model_policy'],
       context_policy: target.contextPolicy as AssistantPayload['context_policy'],
       tool_policy: target.toolPolicy as AssistantPayload['tool_policy'],
-      knowledge_policy: target.knowledgePolicy as AssistantPayload['knowledge_policy'],
+      knowledge_policy: (target.knowledgePolicy ?? undefined) as AssistantPayload['knowledge_policy'],
       guardrail_policy: target.guardrailPolicy as AssistantPayload['guardrail_policy'],
       instructions: (target.instructions ?? undefined) as AssistantPayload['instructions'],
       model_params: (target.modelParams ?? undefined) as AssistantPayload['model_params'],
@@ -1087,7 +1088,7 @@ export class AssistantsService {
           model_policy: version.modelPolicy as AssistantPayload['model_policy'],
           context_policy: version.contextPolicy as AssistantPayload['context_policy'],
           tool_policy: version.toolPolicy as AssistantPayload['tool_policy'],
-          knowledge_policy: version.knowledgePolicy as AssistantPayload['knowledge_policy'],
+          knowledge_policy: (version.knowledgePolicy ?? undefined) as AssistantPayload['knowledge_policy'],
           guardrail_policy: version.guardrailPolicy as AssistantPayload['guardrail_policy'],
           instructions: (version.instructions ?? undefined) as AssistantPayload['instructions'],
           model_params: (version.modelParams ?? undefined) as AssistantPayload['model_params'],
@@ -1360,8 +1361,9 @@ function assertUuid(id: string): void {
  * means a DRAFT already exists — publish or delete it first.
  */
 function mapAssistantUniqueViolation(err: unknown, name: string): unknown {
-  const pg = err as { code?: string; constraint?: string };
-  if (pg?.code !== '23505') {
+  // drizzle wraps driver errors (DrizzleQueryError.cause) — read code via pgViolation or raw 23505s escape.
+  const pg = pgViolation(err);
+  if (pg.code !== '23505') {
     return err;
   }
   if (pg.constraint === 'uq_assistants_org_name') {

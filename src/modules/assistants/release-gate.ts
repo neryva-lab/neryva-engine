@@ -75,7 +75,17 @@ export async function evaluatePublishGate(
     where i.assistant_id = ${assistantId}::uuid
     limit 1
   `);
-  const policy = (policyRows.rows[0] as { release_policy?: { required?: unknown } } | undefined)?.release_policy;
+  const policyRaw = (policyRows.rows[0] as { release_policy?: unknown } | undefined)?.release_policy;
+  const policy: { required?: unknown } | null =
+    typeof policyRaw === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(policyRaw) as { required?: unknown };
+          } catch {
+            return null;
+          }
+        })()
+      : (policyRaw as { required?: unknown } | undefined) ?? null;
   const required = Array.isArray(policy?.required) ? (policy?.required as unknown[]).filter((c): c is string => typeof c === 'string') : [];
 
   const decisionRows = await tx.execute(sql`
@@ -87,7 +97,7 @@ export async function evaluatePublishGate(
       and av.hash = ${hash}
       and er.state = 'completed'
       and er.decision is not null
-    order by er.finished_at desc nulls last, er.created_at desc
+    order by er.finished_at desc nulls last, er.started_at desc
     limit 1
   `);
   const decision = (decisionRows.rows[0] as { decision?: string } | undefined)?.decision ?? null;

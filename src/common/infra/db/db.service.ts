@@ -74,7 +74,10 @@ export class DbService implements OnModuleDestroy {
   async withOrg<T>(orgId: string, fn: (tx: NodePgDatabase) => Promise<T>, options?: TxOptions): Promise<T> {
     return this.db.transaction(async (tx) => {
       await this.applySessionTimeouts(tx as NodePgDatabase, options);
+      // Scope BOTH GUCs: a pooled connection may carry a stale session-level
+      // bypass from an older writer, and must never inherit one here.
       await tx.execute(sql`select set_config('app.current_tenant', ${orgId}, true)`);
+      await tx.execute(sql`select set_config('app.engine_bypass', 'off', true)`);
       return fn(tx as NodePgDatabase);
     });
   }
@@ -87,7 +90,11 @@ export class DbService implements OnModuleDestroy {
   async withBypass<T>(fn: (tx: NodePgDatabase) => Promise<T>, options?: TxOptions): Promise<T> {
     return this.db.transaction(async (tx) => {
       await this.applySessionTimeouts(tx as NodePgDatabase, options);
+      // Clear the tenant alongside: a pooled connection may carry a stale
+      // session-level tenant (placeholder GUCs revert to '' at COMMIT, and a
+      // stale real UUID would be worse — silent cross-tenant visibility).
       await tx.execute(sql`select set_config('app.engine_bypass', 'on', true)`);
+      await tx.execute(sql`select set_config('app.current_tenant', '', true)`);
       return fn(tx as NodePgDatabase);
     });
   }

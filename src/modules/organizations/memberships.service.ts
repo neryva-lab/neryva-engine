@@ -1,6 +1,7 @@
 import { and, asc, count, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
@@ -47,8 +48,8 @@ const LAST_ACTIVE_WRITE_THRESHOLD_MS = 5 * 60 * 1000;
  * instead of leaking a raw 23505; every other error propagates unchanged.
  */
 function translateOwnerInvariant(err: unknown): unknown {
-  const pg = err as { code?: string; constraint?: string };
-  if (pg?.code === '23505' && pg?.constraint === 'uq_one_active_owner_per_org') {
+  const pg = pgViolation(err);
+  if (pg.code === '23505' && pg.constraint === 'uq_one_active_owner_per_org') {
     return ApiError.conflict('the organization already has an active owner — transfer ownership instead', { reason: 'owner_already_present' });
   }
   return err;

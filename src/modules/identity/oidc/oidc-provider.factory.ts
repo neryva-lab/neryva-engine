@@ -36,7 +36,9 @@ export class OidcProviderFactory {
     const { Provider } = oidc as typeof import('oidc-provider');
 
     const keys = this.custody.load();
-    const jwks = this.custody.jwks();
+    // Private JWKs: oidc-provider signs with these (its RSA validator
+    // requires d/p/q/dp/dq/qi). The published JWKS stays public-only.
+    const jwks = this.custody.privateJwks();
     const currentKid = keys.currentKid;
     const cookieKeys = env.IDENTITY_COOKIE_KEYS.split(',').map((k) => k.trim()).filter((k) => k.length >= 16);
     if (cookieKeys.length === 0) {

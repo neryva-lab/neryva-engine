@@ -130,7 +130,7 @@ export class RunDispatchConsumer implements OutboxConsumer {
       // Full run-authority op set — a dispatch token missing an op (e.g.
       // 'context' or 'checkpoint') fails the RPC mid-run with no way for
       // Studio to re-mint (no L1 credentials on the runtime).
-      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe', 'escalation'],
+      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe', 'escalation', 'artifact'],
       subject: 'agent-studio-runtime',
     });
 

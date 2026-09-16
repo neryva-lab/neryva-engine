@@ -6,6 +6,7 @@ import { map, catchError, mergeMap } from 'rxjs/operators';
 import { createHash } from 'node:crypto';
 import { RedisService } from '../infra/redis.service';
 import { ApiError } from './api-error';
+import { asReplySurface } from './reply-surface';
 import { Principal } from '../auth/principal';
 
 export const IDEMPOTENT_KEY = 'idempotent';
@@ -37,6 +38,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
     const http = context.switchToHttp();
     const request = http.getRequest<FastifyRequest & { principal?: Principal }>();
     const response = http.getResponse<FastifyReply>();
+    // Raw ServerResponse under some paths — normalize status/header setters.
+    const reply = asReplySurface(response);
 
     const headerValue = request.headers[IDEMPOTENCY_HEADER];
     const idempotencyKey = (Array.isArray(headerValue) ? headerValue[0] : headerValue)?.trim();
@@ -62,8 +65,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
       if (stored.fingerprint !== fingerprint) {
         throw new ApiError(409, 'idempotency_conflict', 'Idempotency-Key was already used with a different request body');
       }
-      response.status(stored.status);
-      response.header(IDEMPOTENT_REPLAY_HEADER, 'true');
+      reply.status(stored.status);
+      reply.setHeader(IDEMPOTENT_REPLAY_HEADER, 'true');
       // Resolve synchronously with the stored body.
       return new Observable<unknown>((subscriber) => {
         subscriber.next(stored.body);

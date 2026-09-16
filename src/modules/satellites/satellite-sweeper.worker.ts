@@ -179,11 +179,11 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
   private async detectConfigDrift(): Promise<string[]> {
     const threshold = new Date(Date.now() - env.SATELLITE_CONFIG_ACK_DRIFT_SECONDS * 1000).toISOString();
     const rows = await this.db.root.execute<{ satellite_key: string; oldest: string; n: string }>(sql`
-      select cn.satellite_key, min(cn.created_at)::text as oldest, count(*) as n
+      select cn.satellite_key, min(cn.notified_at)::text as oldest, count(*) as n
       from config_notifications cn
       join satellites s on s.key = cn.satellite_key
       where cn.acked_at is null
-        and cn.created_at < ${threshold}::timestamptz
+        and cn.notified_at < ${threshold}::timestamptz
         and s.status = 'active'
       group by cn.satellite_key
     `);

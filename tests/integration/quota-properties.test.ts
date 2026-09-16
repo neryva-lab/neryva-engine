@@ -76,10 +76,10 @@ describeIfDb('quota reservation properties (requires DATABASE_URL)', () => {
   });
 
   it('concurrent reserves at the boundary admit exactly one winner', async () => {
-    const dimension = `race-${randomUUID().slice(0, 8)}`;
+    const dimension = 'requests';
     const attempts = await Promise.allSettled([
-      ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 9, limit: 10, reference: 'race-1' }),
-      ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 9, limit: 10, reference: 'race-2' }),
+      ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 9, limit: 10, reference: `race-1-${randomUUID().slice(0, 4)}` }),
+      ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 9, limit: 10, reference: `race-2-${randomUUID().slice(0, 4)}` }),
     ]);
     const fulfilled = attempts.filter((a) => a.status === 'fulfilled');
     const rejected = attempts.filter((a) => a.status === 'rejected');
@@ -89,7 +89,7 @@ describeIfDb('quota reservation properties (requires DATABASE_URL)', () => {
   });
 
   it('the boundary itself is deterministic: exactly-at-limit passes, one-over fails', async () => {
-    const dimension = `edge-${randomUUID().slice(0, 8)}`;
+    const dimension = 'model_tokens';
     await ledger.reserve({ orgId, dimension, quantity: 2, currentUsage: 8, limit: 10, reference: 'edge-ok' });
     await expect(
       ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 8, limit: 10, reference: 'edge-over' }),
@@ -97,14 +97,14 @@ describeIfDb('quota reservation properties (requires DATABASE_URL)', () => {
   });
 
   it('same-reference redelivery is NOT deduped here (caller TX owns it)', async () => {
-    const dimension = `redeliver-${randomUUID().slice(0, 8)}`;
+    const dimension = 'model_cost';
     const first = await ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 0, limit: 100, reference: 'same-ref' });
     const second = await ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 0, limit: 100, reference: 'same-ref' });
     expect(first.id).not.toBe(second.id);
   });
 
   it('commit/release are exactly-once in every order', async () => {
-    const dimension = `once-${randomUUID().slice(0, 8)}`;
+    const dimension = 'storage_bytes';
     const committed = await ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 0, limit: 10, reference: 'commit-me' });
     await ledger.commit(committed.id);
     await expect(ledger.commit(committed.id)).rejects.toMatchObject({ code: 'conflict' });
@@ -117,7 +117,7 @@ describeIfDb('quota reservation properties (requires DATABASE_URL)', () => {
   });
 
   it('lapsed reservations reap and can never commit afterwards', async () => {
-    const dimension = `lapse-${randomUUID().slice(0, 8)}`;
+    const dimension = 'ingestion_work';
     const reservation = await ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 0, limit: 10, reference: 'lapse-me', ttlSeconds: 0 });
     // No count assertion: expireLapsed reaps globally, and a parallel suite
     // may reap this row first — either way the row ends EXPIRED, which is
@@ -128,7 +128,7 @@ describeIfDb('quota reservation properties (requires DATABASE_URL)', () => {
   });
 
   it('a full dimension in one org never blocks another org', async () => {
-    const dimension = `shared-${randomUUID().slice(0, 8)}`;
+    const dimension = 'tool_operations';
     await ledger.reserve({ orgId, dimension, quantity: 10, currentUsage: 0, limit: 10, reference: 'fill-a' });
     await expect(
       ledger.reserve({ orgId, dimension, quantity: 1, currentUsage: 0, limit: 10, reference: 'over-a' }),

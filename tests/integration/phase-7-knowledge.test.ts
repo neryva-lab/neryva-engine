@@ -45,19 +45,21 @@ describeIfDb('knowledge memory + retrieval guards (requires DATABASE_URL)', () =
     const { MemoryService } = await import('../../src/modules/knowledge/memory.service');
     const { RetrievalService } = await import('../../src/modules/knowledge/retrieval.service');
     const { EmbeddingService } = await import('../../src/modules/knowledge/embedding.service');
+    const { RerankerService } = await import('../../src/modules/knowledge/reranker.port');
+    const { QueryRewriteService } = await import('../../src/modules/knowledge/query-rewrite.port');
     db = new DbService();
     const audit = new AuditService(db);
-    memory = new MemoryService(db, audit);
-    retrieval = new RetrievalService(db, new EmbeddingService());
+    const embedding = new EmbeddingService();
+    memory = new MemoryService(db, audit, embedding);
+    // RerankerService + QueryRewriteService are zero-arg: env-unset defaults
+    // are noop/identity, so no external endpoints are touched.
+    retrieval = new RetrievalService(db, embedding, new RerankerService(), new QueryRewriteService());
   });
 
   afterAll(async () => {
-    await db.withBypass(async (tx) => {
-      const { sql } = await import('drizzle-orm');
-      await tx.execute(sql`delete from memory_proposals where organization_id = ${orgId}::uuid`);
-      await tx.execute(sql`delete from memory_items where organization_id = ${orgId}::uuid`);
-      await tx.execute(sql`delete from retrieval_acl where organization_id = ${orgId}::uuid`);
-    });
+    const { cleanupOrg } = await import('../helpers/db');
+    await cleanupOrg(pool, [orgId]);
+    pool.end().catch(() => undefined);
     await db.onModuleDestroy();
   });
 

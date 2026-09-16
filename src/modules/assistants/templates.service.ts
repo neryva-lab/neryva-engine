@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
@@ -534,7 +535,7 @@ function assertSlug(slug: string): void {
 }
 
 function isUniqueViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';
+  return typeof err === 'object' && err !== null && pgViolation(err).code === '23505';
 }
 
 // ── Semver release comparison (never ORDER BY version in SQL) ───────────

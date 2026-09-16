@@ -44,9 +44,10 @@ async function bootstrap(): Promise<void> {
       loggerInstance: rootLogger,
       disableRequestLogging: env.NODE_ENV === 'test',
     }),
-    // No Nest default body parsers: this file registers exactly the two the
-    // product needs below (urlencoded for the Apple callback, JSON with
-    // rawBody preservation for Stripe HMAC). Nest 11's adapter otherwise
+    // No Nest default body parsers: this file registers exactly what the
+    // product needs below (urlencoded for the Apple callback; webhook raw
+    // bytes via a preParsing hook so the default JSON parser stays
+    // shadowable for the Connect plugin). Nest 11's adapter otherwise
     // registers its own urlencoded parser at init and collides with ours
     // (FastifyError: already present).
     { logger, bodyParser: false },
@@ -77,22 +78,44 @@ async function bootstrap(): Promise<void> {
     },
   );
 
-  // JSON bodies keep a pristine copy of the raw payload on request.rawBody:
-  // the Stripe webhook verifies its HMAC over the EXACT bytes Stripe signed
-  // (re-serializing the parsed object would change them). Otherwise identical
-  // to Fastify's default JSON parser.
-  app.getHttpAdapter().getInstance().addContentTypeParser(
-    'application/json',
-    { parseAs: 'string' },
-    (request: unknown, body: string, done: (err: Error | null, result?: unknown) => void) => {
-      try {
-        (request as { rawBody?: string }).rawBody = body;
-        done(null, JSON.parse(body));
-      } catch (err) {
-        done(err as Error);
+  // JSON bodies keep a pristine copy of the raw payload on request.rawBody,
+  // but ONLY for inbound webhook receivers (POST /webhooks/* — Stripe HMAC
+  // plus Meta/X/Telegram channel signature checks all run over the EXACT
+  // bytes the sender signed; re-serializing the parsed object would change
+  // them). Every other route uses Fastify's default JSON parser untouched.
+  //
+  // Why a preParsing hook and not a second global JSON parser: the Neryva MCP
+  // Connect plugin installs an encapsulated noop application/json override,
+  // and Fastify 5 refuses to shadow an already-customized JSON parser
+  // (FST_ERR_CTP_ALREADY_PRESENT). The default parser stays shadowable, so
+  // the hook is the only mechanism that preserves both raw bytes (webhooks)
+  // and Connect RPC bodies on one Fastify instance.
+  //
+  // Invariant: every inbound webhook receiver MUST live under /webhooks/.
+  // A receiver added elsewhere silently loses rawBody (handlers fall back to
+  // '' and reject signatures) — keep the prefix, keep the bytes.
+  app.getHttpAdapter().getInstance().addHook('preParsing', async (request: { method?: string; url?: string; rawBody?: string }, _reply: unknown, payload: AsyncIterable<Buffer>) => {
+    const method = request.method ?? '';
+    const url = (request.url ?? '').split('?')[0];
+    if ((method !== 'POST' && method !== 'PUT' && method !== 'PATCH') || !url.startsWith('/webhooks/')) {
+      return payload;
+    }
+    const cap = Math.max(env.CHANNELS__WEBHOOK_MAX_EVENT_BYTES, 1_048_576);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of payload) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buf.length;
+      if (size > cap) {
+        throw Object.assign(new Error('webhook payload too large'), { statusCode: 413 });
       }
-    },
-  );
+      chunks.push(buf);
+    }
+    const raw = Buffer.concat(chunks).toString('utf8');
+    request.rawBody = raw;
+    const { Readable } = await import('node:stream');
+    return Readable.from([Buffer.from(raw, 'utf8')]);
+  });
 
   app.useGlobalPipes(
     // Bodies are validated per-DTO; unknown fields are rejected so a client

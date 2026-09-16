@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { inArray, sql, and, eq } from 'drizzle-orm';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { EntitlementState, OrgAccessPort } from '../../common/auth/ports';
 import { EventBus, EngineEvents, AccountCreatedEvent } from '../../common/events/event-bus';
 import { AuditService } from '../../common/audit/audit.service';
@@ -123,8 +124,8 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
         return { orgId, slug };
       } catch (err) {
         lastErr = err;
-        const pg = err as { code?: string };
-        if (input.slug && pg?.code === '23505') {
+        const pg = pgViolation(err);
+        if (input.slug && pg.code === '23505') {
           // A user-chosen slug is an immutable choice: collision is a 409, never a retry.
           throw ApiError.conflict('that workspace address is already taken', { reason: 'slug_taken' });
         }

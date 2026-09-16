@@ -18,6 +18,7 @@ import { IdentityPublicService } from './identity-public.service';
 import { LoginInteractionController } from './login-interaction.controller';
 import { MfaService } from './mfa.service';
 import { OidcProviderController } from './oidc-provider.controller';
+import { OnboardingService } from './onboarding.service';
 import { PasswordService } from './password.service';
 import { JwksCustody } from './oidc/jwks-custody';
 import { OIDC_PROVIDER } from './oidc/oidc-provider.token';
@@ -174,6 +175,7 @@ export class IdentityBoot implements OnModuleInit {
     OidcDrizzleAdapter,
     OidcProviderFactory,
     OidcProviderHolder,
+    OnboardingService,
     PasswordService,
     SocialAccountService,
     SocialLoginService,

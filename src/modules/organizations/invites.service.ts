@@ -118,6 +118,22 @@ export class InvitesService {
     return rows.map(toView);
   }
 
+  /**
+   * Detail read (team-loop ledger T1): single pending-history row by id+org.
+   * Hash-free by construction — the row stores `token_hash` only, and `toView`
+   * never emits it, so List / Detail / Extend uniformly never return URL/token.
+   */
+  async detail(orgId: string, inviteId: string): Promise<InviteView> {
+    const rows = await this.db.withOrg(orgId, (tx) =>
+      tx.select().from(orgInvites).where(and(eq(orgInvites.id, inviteId), eq(orgInvites.orgId, orgId))).limit(1),
+    );
+    const invite = rows[0];
+    if (!invite) {
+      throw ApiError.notFound('invitation');
+    }
+    return toView(invite);
+  }
+
   async revoke(input: { orgId: string; inviteId: string; actorId: string }): Promise<void> {
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx.select().from(orgInvites).where(and(eq(orgInvites.id, input.inviteId), eq(orgInvites.orgId, input.orgId))).limit(1),

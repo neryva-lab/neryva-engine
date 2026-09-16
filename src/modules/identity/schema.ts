@@ -53,6 +53,42 @@ export const accounts = pgTable('accounts', {
   updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('uq_accounts_email').on(t.email)]);
 
+/**
+ * Onboarding completion + consent evidence (first-run ledger F1-7, eng-0061).
+ *
+ * `welcome_completed_at IS NULL` is the gate: the account still owes the
+ * welcome screen. This replaces the old wall-clock proxy (a 30-minute window
+ * on `accounts.created_at`), which provably stranded real users — the first
+ * social account in this deployment completed its first console token
+ * exchange 75.8 minutes after creation (earlier logins died mid-flow), so the
+ * window had closed and the screen never appeared at all.
+ *
+ * Absence of a row IS the normal first-login state (nothing is written until
+ * the account either finishes or skips the screen) — readers must treat
+ * "no row" exactly like "welcome_completed_at is null".
+ *
+ * Consent is versioned: `consent_version` records the terms text the account
+ * agreed to, so bumping LEGAL__TERMS_VERSION re-opens the gate once.
+ *
+ * Not RLS-scoped (mirrors `accounts`): this is a platform-plane row, the
+ * engine is the only writer, and every read filters one account id
+ * explicitly (`db.root` + `eq(accountId)`), with no tenant dimension to
+ * isolate.
+ */
+export const accountOnboarding = pgTable('account_onboarding', {
+  accountId: uuid('account_id').primaryKey().references(() => accounts.id, { onDelete: 'cascade' }),
+  /** NULL = has never completed the welcome screen (gate OPEN). */
+  welcomeCompletedAt: timestamp('welcome_completed_at', { withTimezone: true, mode: 'string' }),
+  /** True when the account explicitly skipped personalization — still consented. */
+  welcomeSkipped: boolean('welcome_skipped').notNull().default(false),
+  /** The terms version this account consented to (evidence, not a cache). */
+  consentVersion: varchar('consent_version', { length: 32 }),
+  consentAcceptedAt: timestamp('consent_accepted_at', { withTimezone: true, mode: 'string' }),
+  consentSource: varchar('consent_source', { length: 32 }),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+});
+
 export const accountCredentials = pgTable('account_credentials', {
   id: uuid('id').primaryKey().defaultRandom(),
   accountId: uuid('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),

@@ -5,6 +5,16 @@
 > in §7). No test files were executed during this build (standing instruction);
 > pure helpers (`isFreshFirstRun`, stash, `parseActivation`) are written
 > side-effect-free for unit coverage as follow-up.
+>
+> **F1-7 AMENDMENT (2026-09-17, shipped + live-verified): the freshness window is
+> REPLACED by durable server state.** The 30-minute wall clock silently skipped
+> the screen for the exact users it existed to serve — measured: the first social
+> account completed its first console token exchange 75.8 minutes after creation
+> (earlier logins died mid-flow in the social/token-CORS era), so the window had
+> closed, `/platform/welcome` never rendered, and nothing could bring it back.
+> The gate is now `account.onboarding.needed` from `GET /auth/me`, backed by the
+> engine table `account_onboarding` (drizzle `0061`) + `POST
+> /auth/me/onboarding/welcome`, which records MANDATORY consent. See §3 and §7.0.
 > Owner: Frontend team + Engine platform team.
 > Parent spec: `first-run-onboarding.md` (spec DONE 2026-09-15, decisions locked there).
 > Scope: the three missing acceptance items — **F1** first-run screen, **F2** invite
@@ -180,19 +190,27 @@ everyone else (has orgs, returning, invited) never sees it.
 NOT the OP callback — the callback stays dumb and routes here via the post-login
 router).
 
-**Freshness rule (server-derived, no client flag):**
+**Gate rule (F1-7 — durable server state, no client flag, NO wall clock):**
 
 ```text
-fresh-first-run = authenticated
-  AND contexts.length === 1
-  AND account.created_at within FIRST_RUN_WINDOW of now (proposed: 30 min)
+onboarding.needed = authenticated
+  AND (no account_onboarding row OR welcome_completed_at IS NULL
+       OR recorded consent_version ≠ current LEGAL__TERMS_VERSION)
   AND no usable pending-invite stash (invite path takes precedence — F2)
 ```
 
-Rationale: a fresh account (C2) with exactly one context (C1) is a first login;
-a returning single-org user has an old account row → dashboard. 0 or 2+ contexts
-→ picker/home, never the screen (parent spec §1). Window value is a ledger constant;
-change requires amendment + reason.
+Rationale: "has this account seen the welcome screen and consented?" is a fact
+about the account, not about the clock. The replaced heuristic (`contexts.length
+=== 1` AND `created_at` within 30 min) conflated "account is new" with "account
+was onboarded" and failed whenever the first login failed mid-flow — the screen
+became unreachable forever. Absence of a row is the normal first-login state
+(nothing is written until the account finishes or explicitly skips). Consent is
+versioned: bumping `LEGAL__TERMS_VERSION` re-opens the gate exactly once per
+account, with the previous consent preserved as evidence until re-accepted.
+Enforcement lives in THREE places reading the same server truth: the post-login
+router, the console route gate (`requireOnboardedSession`), and
+`/platform/welcome` itself. Only a positive `needed === true` redirects — a
+failed lookup advances (F1-6 discipline).
 
 **Post-login router** (lives in the callback success path, before navigate):
 
@@ -225,16 +243,20 @@ handleAuthCallback OK
 - [ ] F1-1 Extend `EngineAccount` (`hooks/auth/useAccount.ts:13-20`) with
       `created_at: string` (+ `last_login_at` for future use) — endpoint already
       returns them (C2), no engine change.
-- [ ] F1-2 `FIRST_RUN_WINDOW` constant + `isFreshFirstRun(contexts, account,
-      now)` pure helper (unit-covered without running app tests here: pure fn).
+- [x] F1-2 (SUPERSEDED by F1-7) ~~`FIRST_RUN_WINDOW` constant + `isFreshFirstRun`~~
+      → replaced by `needsOnboarding(onboarding)` (`lib/engine/first-run.ts`) +
+      `resolveOnboardingState` (engine `onboarding.service.ts`); the wall clock is gone.
 - [ ] F1-3 Post-login router in callback path (stash check → parallel
       contexts+account → welcome vs return target).
 - [ ] F1-4 `/platform/welcome` route + `WelcomePage`/`FirstRunSection` (auth chrome
       family — reuse `LoginSection` visual language, new file, no fork of `/auth`).
 - [ ] F1-5 The two writes via `allSettled` + per-write idempotency keys +
       advance-anyway + 422 field errors.
-- [ ] F1-6 Abandon/resume: no client persistence — reload mid-screen re-derives
-      freshness from server; second login never reappears (account aged out).
+- [x] F1-6 Abandon/resume (F1-7 form): no client persistence — the gate is
+      `account.onboarding.needed`, so the screen REAPPEARS on the next app
+      navigation until it is completed once (consent + continue, or consent +
+      skip); after completion it never reappears. A failed lookup advances and
+      never traps.
 - [ ] F1-7 Copy + a11y pass (labels, alerts, focus, keyboard-only run).
 
 **Edge cases (must hold):** OAuth email matches existing account → old account row →
@@ -418,7 +440,31 @@ rebuild first. 2026-09-16 pm: dist rebuilt WITH the social two-leg finish;
 the website also needs a restart — vite.config gained `/auth/auth → :3001`
 and `changeOrigin:false` on `/engine` + `/login`):
 
-0. Social pre-flight (new 2026-09-16 pm, blocks every leg below): restart engine
+0. F1-7 onboarding gate (VERIFIED LIVE 2026-09-17; migration `0061` applied,
+   engine :3001 rebuilt + running): `dev_scripts/qa-onboarding-gate.ps1` —
+   ALL PASS. A real email-code OAuth round-trip proves: `GET /auth/me` carries
+   `account.onboarding` with `needed=true` + a `terms_version` on a brand-new
+   account; the open gate is stable across reads (no wall clock); completion
+   WITHOUT consent → 400; a stale `terms_version` → 409; consent (+ skip) →
+   201 with `needed=false`, `welcome_skipped=true`, `consent_version` recorded;
+   `GET /auth/me` agrees (durable server state); a replay keeps the FIRST
+   completion stamp; org contexts = 1. Audit rows
+   `account.onboarding_completed` are written per completion. Suites: engine
+   27 files/175 tests + console 13 files/83 tests green; `tsc` + `eslint`
+   clean in both repos. The pre-existing first user (rushaashish12@gmail.com)
+   is deliberately left un-onboarded (`needed=true`) as the acceptance
+   subject: its next login MUST land on `/platform/welcome` — the exact case
+   the freshness window broke (first console grant landed 75.8 min after
+   account creation, so `contexts.length === 1` held but the window had
+   closed and the screen was never shown).
+   DIAGNOSTIC NOTE (cost half a day here — do not repeat it): `org_memberships`
+   and every tenant-furniture table run under ENABLE + **FORCE** ROW LEVEL
+   SECURITY. A raw psql/node read without `app.engine_bypass='on'` returns
+   ZERO rows even when rows exist. The "personal org missing / 0 memberships"
+   reading was exactly this artifact — the org existed (audited `org.created`
+   21 ms after `account.created`). Always read through engine endpoints, or
+   set the bypass GUC inside a transaction (`zz-*.mjs` probes show the shape).
+0b. Social pre-flight (new 2026-09-16 pm, blocks every leg below): restart engine
    (rebuilt dist) AND website (new proxy table). Authorize with
    `&connection=google` → 303 `/login/:uid/social/google` with
    `Set-Cookie: _interaction … Path=/login/:uid/social/google` (proves the

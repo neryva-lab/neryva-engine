@@ -10,6 +10,7 @@ import { PasswordService } from './password.service';
 import { AccountsService } from './accounts.service';
 import { AccountDeletionService } from './account-deletion.service';
 import { EmailChangeService } from './email-change.service';
+import { OnboardingService, type OnboardingState } from './onboarding.service';
 
 /**
  * The account lifecycle surface — the audit's blockers I-1/I-2 plus the
@@ -25,6 +26,7 @@ import { EmailChangeService } from './email-change.service';
  *    GET  /auth/mfa
  *    POST /auth/me/delete[/cancel] · GET /auth/me/deletion-status   (H-6)
  *    POST /auth/me/email-change/request|confirm                     (H-7)
+ *    POST /auth/me/onboarding/welcome                               (F1-7)
  */
 @Controller()
 export class AccountController {
@@ -34,6 +36,7 @@ export class AccountController {
     private readonly accounts: AccountsService,
     private readonly deletion: AccountDeletionService,
     private readonly emailChange: EmailChangeService,
+    private readonly onboarding: OnboardingService,
   ) {}
 
   // ── public: password reset ────────────────────────────────────────────────
@@ -92,6 +95,10 @@ export class AccountController {
         status: account.status,
         last_login_at: account.lastLoginAt,
         created_at: account.createdAt,
+        // First-run gate (F1-7): server-derived, never a client flag. Every
+        // console entry point reads this one field to decide whether the
+        // account still owes /platform/welcome.
+        onboarding: await this.onboarding.stateFor(account.id),
       },
     };
   }
@@ -105,6 +112,43 @@ export class AccountController {
     }
     await this.accounts.updateDisplayName(principal.id, body.display_name.trim());
     return { ok: true };
+  }
+
+  // ── authenticated: first-run onboarding completion + consent (F1-7) ───────
+
+  /**
+   * Close the first-run gate. Consent is mandatory: without it the account
+   * would own an auto-provisioned workspace nobody agreed to (ADR-001 creates
+   * the personal org before this screen renders), so a body lacking
+   * `consented: true` is refused rather than recorded as agreement.
+   *
+   * `skipped` means "skip the optional name/workspace personalization" — it
+   * never bypasses the terms. Skipping is a legitimate completion, which is
+   * what makes the gate satisfiable exactly once without trapping anyone.
+   *
+   * 409 when the client is consenting against a stale terms version (the
+   * screen re-renders the current copy and asks again).
+   */
+  @Post('auth/me/onboarding/welcome')
+  @AuthLayer('l1')
+  @Idempotent()
+  @RateLimit({ name: 'onboarding-welcome', capacity: 10, refillPerSecond: 0.05, scope: 'principal' })
+  async completeOnboarding(
+    @CurrentPrincipal() principal: L1Principal,
+    @Body() body: { consented?: boolean; skipped?: boolean; terms_version?: string },
+  ): Promise<{ ok: true; onboarding: OnboardingState }> {
+    if (body.consented !== true) {
+      throw ApiError.validation({ consent: 'consent to the terms is required to continue' });
+    }
+    if (typeof body.terms_version !== 'string' || body.terms_version.length === 0) {
+      throw ApiError.validation({ terms_version: 'required' });
+    }
+    const onboarding = await this.onboarding.complete({
+      accountId: principal.id,
+      skipped: body.skipped === true,
+      termsVersion: body.terms_version,
+    });
+    return { ok: true, onboarding };
   }
 
   // ── authenticated: password ────────────────────────────────────────────────

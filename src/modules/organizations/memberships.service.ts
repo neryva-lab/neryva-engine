@@ -437,8 +437,13 @@ export class MembershipsService {
 
   async removeMember(input: { orgId: string; accountId: string; actorId: string; actorEmail?: string | null }): Promise<void> {
     const current = await this.getMember(input.orgId, input.accountId);
+    // team-loop §4 / ledger T4: owners are never removed — ownership moves
+    // only via explicit step-up-gated transfer. Removal of the sole owner is
+    // structurally impossible (partial unique index), but even a (transient)
+    // second owner must transfer out rather than be removed, so the rule is
+    // unconditional here instead of "another owner remains".
     if (current.role === 'owner') {
-      await this.assertAnotherOwnerRemains(input.orgId, input.accountId);
+      throw ApiError.forbidden('Owners cannot be removed — transfer ownership instead');
     }
     await this.db.withOrg(input.orgId, async (tx) => {
       await tx

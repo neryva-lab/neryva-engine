@@ -185,6 +185,18 @@ const envSchema = z.object({
   // envelope it already has.
   IDENTITY_AGENT_RUNTIME_SECRET: z.string().min(16).optional(),
 
+  // ── Onboarding consent (first-run welcome, ledger F1-7) ────────────────────
+  // The version stamped onto every consent record plus the outbound links the
+  // console renders beside the consent checkbox. Server-authoritative on
+  // purpose: bumping the version re-opens the welcome gate for every account
+  // exactly once (a client flag could never do that safely), and the recorded
+  // version tells us WHICH terms text each account agreed to.
+  // Empty URLs ⇒ the console renders the consent statement without links
+  // (never a dead '#' href).
+  LEGAL__TERMS_VERSION: z.string().min(1).max(32).default('2026-09-16'),
+  LEGAL__TERMS_URL: optionalUrl(),
+  LEGAL__PRIVACY_URL: optionalUrl(),
+
   // Neryva MCP authority (Phase 5). The capability signing key is base64 of
   // >= 32 random bytes; kid = its sha256 fingerprint. Fail-closed in
   // production when the MCP module is enabled (see production checks below).

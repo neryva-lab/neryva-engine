@@ -129,7 +129,7 @@ foreach ($pair in @(@{ urls=$MinioUrls; dst=$minioExe; name="minio.exe" }, @{ ur
         else { Remove-Item $pair.dst -Force -ErrorAction SilentlyContinue; throw "too small" }
       } catch { Write-Warn "Failed from $u : $_" }
     }
-    if (-not $done) { Write-Bad "All mirrors failed for $($pair.name) - install manually or use Docker: docker compose -f ops/docker-compose.yml up -d minio"; Write-Host "      Tried: $($pair.urls -join ', ')" -ForegroundColor DarkGray }
+    if (-not $done) { Write-Warn "All mirrors failed for $($pair.name) - dl.min.io no longer serves OSS binaries (archived upstream). S3 dev still works: start-infra.ps1 falls back to moto_server on :9000 (pip install 'moto[s3]') and creates buckets via the S3 API, no mc needed. Docker remains the fallback: docker compose -f ops/docker-compose.yml up -d minio"; Write-Host "      Tried: $($pair.urls -join ', ')" -ForegroundColor DarkGray }
   }
 }
 

@@ -38,10 +38,15 @@ if ($t.TcpTestSucceeded) {
   } catch { Warn "PING failed: $_" }
 } else { Bad "TCP closed - install Memurai or start WSL redis-server / Docker redis" }
 
-# MinIO
-Info "MinIO http://127.0.0.1:9000/minio/health/live + :9001"
-try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9000/minio/health/live" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { Ok "MinIO API live" } else { Warn "MinIO status $($r.StatusCode)" } } catch { Bad "MinIO API not reachable - run dev_scripts/start-infra.ps1" }
-try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9001" -UseBasicParsing -TimeoutSec 3; Ok "MinIO console reachable (http://127.0.0.1:9001)" } catch { Warn "MinIO console not reachable on :9001 (API may still be up)" }
+# S3 (:9000 is MinIO when licensed, else moto_server fallback from start-infra.ps1)
+Info "S3 http://127.0.0.1:9000 (MinIO health, else moto fallback)"
+$s3Ok = $false
+try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9000/minio/health/live" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { Ok "S3 live via MinIO API"; $s3Ok = $true } else { Warn "MinIO status $($r.StatusCode)" } } catch {}
+if (-not $s3Ok) {
+  try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9000/moto-api" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { Ok "S3 live via moto fallback (buckets in-memory, recreated by start-infra.ps1)"; $s3Ok = $true } } catch {}
+}
+if (-not $s3Ok) { Bad "S3 not reachable on :9000 - run dev_scripts/start-infra.ps1" }
+try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9001" -UseBasicParsing -TimeoutSec 3; Ok "MinIO console reachable (http://127.0.0.1:9001)" } catch { Warn "No console on :9001 (expected with moto fallback; API above is what Engine uses)" }
 
 # Engine
 Info "Engine http://localhost:3001/health/*"

@@ -62,7 +62,7 @@ The **complete, build-ready specification set for the Neryva console and product
 
 > **For active UI work.** Engine is system of record, Studio is headless, MCP is the versioned `neryva.mcp.v1` contract (`@neryva/mcp-contract` at `products/neryva_mcp/neryva-mcp-contract`) — no separate MCP service. The Windows lane runs everything as native processes (no Docker). Production/CI stays on `ops/docker-compose.yml`.
 
-**Prereqs (once):** Node 22 LTS, `corepack enable` (pnpm 9), EDB Postgres 16/17 + `CREATE EXTENSION vector` (`nmake /F Makefile.win` with `PGROOT=C:\Program Files\PostgreSQL\17`), Memurai on `:6379`, `setup.ps1` downloads `minio.exe`/`mc.exe` to `dev_scripts/bin/`.
+**Prereqs (once):** Node 22 LTS, `corepack enable` (pnpm 9), EDB Postgres 16/17 + `CREATE EXTENSION vector` (`nmake /F Makefile.win` with `PGROOT=C:\Program Files\PostgreSQL\17`), Memurai on `:6379`, S3 on `:9000` via `start-infra.ps1` (licensed MinIO binary if present, else `moto_server` fallback with `pip install "moto[s3]"` — `dl.min.io` no longer serves OSS `minio.exe`/`mc.exe`, and unlicensed MinIO denies S3 calls).
 
 ```powershell
 # 0. one-time check + downloads
@@ -81,4 +81,4 @@ powershell -ExecutionPolicy Bypass -File dev_scripts/dev.ps1
 - **Agent Studio** `products/agent-studio/apps/runtime-control` → `:8080` (`PORT=8080 EXECUTION_MODE=inline npx tsx --watch apps/runtime-control/src/main.ts`, `src/config.ts`). Inline needs no Temporal; `temporal` is the Docker lane.
 - **Website** `console/neryva-website` → `:3000` (`vite.config.ts:41` proxies `/engine→:3001`, `/runtime→:8080`).
 
-**Ports:** `:3001` Engine `/health/live`, `:8080` Studio `/healthz`, `:3000` Web, `:5432` PG, `:6379` Redis, `:9000/:9001` MinIO. Full troubleshooting (pgvector `PGROOT`, MinIO busy, `pnpm` via `npx pnpm`) in `dev_scripts/README.md`.
+**Ports:** `:3001` Engine `/health/live`, `:8080` Studio `/healthz`, `:3000` Web, `:5432` PG, `:6379` Redis, `:9000` S3 (MinIO API or moto fallback; `:9001` console only with licensed MinIO). Full troubleshooting (pgvector `PGROOT`, S3 fallback, `pnpm` via `npx pnpm`) in `dev_scripts/README.md`.

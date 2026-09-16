@@ -174,7 +174,7 @@ Write-Host "Services:" -ForegroundColor White
 Write-Host "  engine  http://localhost:3001  (health http://localhost:3001/health/live)" -ForegroundColor Gray
 if (-not $NoStudio) { Write-Host "  studio  http://localhost:8080  (EXECUTION_MODE=inline, no Temporal)" -ForegroundColor Gray }
 if (-not $NoWeb)    { Write-Host "  web     http://localhost:3000  (proxies /engine->:3001, /runtime->:8080)" -ForegroundColor Gray }
-Write-Host "  minio   http://127.0.0.1:9000 (api)  http://127.0.0.1:9001 (console, minioadmin/minioadmin)" -ForegroundColor Gray
+Write-Host "  s3      http://127.0.0.1:9000 (MinIO, or moto fallback when MinIO is license-blocked)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Logs are prefixed [engine]/[studio]/[web]. Ctrl+C kills all." -ForegroundColor Yellow
 Write-Host ""

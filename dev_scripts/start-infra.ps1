@@ -145,10 +145,11 @@ if (-not $ok) {
 }
 if (-not $ok) { Warn "S3 not live after MinIO+moto attempts -- Engine S3 calls will fail until :9000 is reachable. See dev_scripts/README.md" }
 
-# -- Buckets via mc (mirrors ops/docker-compose.yml minio-init) -----------
-if ($usingMoto) {
-  Info "moto: buckets are on-demand (neryva-uploads created on first S3 call) -- skipping mc"
-} elseif ((Test-Path $McExe) -and $ok) {
+# -- Buckets (mirrors ops/docker-compose.yml minio-init) --------------------
+# S3 requires explicit bucket creation on both MinIO and moto, so when mc.exe
+# is unavailable (dl.min.io no longer serves OSS binaries) fall back to a
+# python boto3 one-liner against :9000 with the dev minioadmin credentials.
+if ((Test-Path $McExe) -and $ok) {
   Info "Creating buckets via mc ..."
   try {
     & $McExe alias set local http://127.0.0.1:9000 minioadmin minioadmin 2>&1 | Out-Null
@@ -157,8 +158,17 @@ if ($usingMoto) {
     & $McExe anonymous set download local/neryva-uploads/content/covers 2>&1 | Out-Null
     Ok "Buckets ready: neryva-uploads (+ content/covers public-read)"
   } catch { Warn "mc bucket setup failed: $_ - create manually via http://127.0.0.1:9001" }
-} elseif (-not (Test-Path $McExe) -and $ok) {
-  Warn "mc.exe not found -- MinIO buckets not auto-created. With moto this is fine (on-demand); with MinIO create via http://127.0.0.1:9001"
+} elseif ($ok) {
+  Info "Creating bucket neryva-uploads via S3 API (mc.exe not present) ..."
+  try {
+    $bucketOut = & python -c "import boto3; s=boto3.client('s3', endpoint_url='http://127.0.0.1:9000', aws_access_key_id='minioadmin', aws_secret_access_key='minioadmin', region_name='us-east-1'); names=[b['Name'] for b in s.list_buckets().get('Buckets',[])]; print('exists' if 'neryva-uploads' in names else 'missing')" 2>&1 | Out-String
+    if ($bucketOut -match 'missing') {
+      & python -c "import boto3; boto3.client('s3', endpoint_url='http://127.0.0.1:9000', aws_access_key_id='minioadmin', aws_secret_access_key='minioadmin', region_name='us-east-1').create_bucket(Bucket='neryva-uploads')" 2>&1 | Out-Null
+      Ok "Bucket ready: neryva-uploads (created via S3 API)"
+    } else {
+      Ok "Bucket ready: neryva-uploads (already exists)"
+    }
+  } catch { Warn "S3 bucket setup failed: $_ - Engine uploads will 503 until neryva-uploads exists" }
 }
 
 Write-Host ""

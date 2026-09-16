@@ -9,7 +9,7 @@
 | Lane | Services | How |
 |---|---|---|
 | **Production / CI** | Managed Postgres + Redis + S3 + Jaeger, Engine, Studio, Website behind Caddy | `ops/docker-compose.yml` + `ops/engine/docker-compose.yml` |
-| **Windows dev (this dir)** | Native Postgres (EDB) + Memurai Redis + MinIO binary + Engine + Studio `runtime-control` (inline) + Website | `dev_scripts/*.ps1` |
+| **Windows dev (this dir)** | Native Postgres (EDB) + Memurai Redis + S3 on `:9000` (MinIO binary, or moto_server fallback) + Engine + Studio `runtime-control` (inline) + Website | `dev_scripts/*.ps1` |
 
 ## Prerequisites (one-time)
 
@@ -18,7 +18,7 @@
 * **PostgreSQL 16 or 17** (EDB installer) — https://www.postgresql.org/download/windows/ . Data dir `C:\Program Files\PostgreSQL\17\data` is the convention this script expects.
 * **pgvector** — `CREATE EXTENSION vector` must succeed. Built from source with VS C++ tools: `nmake /F Makefile.win` (`pgvector/pgvector` README, `https://github.com/pgvector/pgvector?tab=readme-ov-file#windows`). `setup.ps1` checks and guides you.
 * **Memurai Developer Edition** (Redis 7.2.6 API on Windows) — https://www.memurai.com / https://redis.io/tutorials/howtos/how-to-run-redis-on-windows-natively-with-memurai/ . Installs as Windows service `Memurai` on `:6379`. The script also accepts WSL/Docker Redis on `:6379` as fallback — it just probes the port.
-* **No manual MinIO install** — `setup.ps1` downloads `minio.exe` + `mc.exe` to `dev_scripts/bin/` from `https://dl.min.io/.../windows-amd64/` (official docs: `https://minio.community/.../baremetal-deploy-minio-on-windows.html`).
+* **S3 on `:9000`** — `setup.ps1` tries `minio.exe` + `mc.exe` to `dev_scripts/bin/`, but `dl.min.io` no longer serves OSS binaries (archived upstream) and unlicensed MinIO denies S3 calls. `start-infra.ps1` therefore tries MinIO first, then falls back to `moto_server` (`pip install "moto[s3]"`, `python -m moto.server -H 127.0.0.1 -p 9000`) and creates `neryva-uploads` via the S3 API (no `mc` needed). Moto is in-memory: buckets vanish on restart and `:9001` console does not exist there.
 
 ## Quick start
 
@@ -54,15 +54,15 @@ powershell -ExecutionPolicy Bypass -File dev_scripts/check.ps1
 | Website (Vite) | 3000 | `http://localhost:3000` — proxies `/engine` → `:3001`, `/runtime` → `:8080` (`console/neryva-website/vite.config.ts:41-52`) |
 | Postgres | 5432 | `pg_isready` / `psql` |
 | Redis / Memurai | 6379 | `redis-cli ping` / `memurai-cli ping` |
-| MinIO API / Console | 9000 / 9001 | `http://localhost:9000/minio/health/live` |
+| S3 API | 9000 | `http://localhost:9000/moto-api` (moto) or `http://localhost:9000/minio/health/live` (licensed MinIO) |
 
 ## What each script does
 
 * **`setup.ps1`** — verifies Node/pnpm, locates `psql`, checks `vector` extension, checks `:6379` (Memurai/Redis), downloads `minio.exe`+`mc.exe` to `bin/`, prints next steps. Idempotent.
-* **`start-infra.ps1`** — ensures Postgres service running, probes Redis/Memurai, starts MinIO (`bin/minio.exe server <data> --console-address :9001`) as background job, waits for `/minio/health/live`, creates buckets `neryva-uploads` + `content/covers` with `mc`, sets public-read.
-* **`stop-infra.ps1`** — stops the MinIO job (Postgres/Redis are Windows services — left running; stop them via `services.msc` if needed).
+* **`start-infra.ps1`** — ensures Postgres service running, probes Redis/Memurai, starts S3 on `:9000` (MinIO `bin/minio.exe server <data> --console-address :9001` as background job with `/minio/health/live` wait, else moto_server fallback with `/moto-api` wait), creates bucket `neryva-uploads` via `mc` when present else via the S3 API (boto3).
+* **`stop-infra.ps1`** — stops the S3 jobs (MinIO and/or moto) plus stray `minio.exe` / `moto.server` processes (Postgres/Redis are Windows services — left running; stop them via `services.msc` if needed).
 * **`dev.ps1`** — calls `start-infra.ps1`, runs `npx pnpm run migrate` (once), builds `@neryva/mcp-contract` if needed, then `npx concurrently` for Engine (`npx pnpm run dev` → `tsc && node --watch dist/main.js` on `:3001`), Studio runtime-control (`PORT=8080 EXECUTION_MODE=inline npx tsx --watch apps/runtime-control/src/main.ts`), and Website (`npx pnpm --filter neryva-website dev` or `npx vite` fallback). Requires `NERYVA_RUNTIME_BASE_URL=http://localhost:8080` in Engine `.env` for Engine→Studio dispatch (`src/transport/mcp/runtime-control.client.ts:33-35` — empty = run stays `ACCEPTED`).
-* **`check.ps1`** — probes `GET /health/live`, `/health/ready`, `/metrics`, Postgres `SELECT 1`, Redis `PING`, MinIO health, and `GET /health` on `:8080`/`:3000`.
+* **`check.ps1`** — probes `GET /health/live`, `/health/ready`, `/metrics`, Postgres `SELECT 1`, Redis `PING`, S3 `:9000` (MinIO health or moto `/moto-api`), and `GET /health` on `:8080`/`:3000`.
 
 ## Troubleshooting
 

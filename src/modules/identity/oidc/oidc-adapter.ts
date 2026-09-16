@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../../common/infra/db/db.service';
 import { AuditService } from '../../../common/audit/audit.service';
@@ -26,9 +26,10 @@ import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPaylo
  *                                  refresh token revokes the entire family
  *                                  and audits auth.refresh_reuse (doc-06 §10.4)
  *
- * NOTE (build-time): the Adapter interface (upsert/find/consume/destroy/
- * revokeForGrant) is stable across oidc-provider v7–v9; exact option names
- * in the factory may need adjusting to the installed major version.
+ * NOTE (build-time): the Adapter interface (upsert/find/findByUid/consume/
+ * destroy/revokeByGrantId) follows oidc-provider v8 exactly — v7 names
+ * (revokeForGrant) are never called. If the installed major renames a
+ * method, fix it here — this file is the single adapter point.
  */
 type Payload = Record<string, unknown> & { grantId?: string; accountId?: string; extra?: Record<string, unknown> };
 
@@ -74,8 +75,7 @@ export class OidcDrizzleAdapter {
         }
       },
 
-      async find(id: string): Promise<Payload | undefined> {
-        switch (name) {
+      async find(id: string): Promise<Payload | undefined> {        switch (name) {
           case 'Client':
             return self.findClient(id);
           case 'Session': {
@@ -111,7 +111,17 @@ export class OidcDrizzleAdapter {
               // rows still resolve with consumed:true so rotation proceeds.
               return undefined;
             }
-            const base: Payload = { grantId: row.grantId ?? undefined };
+            // The bookkeeping row carries only security state — the full
+            // token payload (clientId, accountId, scope, rotations, …)
+            // round-trips via the oidc_payloads copy written at upsert.
+            // Without it the provider sees clientId undefined and rejects
+            // every rotation with `client mismatch`.
+            const full = await self.db.root
+              .select()
+              .from(oidcPayloads)
+              .where(and(eq(oidcPayloads.model, 'RefreshToken'), eq(oidcPayloads.id, id)))
+              .limit(1);
+            const base: Payload = { grantId: row.grantId ?? undefined, ...(full[0]?.payload as Payload | undefined) };
             if (row.consumedAt) {
               base.consumed = true;
             }
@@ -124,8 +134,32 @@ export class OidcDrizzleAdapter {
         }
       },
 
-      async consume(id: string): Promise<void> {
-        const now = new Date().toISOString();
+      /**
+       * Session lookup by stable uid (v8 `is_session_bound` mixin: codes
+       * bound to a session resolve it here at redemption). The uid lives
+       * inside the stored Session payload (`Session.uid`, IN_PAYLOAD).
+       */
+      async findByUid(uid: string): Promise<Payload | undefined> {
+        if (name !== 'Session') {
+          return undefined;
+        }
+        const rows = await self.db.root
+          .select()
+          .from(oidcPayloads)
+          .where(and(eq(oidcPayloads.model, 'Session'), sql`${oidcPayloads.payload}->>'uid' = ${uid}`))
+          .limit(1);
+        return rows[0] ? (rows[0].payload as Payload) : undefined;
+      },
+
+      /**
+       * Device-flow user-code lookup. The device flow is disabled, so this
+       * is never called — present only for interface completeness.
+       */
+      async findByUserCode(): Promise<undefined> {
+        return undefined;
+      },
+
+      async consume(id: string): Promise<void> {        const now = new Date().toISOString();
         switch (name) {
           case 'GrantCode':
             await self.db.root.update(oauthGrants).set({ consumedAt: now }).where(eq(oauthGrants.codeHash, sha256(id)));
@@ -149,6 +183,9 @@ export class OidcDrizzleAdapter {
               .update(oauthRefreshTokens)
               .set({ revokedAt: nowIso() })
               .where(eq(oauthRefreshTokens.jti, id));
+            await self.db.root
+              .delete(oidcPayloads)
+              .where(and(eq(oidcPayloads.model, 'RefreshToken'), eq(oidcPayloads.id, id)));
             return;
           case 'GrantCode':
             await self.db.root.delete(oauthGrants).where(eq(oauthGrants.codeHash, sha256(id)));
@@ -159,7 +196,7 @@ export class OidcDrizzleAdapter {
         }
       },
 
-      async revokeForGrant(grantId: string): Promise<void> {
+      async revokeByGrantId(grantId: string): Promise<void> {
         // RFC 7009 / grant revocation: everything issued under the grant dies.
         await self.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso() }).where(eq(oauthRefreshTokens.grantId, grantId));
         await self.db.root.delete(oidcPayloads).where(eq(oidcPayloads.grantId, grantId));
@@ -264,6 +301,9 @@ export class OidcDrizzleAdapter {
     if (rotatedFrom) {
       await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, rotatedFrom));
     }
+    // Dual-write the full payload: the bookkeeping row above holds security
+    // state only; rotation needs the complete token back (see find).
+    await this.upsertOidcPayload('RefreshToken', id, payload, finalExpiresAt);
   }
 
   private async consumeRefreshTokenWithReuseDetection(id: string): Promise<void> {
@@ -382,8 +422,28 @@ function nowIso(): string {
 }
 
 function extractFamilyId(payload: Payload): string {
-  const raw = payload.familyId ?? payload['gty'] ?? null;
-  return typeof raw === 'string' && raw.length > 0 ? raw : randomUUID();
+  // The provider does not stamp a family id — the login grant is the
+  // lineage: every rotation of one grant shares its grantId, and grant
+  // revocation already fans out by the same key. Grant ids are nanoid
+  // strings while family_id is a UUID column, so hash the grant id into a
+  // deterministic UUIDv5-shaped value (no new dependency). (Never fall back
+  // to `gty`: that is the grant *type* name, and raw nanoids are rejected
+  // by the UUID column — both broke issuance.)
+  const raw = payload.familyId ?? payload.grantId;
+  if (typeof raw === 'string' && raw.length > 0) {
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+      return raw;
+    }
+    return uuidFromString(`neryva-rt-family:${raw}`);
+  }
+  return randomUUID();
+}
+
+/** Deterministic UUIDv5-shaped value from an arbitrary string (no dependency). */
+function uuidFromString(value: string): string {
+  const h = createHash('sha256').update(value, 'utf8').digest('hex');
+  const variant = ((parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, '0');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${variant}${h.slice(18, 20)}-${h.slice(20, 32)}`;
 }
 
 function extractRotatedFrom(payload: Payload): string | null {

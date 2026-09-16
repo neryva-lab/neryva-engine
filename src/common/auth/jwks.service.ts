@@ -53,8 +53,10 @@ export class JwksService {
   }
 
   private get jwksUrl(): string {
+    // The OP serves its public set at the provider's jwks route beneath the
+    // issuer path (GET <issuer>/jwks) — there is no .well-known/jwks.json.
     const issuer = env.IDENTITY_ISSUER.replace(/\/$/, '');
-    return `${issuer}/.well-known/jwks.json`;
+    return `${issuer}/jwks`;
   }
 
   async verifyCompactJwt(token: string, expectedAudience: string): Promise<VerifiedJwt> {

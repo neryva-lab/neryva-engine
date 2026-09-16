@@ -13,6 +13,7 @@ import { CredentialsService } from './credentials.service';
 import { EmailCodeService } from './email-code.service';
 import { MfaService } from './mfa.service';
 import { OIDC_PROVIDER } from './oidc/oidc-provider.token';
+import { issueFirstPartyGrant } from './oidc/grant-issue.helper';
 import { socialProviders } from './social/social.config';
 
 /**
@@ -231,9 +232,16 @@ export class LoginInteractionController {
   // ── internals ─────────────────────────────────────────────────────────────
 
   /** oidc-provider's interaction APIs take the raw node req/res — Fastify keeps them at .raw. */
-  private async assertInteraction(req: FastifyRequest, reply: FastifyReply, uid: string): Promise<{ returnTo?: string }> {
+  private async assertInteraction(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    uid: string,
+  ): Promise<{ returnTo?: string; params?: { scope?: string; client_id?: string } }> {
     const provider = this.provider();
-    const details = (await provider.interactionDetails(req.raw as never, reply.raw as never)) as unknown as { returnTo?: string };
+    const details = (await provider.interactionDetails(req.raw as never, reply.raw as never)) as unknown as {
+      returnTo?: string;
+      params?: { scope?: string; client_id?: string };
+    };
     return details;
   }
 
@@ -259,7 +267,7 @@ export class LoginInteractionController {
     req: FastifyRequest,
     reply: FastifyReply,
     uid: string,
-    interaction: { returnTo?: string },
+    interaction: { returnTo?: string; params?: { scope?: string; client_id?: string } },
     accountId: string,
     method: string,
     mfa = false,
@@ -280,7 +288,19 @@ export class LoginInteractionController {
       details: { method, mfa },
     });
     await this.events.emit(EngineEvents.LoginSuccess, { accountId, method });
-    await provider.interactionFinished(req.raw as never, reply.raw as never, { login: { accountId, remember: true } });
+    // First-party grant: no consent screen exists, so the requested scopes
+    // are granted here — without them the OP refuses the code with
+    // access_denied (...no scope was granted).
+    const clientId = interaction.params?.client_id ?? 'neryva-console';
+    const grantId = await issueFirstPartyGrant(provider, {
+      accountId,
+      clientId,
+      scope: interaction.params?.scope,
+    });
+    await provider.interactionFinished(req.raw as never, reply.raw as never, {
+      login: { accountId, remember: true },
+      consent: { grantId },
+    });
     reply.redirect(interaction.returnTo ?? '/', 302);
   }
 

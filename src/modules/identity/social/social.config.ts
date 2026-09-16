@@ -6,12 +6,13 @@ import { env } from '../../../common/config/env';
  * credentials are present in the environment; the login page renders only
  * enabled providers, and disabled providers 404 at their initiation route.
  *
- * Redirect URIs to register at each developer console (single source:
- * ENGINE_BASE_URL + the fixed callback path):
+ * Redirect URIs to register at each developer console (browser-facing origin
+ * + the fixed callback path — the IdP must land where the OP cookies live):
  *   google    https://{host}/login/social/callback/google
- *   github    https://{host}/login/social/callback/github
- *   apple     https://{host}/login/social/callback/apple   (response_mode=form_post)
- *   microsoft https://{host}/login/social/callback/microsoft
+ *
+ * Google-only right now (product decision 2026-09-16): GitHub/Apple/Microsoft
+ * implementations remain in the service layer but no provider entry exists
+ * for them below, so they cannot be enabled, listed, or initiated.
  */
 export type SocialProviderKey = 'google' | 'github' | 'apple' | 'microsoft';
 
@@ -77,20 +78,6 @@ export function socialProviders(): SocialProviderConfig[] {
     });
   }
 
-  if (env.IDENTITY_SOCIAL_MICROSOFT_CLIENT_ID && env.IDENTITY_SOCIAL_MICROSOFT_CLIENT_SECRET) {
-    const tenant = env.IDENTITY_SOCIAL_MICROSOFT_TENANT || 'common';
-    providers.push({
-      key: 'microsoft',
-      label: 'Microsoft',
-      authorizeUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,
-      scope: 'openid email profile',
-      clientId: env.IDENTITY_SOCIAL_MICROSOFT_CLIENT_ID,
-      clientSecret: env.IDENTITY_SOCIAL_MICROSOFT_CLIENT_SECRET,
-      usePkce: true,
-      oidc: true,
-    });
-  }
-
   return providers;
 }
 
@@ -99,7 +86,11 @@ export function socialProvider(key: string): SocialProviderConfig | null {
 }
 
 export function callbackUrlFor(provider: SocialProviderKey): string {
-  return `${env.ENGINE_BASE_URL.replace(/\/$/, '')}${SOCIAL_CALLBACK_PATH}/${provider}`;
+  // Browser-facing origin first: the IdP callback must land where the OP
+  // session cookies live (same-origin rule — see IDENTITY_ISSUER). Dev that
+  // is the website (:3000, Vite /login proxy); production the public origin.
+  const base = (env.ENGINE_UI_BASE_URL || env.ENGINE_BASE_URL).replace(/\/$/, '');
+  return `${base}${SOCIAL_CALLBACK_PATH}/${provider}`;
 }
 
 /** Microsoft: wildcard tenants ('common' etc.) mean the token's tid drives issuer/JWKS resolution. */

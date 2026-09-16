@@ -7,21 +7,31 @@ import { RateLimit } from '../../../common/http/rate-limit';
 import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../../common/events/event-bus';
 import { OIDC_PROVIDER } from '../oidc/oidc-provider.token';
+import { issueFirstPartyGrant } from '../oidc/grant-issue.helper';
 import { AccountsService } from '../accounts.service';
 import { SocialAccountService } from './social-account.service';
 import { SocialLoginService } from './social-login.service';
 import { SOCIAL_CALLBACK_PATH, socialProviders } from './social.config';
 
 /**
- * The social login surface (doc-06 Δ1). Three zones:
+ * The social login surface (doc-06 Δ1). Four zones:
  *
  *  - `/login/:uid/social/:provider` — initiate: validates the interaction
  *    uid against the OP (no open-redirecting strangers to IdPs), stores
  *    single-use state (uid + nonce + PKCE), redirects to the IdP.
  *  - `/login/social/callback/:provider` — GET (Google/GitHub/Microsoft) and
- *    POST (Apple form_post): consumes state, completes the handshake,
- *    finishes the OP interaction — identical session semantics to the
- *    email-code path (one login surface, one L1 contract).
+ *    POST (Apple form_post): consumes state, completes the handshake, then
+ *    stashes the VERIFIED login and redirects to the finish leg. This route
+ *    deliberately never touches the OP interaction: oidc-provider scopes the
+ *    `_interaction` cookie to the interaction entry path
+ *    (`/login/:uid[/social/:key]`), which never prefixes this fixed callback,
+ *    so the browser withholds the cookie here and `interactionDetails` would
+ *    always fail with `SessionNotFound`.
+ *  - `/login/:uid/social/:provider/complete` — finish: uid-bound, so its
+ *    path IS covered by the interaction cookie in both the generic
+ *    (`/login/:uid`) and bypass (`/login/:uid/social/:key`) cases; re-binds
+ *    the uid to the live interaction, consumes the stash, finishes the OP
+ *    interaction — identical session semantics to the email-code path.
  *  - `/auth/me/identities` — L1 account management (the /auth/me surface convention): list linked
  *    identities, unlink (with the lockout guard).
  */
@@ -65,8 +75,18 @@ export class SocialController {
       const { redirectUrl } = await this.social.initiate(provider, uid);
       reply.redirect(redirectUrl, 302);
     } catch (err) {
-      reply.header('content-type', 'text/html; charset=utf-8');
-      reply.status((err as Error).message.includes('not configured') ? 404 : 400).send(this.errorPage('Sign-in could not start', (err as Error).message));
+      // Never leak internals (Redis outages, deployment config) to the
+      // browser — the audit/event trail keeps the machine reason.
+      const unavailable = (err as Error).message.includes('not configured');
+      reply
+        .header('content-type', 'text/html; charset=utf-8')
+        .status(unavailable ? 404 : 400)
+        .send(
+          this.errorPage(
+            'Sign-in could not start',
+            unavailable ? 'This sign-in method is not available right now.' : 'Could not start sign-in. Please try again.',
+          ),
+        );
     }
   }
 
@@ -96,6 +116,56 @@ export class SocialController {
     @Res() reply: FastifyReply,
   ): Promise<void> {
     await this.callback(provider, body, req, reply);
+  }
+
+  /**
+   * Finish leg for the IdP callback above. This path nests under the
+   * interaction entry — `/login/:uid` on the generic flow,
+   * `/login/:uid/social/:key` on the preselected bypass — so the interaction
+   * cookie IS present here in both cases and the OP interaction finishes
+   * exactly like the email-code path (one login surface, one L1 contract).
+   */
+  @Public()
+  @Get('login/:uid/social/:provider/complete')
+  @RateLimit({ name: 'social-callback', capacity: 20, refillPerSecond: 0.5 })
+  async finishGet(
+    @Param('uid') uid: string,
+    @Param('provider') provider: string,
+    @Req() req: FastifyRequest,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const fail = (title: string, detail: string, status = 400): void => {
+      reply.header('content-type', 'text/html; charset=utf-8');
+      reply.status(status).send(this.errorPage(title, detail));
+    };
+
+    let details: { uid?: string; params?: { scope?: string; client_id?: string } };
+    try {
+      details = (await this.provider().interactionDetails(req.raw as never, reply.raw as never)) as unknown as typeof details;
+    } catch {
+      // The interaction expired while the user was at the IdP.
+      return fail('Sign-in session expired', 'The application session ended while you were at the provider. Start again.', 410);
+    }
+    if (!details.uid || details.uid !== uid) {
+      // The live interaction is not the one this finish leg was issued
+      // for — a forged or cross-tab uid dies here, never with a session.
+      return fail('Sign-in session expired', 'This sign-in link was already used or expired. Start again.', 410);
+    }
+    const finished = await this.social.consumeFinish(uid);
+    if (!finished || finished.provider !== provider) {
+      return fail('Sign-in session expired', 'This sign-in link was already used or expired. Start again.', 410);
+    }
+    const grantId = await issueFirstPartyGrant(this.provider(), {
+      accountId: finished.accountId,
+      clientId: details.params?.client_id ?? 'neryva-console',
+      scope: details.params?.scope,
+    });
+    await this.provider().interactionFinished(req.raw as never, reply.raw as never, {
+      login: { accountId: finished.accountId, remember: true },
+      consent: { grantId },
+    });
+    // The provider already answered 303 to the resume URL above — sending
+    // anything else here would write to an ended stream.
   }
 
   private async callback(
@@ -149,16 +219,12 @@ export class SocialController {
     });
     await this.events.emit(EngineEvents.LoginSuccess, { accountId: result.accountId, method: `social:${result.provider}` });
 
-    try {
-      const details = (await this.provider().interactionDetails(req.raw as never, reply.raw as never)) as unknown as { returnTo?: string };
-      await this.provider().interactionFinished(req.raw as never, reply.raw as never, {
-        login: { accountId: result.accountId, remember: true },
-      });
-      reply.redirect(details.returnTo ?? '/', 302);
-    } catch {
-      // The interaction expired while the user was at the IdP.
-      return fail('Sign-in session expired', 'The application session ended while you were at the provider. Start again.', 410);
-    }
+    // Hand off to the uid-bound finish leg below. This callback path can
+    // never finish the OP interaction itself (no interaction cookie here —
+    // see the class comment), so the verified login is stashed single-use
+    // and the browser resumes where the cookie IS present.
+    await this.social.stashFinish(consumed.uid, { provider: result.provider, accountId: result.accountId });
+    return reply.redirect(`/login/${consumed.uid}/social/${result.provider}/complete`, 302);
   }
 
   // ── Account identity management (L1) ─────────────────────────────────────

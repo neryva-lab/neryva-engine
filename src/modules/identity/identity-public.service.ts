@@ -29,8 +29,20 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
       }
     }
     // Account-level kill-switch: sessions minted before sessionsRevokedAt die.
-    const rows = await this.db.root.select({ sessionsRevokedAt: accounts.sessionsRevokedAt }).from(accounts).where(eq(accounts.id, input.accountId)).limit(1);
-    const revokedAt = rows[0]?.sessionsRevokedAt;
+    // A locked/disabled account holds NO live session — the status is read
+    // on the same row so an abuse lock takes effect on the next request
+    // (bounded by the access-token TTL only for the deny-list-miss path,
+    // never beyond it: this registry check runs on every L1 request).
+    const rows = await this.db.root
+      .select({ status: accounts.status, sessionsRevokedAt: accounts.sessionsRevokedAt })
+      .from(accounts)
+      .where(eq(accounts.id, input.accountId))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.status !== 'active') {
+      return false;
+    }
+    const revokedAt = row.sessionsRevokedAt;
     if (!revokedAt) {
       return true;
     }

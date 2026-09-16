@@ -222,7 +222,11 @@ for ($i=0; $i -lt $cmds.Count; $i++) {
   }
 }
 
-$args = @(
+# NOTE: never name this $args — that collides with PowerShell's automatic
+# $args variable, and `@args` then splats the (empty) bound-args instead of
+# this array: concurrently receives zero commands, prints help, exits 0, and
+# the lane silently starts nothing while reporting success.
+$concurrentArgs = @(
   "--kill-others-on-fail",
   "--prefix", "[{name}]",
   "--names", $namesStr,
@@ -230,7 +234,7 @@ $args = @(
 ) + $finalCmds
 
 # Run
-& npx --yes concurrently @args
+& npx --yes concurrently @concurrentArgs
 $code = if (Test-Path variable:global:LASTEXITCODE) { $global:LASTEXITCODE } else { 0 }
 Write-Host ""
 if ($code -eq 0) { Ok "All services exited cleanly (code 0)" }

@@ -18,8 +18,17 @@ import { SocialAccountService, SocialProfile } from './social-account.service';
  * the id_token to this handshake (replay); S256 PKCE protects the code
  * exchange where the IdP supports it (Google, Microsoft). State rows are
  * single-use, 10-minute TTL, stored in Redis (multi-instance safe).
+ *
+ * The verified login is handed to the OP interaction through a second
+ * single-use stash (`social:finish:{uid}`, 5-minute TTL): the IdP callback
+ * (`/login/social/callback/:provider`) can never carry the OP interaction
+ * cookie — oidc-provider scopes `_interaction` to the interaction entry path
+ * (`/login/:uid[ /social/:key]`), which never prefixes the fixed callback —
+ * so the callback stashes and redirects to the uid-bound finish leg, whose
+ * path IS covered by the cookie, where the interaction is finished.
  */
 const STATE_TTL_SECONDS = 600;
+const FINISH_TTL_SECONDS = 300;
 
 interface SocialState {
   uid: string;
@@ -29,6 +38,16 @@ interface SocialState {
 }
 
 export interface SocialLoginResult {
+  provider: string;
+  accountId: string;
+}
+
+/**
+ * A verified social login waiting for the uid-bound finish leg to attach it
+ * to the live OP interaction (see the module comment above).
+ */
+export interface SocialFinish {
+  uid: string;
   provider: string;
   accountId: string;
 }
@@ -93,7 +112,35 @@ export class SocialLoginService {
     if (!raw) {
       return null;
     }
-    return JSON.parse(raw) as SocialState;
+    try {
+      const parsed = JSON.parse(raw) as Partial<SocialState>;
+      if (typeof parsed.uid !== 'string' || typeof parsed.provider !== 'string' || typeof parsed.nonce !== 'string') {
+        return null;
+      }
+      return parsed as SocialState;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stash a VERIFIED login for the uid-bound finish leg. Overwrites: the
+   * callback is the only writer and each IdP round-trip ends in exactly one
+   * finish redirect, so newest-wins is the correct posture.
+   */
+  async stashFinish(uid: string, finish: { provider: string; accountId: string }): Promise<void> {
+    await this.redis.raw.set(
+      `social:finish:${uid}`,
+      JSON.stringify({ uid, provider: finish.provider, accountId: finish.accountId } satisfies SocialFinish),
+      'EX',
+      FINISH_TTL_SECONDS,
+    );
+  }
+
+  /** Consume the finish stash for the finish leg (single-use via GETDEL). */
+  async consumeFinish(uid: string): Promise<SocialFinish | null> {
+    const raw = await this.redis.raw.getdel(`social:finish:${uid}`);
+    return parseSocialFinish(raw);
   }
 
   /**
@@ -317,4 +364,30 @@ function requireSub(claims: Record<string, unknown>): string {
     throw new Error('id_token is missing the sub claim');
   }
   return claims.sub;
+}
+
+/**
+ * Shape-guard for finish-stash rows — malformed or empty rows refuse
+ * outright (a corrupt row must never attach a login to an interaction).
+ * Pure — unit-tested.
+ */
+export function parseSocialFinish(raw: string | null | undefined): SocialFinish | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<SocialFinish>;
+    if (typeof parsed.uid !== 'string' || parsed.uid.length === 0) {
+      return null;
+    }
+    if (typeof parsed.provider !== 'string' || parsed.provider.length === 0) {
+      return null;
+    }
+    if (typeof parsed.accountId !== 'string' || parsed.accountId.length === 0) {
+      return null;
+    }
+    return { uid: parsed.uid, provider: parsed.provider, accountId: parsed.accountId };
+  } catch {
+    return null;
+  }
 }

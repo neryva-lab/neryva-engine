@@ -1,6 +1,7 @@
 import { createHash, createPrivateKey, createPublicKey, createSign, createVerify, KeyObject, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Logger } from '@nestjs/common';
+import { env } from '../../../common/config/env';
 
 /**
  * IdP id_token verification (dependency-free, the same audit standard as
@@ -87,7 +88,13 @@ export async function verifyIdToken(token: string, checks: IdTokenChecks): Promi
     throw new Error('id_token audience mismatch');
   }
   if (checks.nonce !== undefined) {
-    if (typeof claims.nonce !== 'string' || !timingSafeEqual(Buffer.from(claims.nonce), Buffer.from(checks.nonce))) {
+    // Length-gate first: timingSafeEqual throws on mismatched lengths, and
+    // a length difference IS a mismatch — fail closed with the same error.
+    if (
+      typeof claims.nonce !== 'string' ||
+      claims.nonce.length !== checks.nonce.length ||
+      !timingSafeEqual(Buffer.from(claims.nonce), Buffer.from(checks.nonce))
+    ) {
       throw new Error('id_token nonce mismatch (replay?)');
     }
   }
@@ -167,7 +174,7 @@ function keyMatches(key: KeyObject, alg: string): boolean {
 let appleKeyCache: { file: string; key: KeyObject } | null = null;
 
 function applePrivateKey(): KeyObject {
-  const file = process.env.IDENTITY_SOCIAL_APPLE_PRIVATE_KEY_FILE ?? '';
+  const file = env.IDENTITY_SOCIAL_APPLE_PRIVATE_KEY_FILE ?? '';
   if (!file) {
     throw new Error('IDENTITY_SOCIAL_APPLE_PRIVATE_KEY_FILE not set');
   }
@@ -181,7 +188,7 @@ function applePrivateKey(): KeyObject {
 
 /** Boot check: a configured-but-unreadable Apple p8 key is a loud failure, never a login-time 500. */
 export function assertAppleKeyReadable(): void {
-  if (process.env.IDENTITY_SOCIAL_APPLE_CLIENT_ID) {
+  if (env.IDENTITY_SOCIAL_APPLE_CLIENT_ID) {
     applePrivateKey(); // throws when the file is missing/corrupt
   }
 }
@@ -193,9 +200,9 @@ export function assertAppleKeyReadable(): void {
  * nothing to store, nothing to rotate on our side.
  */
 export function mintAppleClientSecret(): string {
-  const teamId = process.env.IDENTITY_SOCIAL_APPLE_TEAM_ID;
-  const clientId = process.env.IDENTITY_SOCIAL_APPLE_CLIENT_ID;
-  const keyId = process.env.IDENTITY_SOCIAL_APPLE_KEY_ID;
+  const teamId = env.IDENTITY_SOCIAL_APPLE_TEAM_ID;
+  const clientId = env.IDENTITY_SOCIAL_APPLE_CLIENT_ID;
+  const keyId = env.IDENTITY_SOCIAL_APPLE_KEY_ID;
   if (!teamId || !clientId || !keyId) {
     throw new Error('Apple social login is not fully configured');
   }

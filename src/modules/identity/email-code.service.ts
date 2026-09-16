@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { RedisService } from '../../common/infra/redis.service';
@@ -39,11 +39,22 @@ export class EmailCodeService {
     const code = String(randomInt(0, 100_000_000)).padStart(CODE_DIGITS, '0');
     const expiresAt = new Date(Date.now() + env.IDENTITY_EMAIL_CODE_TTL_SECONDS * 1000).toISOString();
 
-    // A fresh issue voids previous unconsumed codes for the account.
+    // A fresh issue voids previous unconsumed codes for the account, and
+    // dead rows (consumed or expired) are purged so the per-account history
+    // stays bounded — verify() only inspects the newest rows.
     await this.db.root
       .update(emailLoginCodes)
       .set({ consumedAt: new Date().toISOString() })
       .where(eq(emailLoginCodes.accountId, accountId));
+
+    await this.db.root
+      .delete(emailLoginCodes)
+      .where(
+        and(
+          eq(emailLoginCodes.accountId, accountId),
+          or(isNotNull(emailLoginCodes.consumedAt), lt(emailLoginCodes.expiresAt, new Date().toISOString())),
+        ),
+      );
 
     await this.db.root.insert(emailLoginCodes).values({
       accountId,
@@ -59,10 +70,13 @@ export class EmailCodeService {
       return { ok: false, reason: 'invalid' };
     }
     const hash = sha256Hex(presentedCode);
+    // Newest first: the live code is always at the head even for accounts
+    // with a long history (an unordered LIMIT could miss it entirely).
     const rows = await this.db.root
       .select()
       .from(emailLoginCodes)
       .where(eq(emailLoginCodes.accountId, accountId))
+      .orderBy(desc(emailLoginCodes.createdAt))
       .limit(20);
     const row = rows.find((r) => r.codeHash === hash && !r.consumedAt);
     if (!row) {

@@ -1,8 +1,9 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { legacyApiKeys } from '../../common/infra/db/legacy-schema';
 import { projects } from '../organizations/schema';
+import { runs } from '../conversations/schema';
 import { EntitlementsService } from '../organizations/entitlements.service';
 import { ManifestRegistryService } from './manifest-registry.service';
 import { spendEvents } from '../billing/schema';
@@ -25,6 +26,16 @@ export interface OnboardingState {
   complete: boolean;
   completed_steps: number;
   steps: OnboardingStep[];
+  /**
+   * Activation truth (first-run ledger F3): earliest COMPLETED assistant run
+   * in the org across standard + test kinds (eval-harness runs are excluded —
+   * they are not user value). `first_usage` (billing spend) deliberately does
+   * NOT proxy this: test-runs skip billing by design.
+   */
+  activation: {
+    activated: boolean;
+    first_activation_at: string | null;
+  };
 }
 
 @Injectable()
@@ -36,11 +47,22 @@ export class ConsoleOnboardingService {
   ) {}
 
   async state(orgId: string): Promise<OnboardingState> {
-    const [projectRows, keyRows, firstUsage, entitledProducts] = await Promise.all([
+    const [projectRows, keyRows, firstUsage, entitledProducts, firstActivation] = await Promise.all([
       this.db.withOrg(orgId, (tx) => tx.select({ id: projects.id }).from(projects).where(and(eq(projects.orgId, orgId), isNull(projects.archivedAt))).limit(1)),
       this.db.root.select({ id: legacyApiKeys.id }).from(legacyApiKeys).where(and(eq(legacyApiKeys.tenant_id, orgId), eq(legacyApiKeys.revoked, false))).limit(1),
       this.db.withOrg(orgId, (tx) => tx.select({ id: spendEvents.id }).from(spendEvents).where(eq(spendEvents.orgId, orgId)).limit(1)),
       Promise.all(this.manifests.list().map(async (m) => ({ key: m.key, state: await this.entitlements.getState(orgId, m.key) }))),
+      // Activation source (F3): earliest successful user-value run in the org.
+      // runKind standard + test only; state COMPLETED only (FAILED/CANCELED/
+      // EXPIRED are not value). Ascending finish order, single row.
+      this.db.withOrg(orgId, (tx) =>
+        tx
+          .select({ finishedAt: runs.finishedAt })
+          .from(runs)
+          .where(and(eq(runs.organizationId, orgId), eq(runs.state, 'COMPLETED'), inArray(runs.runKind, ['standard', 'test'])))
+          .orderBy(runs.finishedAt)
+          .limit(1),
+      ),
     ]);
 
     const hasTrialOrActive = entitledProducts.some((p) => p.state === 'trial' || p.state === 'active');
@@ -51,6 +73,12 @@ export class ConsoleOnboardingService {
       { key: 'first_usage', title: 'Make your first call', hint: 'Point the SDK at the runtime API with your key.', route: '/platform/usage', done: firstUsage.length > 0 },
     ];
     const completed = steps.filter((s) => s.done).length;
-    return { complete: completed === steps.length, completed_steps: completed, steps };
+    const firstActivationAt = firstActivation[0]?.finishedAt ?? null;
+    return {
+      complete: completed === steps.length,
+      completed_steps: completed,
+      steps,
+      activation: { activated: firstActivationAt !== null, first_activation_at: firstActivationAt },
+    };
   }
 }

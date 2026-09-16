@@ -336,7 +336,12 @@ export class InvitesService {
 
   /** Invite-accept URL for the console route (frontend: /platform/invites/:id?token=). */
   inviteUrl(inviteId: string, token: string): string {
-    return `${env.ENGINE_BASE_URL.replace(/\/$/, '')}/platform/invites/${inviteId}?token=${token}`;
+    // UI links must resolve at the console-facing base, not the API origin:
+    // ENGINE_UI_BASE_URL is the documented home for emailed UI links (env.ts)
+    // while ENGINE_BASE_URL stays the fallback, so edge-unified deployments
+    // (single public base) behave exactly as before.
+    const base = (env.ENGINE_UI_BASE_URL || env.ENGINE_BASE_URL).replace(/\/$/, '');
+    return `${base}/platform/invites/${inviteId}?token=${token}`;
   }
 
   private async insert(orgId: string, email: string, role: string, actorId: string): Promise<{ inviteId: string; token: string; expiresAt: string }> {

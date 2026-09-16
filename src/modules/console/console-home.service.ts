@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 import { DbService } from '../../common/infra/db/db.service';
 import { ApiError } from '../../common/http/api-error';
@@ -57,6 +57,8 @@ const FURNITURE_NAV = [
 
 @Injectable()
 export class ConsoleHomeService {
+  private readonly logger = new Logger(ConsoleHomeService.name);
+
   constructor(
     private readonly db: DbService,
     private readonly manifests: ManifestRegistryService,
@@ -68,7 +70,18 @@ export class ConsoleHomeService {
   ) {}
 
   async home(principal: L1Principal, requestedOrgId: string | null): Promise<ConsoleHomeResponse> {
-    const orgs = await this.orgAccess.listContexts(principal.id);
+    let orgs = await this.orgAccess.listContexts(principal.id);
+
+    // Self-healing invariant: every active account holds at least its
+    // personal org. Signup creates it via the AccountCreated listener, but
+    // that runs inside an allSettled emit — a failure there (or a legacy
+    // row predating the listener) must not strand the account on the
+    // no-org page forever. One audited repair attempt here, at the exact
+    // choke point every login lands on; a failed repair falls through to
+    // the no-org payload exactly as before.
+    if (orgs.length === 0) {
+      orgs = await this.ensurePersonalOrg(principal);
+    }
 
     // Context resolution (overview.md): no org → the account lands on the
     // org-creation/invitation page — the payload says so with org: null.
@@ -124,6 +137,21 @@ export class ConsoleHomeService {
           })),
       },
     };
+  }
+
+  private async ensurePersonalOrg(
+    principal: L1Principal,
+  ): Promise<Array<{ orgId: string; role: string; name: string | null }>> {
+    if (!principal.email) {
+      return [];
+    }
+    try {
+      await this.orgAccess.createPersonalOrg(principal.id, principal.email);
+      return await this.orgAccess.listContexts(principal.id);
+    } catch (err) {
+      this.logger.error(`personal org self-heal failed for ${principal.id}: ${(err as Error).message}`);
+      return [];
+    }
   }
 
   private noOrgPayload(): ConsoleHomeResponse {

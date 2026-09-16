@@ -93,6 +93,13 @@ export class SocialAccountService {
       const raced = await this.db.root.select().from(accounts).where(eq(accounts.email, email)).limit(1);
       account = raced[0];
     }
+    // The conflicting row can be arbitrarily OLD (locked/disabled long
+    // ago) — a non-active account must never gain a session on either the
+    // insert or the race path. (Step 1 throws and step 2 skips non-active
+    // rows; without this, step 3 would link straight through a lock.)
+    if (!account || account.status !== 'active') {
+      throw new Error('account is not active');
+    }
     await this.linkIdentity(account.id, profile);
     await this.audit.add({
       action: 'account.created',

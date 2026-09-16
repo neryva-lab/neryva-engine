@@ -57,3 +57,28 @@ The **complete, build-ready specification set for the Neryva console and product
 | Touch invites/members/roles | `team-loop.md` | `engine/src/modules/organizations/invites.service.ts`, `memberships.service.ts` |
 | Touch agents/templates/knowledge/models | `agent-setup.md` | `engine/src/modules/{assistants,knowledge,conversations}/*`, `products/agent-studio/contracts/*` |
 | Add an Engine surface the UI needs | The relevant spec's work-list pattern | `ownership-map.json`, `drizzle/` migration order, controller + roles + tests |
+
+## Running the stack locally (Engine + MCP + Studio) — Windows dev lane
+
+> **For active UI work.** Engine is system of record, Studio is headless, MCP is the versioned `neryva.mcp.v1` contract (`@neryva/mcp-contract` at `products/neryva_mcp/neryva-mcp-contract`) — no separate MCP service. The Windows lane runs everything as native processes (no Docker). Production/CI stays on `ops/docker-compose.yml`.
+
+**Prereqs (once):** Node 22 LTS, `corepack enable` (pnpm 9), EDB Postgres 16/17 + `CREATE EXTENSION vector` (`nmake /F Makefile.win` with `PGROOT=C:\Program Files\PostgreSQL\17`), Memurai on `:6379`, `setup.ps1` downloads `minio.exe`/`mc.exe` to `dev_scripts/bin/`.
+
+```powershell
+# 0. one-time check + downloads
+powershell -ExecutionPolicy Bypass -File dev_scripts/setup.ps1
+
+# 1. full stack (infra + migrate + engine + studio inline + website)
+powershell -ExecutionPolicy Bypass -File dev_scripts/dev.ps1
+# resume: dev_scripts/dev.ps1 -SkipInfra -SkipMigrate
+# infra only: dev_scripts/start-infra.ps1 / stop-infra.ps1
+# health: dev_scripts/check.ps1
+```
+
+**What `dev.ps1` starts:**
+- **Engine** `engine/` → `:3001` (`npx pnpm run dev` → `tsc && node --watch dist/main.js`, `src/main.ts:141`). Requires `NERYVA_RUNTIME_BASE_URL=http://localhost:8080` in `engine/.env` or runs stay `ACCEPTED` (`src/transport/mcp/runtime-control.client.ts:33`).
+- **MCP** — no process; contract is built on demand (`npx pnpm --filter @neryva/mcp-contract build`), consumed via ConnectRPC (`engine/src/transport/mcp` authority, `products/agent-studio/packages/neryva-mcp-client`).
+- **Agent Studio** `products/agent-studio/apps/runtime-control` → `:8080` (`PORT=8080 EXECUTION_MODE=inline npx tsx --watch apps/runtime-control/src/main.ts`, `src/config.ts`). Inline needs no Temporal; `temporal` is the Docker lane.
+- **Website** `console/neryva-website` → `:3000` (`vite.config.ts:41` proxies `/engine→:3001`, `/runtime→:8080`).
+
+**Ports:** `:3001` Engine `/health/live`, `:8080` Studio `/healthz`, `:3000` Web, `:5432` PG, `:6379` Redis, `:9000/:9001` MinIO. Full troubleshooting (pgvector `PGROOT`, MinIO busy, `pnpm` via `npx pnpm`) in `dev_scripts/README.md`.

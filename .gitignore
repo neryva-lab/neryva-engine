@@ -57,8 +57,8 @@ query
 # Windows workstations; shared docs live in docs/frontend/ + ops/README.md.
 # README + example env are intentionally tracked as documentation for the lane.
 # (dev_scripts/* pattern allows negated files inside to be tracked; plain dev_scripts/ would ignore the whole dir)
-dev_scripts/*
+
 !dev_scripts/.gitkeep
 !dev_scripts/README.md
 !dev_scripts/.env.windows.example
-dev_scripts
+dev_scripts/bin

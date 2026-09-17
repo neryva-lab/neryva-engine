@@ -112,34 +112,41 @@ export class WidgetService {
     return { token, expiresAt, config };
   }
 
-  /** Resolve + touch a session from its raw token (cookie or header). */
+  /**
+   * Resolve + touch a session from its raw token (cookie or header).
+   * Same FORCE-RLS root-read class as the G1 getByPublicKey fix: sessions
+   * resolve by exact token hash + account id (the token IS the capability),
+   * so the bypass vehicle applies — single tx for read + sliding-TTL touch.
+   */
   async resolveSession(account: ChannelAccount, token: string | undefined | null): Promise<WidgetSessionContext> {
     if (!token || token.length < 20 || token.length > 128) {
       throw new ApiError(401, 'unauthenticated', 'missing widget session');
     }
-    const rows = await this.db.root
-      .select()
-      .from(channelSessions)
-      .where(and(eq(channelSessions.tokenHash, sha256Hex(token)), eq(channelSessions.channelAccountId, account.id)))
-      .limit(1);
-    const session = rows[0];
-    if (!session || session.status !== 'active') {
-      throw new ApiError(401, 'unauthenticated', 'widget session is not active');
-    }
-    if (Date.parse(session.expiresAt) <= Date.now()) {
-      throw new ApiError(401, 'unauthenticated', 'widget session expired');
-    }
-    // Sliding TTL: extend on activity, never past mint + 24h hard cap.
-    const nextExpiry = new Date(Date.now() + env.CHANNELS__WEB_SESSION_TTL_SECONDS * 1000);
-    const hardCap = new Date(Date.parse(session.createdAt) + 24 * 3600 * 1000);
-    const effective = nextExpiry > hardCap ? hardCap : nextExpiry;
-    if (Date.parse(session.expiresAt) < effective.getTime()) {
-      await this.db.root
-        .update(channelSessions)
-        .set({ expiresAt: effective.toISOString(), lastActiveAt: new Date().toISOString() })
-        .where(eq(channelSessions.id, session.id));
-    }
-    return { session, account };
+    return this.db.withBypass(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(channelSessions)
+        .where(and(eq(channelSessions.tokenHash, sha256Hex(token)), eq(channelSessions.channelAccountId, account.id)))
+        .limit(1);
+      const session = rows[0];
+      if (!session || session.status !== 'active') {
+        throw new ApiError(401, 'unauthenticated', 'widget session is not active');
+      }
+      if (Date.parse(session.expiresAt) <= Date.now()) {
+        throw new ApiError(401, 'unauthenticated', 'widget session expired');
+      }
+      // Sliding TTL: extend on activity, never past mint + 24h hard cap.
+      const nextExpiry = new Date(Date.now() + env.CHANNELS__WEB_SESSION_TTL_SECONDS * 1000);
+      const hardCap = new Date(Date.parse(session.createdAt) + 24 * 3600 * 1000);
+      const effective = nextExpiry > hardCap ? hardCap : nextExpiry;
+      if (Date.parse(session.expiresAt) < effective.getTime()) {
+        await tx
+          .update(channelSessions)
+          .set({ expiresAt: effective.toISOString(), lastActiveAt: new Date().toISOString() })
+          .where(eq(channelSessions.id, session.id));
+      }
+      return { session, account };
+    });
   }
 
   // ── Messaging ─────────────────────────────────────────────────────────────
@@ -210,10 +217,12 @@ export class WidgetService {
       },
       participantScope: 'channel',
     });
-    await this.db.root
-      .update(channelSessions)
-      .set({ conversationId: created.id })
-      .where(and(eq(channelSessions.id, ctx.session.id), eq(channelSessions.organizationId, ctx.account.organizationId)));
+    await this.db.withBypass((tx) =>
+      tx
+        .update(channelSessions)
+        .set({ conversationId: created.id })
+        .where(and(eq(channelSessions.id, ctx.session.id), eq(channelSessions.organizationId, ctx.account.organizationId))),
+    );
     ctx.session.conversationId = created.id;
     return created.id;
   }

@@ -33,6 +33,13 @@ export const providerCredentials = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     rotatedAt: timestamp('rotated_at', { withTimezone: true, mode: 'string' }),
     revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+    /**
+     * P6 (incident semantics): routine revoke vs compromise. Compromise
+     * blocks identically (terminal status) and additionally alerts
+     * owner/admin — the row is never deleted so manifest joins stand.
+     */
+    revocationReason: varchar('revocation_reason', { length: 512 }),
+    compromised: boolean('compromised').notNull().default(false),
   },
   (t) => [
     uniqueIndex('uq_provider_credentials_org_provider_ref').on(t.organizationId, t.provider, t.externalRef),

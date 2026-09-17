@@ -1,0 +1,111 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', 'SF Pro Display', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.04"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F5F5F7"/>
+  <text x="64" y="72" font-size="26" font-weight="600" letter-spacing="-0.4" fill="#1D1D1F">Agent Studio — Design Tokens</text>
+  <text x="64" y="100" font-size="14" fill="#6E6E73">The single source of truth. Every screen below uses only these values.</text>
+
+  <!-- COLOR -->
+  <text x="64" y="152" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">COLOR</text>
+  <g font-size="11" fill="#6E6E73">
+    <rect x="64"  y="168" width="112" height="56" rx="10" fill="#F5F5F7" stroke="#E5E5EA"/><text x="76" y="242">Canvas  #F5F5F7</text>
+    <rect x="192" y="168" width="112" height="56" rx="10" fill="#FFFFFF" stroke="#E5E5EA"/><text x="204" y="242">Surface  #FFFFFF</text>
+    <rect x="320" y="168" width="112" height="56" rx="10" fill="#1D1D1F"/><text x="332" y="242">Graphite  #1D1D1F</text>
+    <rect x="448" y="168" width="112" height="56" rx="10" fill="#6E6E73"/><text x="460" y="242">Text 2  #6E6E73</text>
+    <rect x="576" y="168" width="112" height="56" rx="10" fill="#A1A1A6"/><text x="588" y="242">Text 3  #A1A1A6</text>
+    <rect x="704" y="168" width="112" height="56" rx="10" fill="#0071E3"/><text x="716" y="242">Accent  #0071E3</text>
+    <rect x="832" y="168" width="112" height="56" rx="10" fill="#34C759"/><text x="844" y="242">Ready  #34C759</text>
+    <rect x="960" y="168" width="112" height="56" rx="10" fill="#FF9F0A"/><text x="972" y="242">Attention  #FF9F0A</text>
+    <rect x="1088" y="168" width="112" height="56" rx="10" fill="#FF453A"/><text x="1100" y="242">Error  #FF453A</text>
+    <rect x="1216" y="168" width="112" height="56" rx="10" fill="#C7C7CC"/><text x="1228" y="242">Skipped  #C7C7CC</text>
+  </g>
+
+  <!-- TYPE -->
+  <text x="64" y="300" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">TYPE SCALE — SF Pro / Inter</text>
+  <g fill="#1D1D1F">
+    <text x="64" y="338" font-size="32" font-weight="600" letter-spacing="-0.5">Display  32 / 600 / −0.5</text>
+    <text x="64" y="374" font-size="22" font-weight="600" letter-spacing="-0.3">Title  22 / 600 / −0.3</text>
+    <text x="64" y="404" font-size="17" font-weight="600" letter-spacing="-0.2">Headline  17 / 600</text>
+    <text x="64" y="430" font-size="15" font-weight="400">Body  15 / 400 — the workhorse size</text>
+    <text x="64" y="454" font-size="13" font-weight="500">Label  13 / 500 — nodes, rows, buttons</text>
+    <text x="64" y="476" font-size="11" font-weight="400" fill="#6E6E73">Caption  11 / 400 — metadata, microcopy</text>
+    <text x="64" y="498" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">OVERLINE  11 / 600 / +0.9</text>
+  </g>
+
+  <!-- RADIUS + SHADOW + SPACING -->
+  <text x="640" y="300" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">RADIUS</text>
+  <g font-size="11" fill="#6E6E73">
+    <rect x="640" y="316" width="56" height="56" rx="8"  fill="#FFF" stroke="#E5E5EA"/><text x="646" y="390">8  chip</text>
+    <rect x="716" y="316" width="56" height="56" rx="12" fill="#FFF" stroke="#E5E5EA"/><text x="722" y="390">12  row</text>
+    <rect x="792" y="316" width="56" height="56" rx="14" fill="#FFF" stroke="#E5E5EA"/><text x="798" y="390">14  node</text>
+    <rect x="868" y="316" width="56" height="56" rx="16" fill="#FFF" stroke="#E5E5EA"/><text x="874" y="390">16  card</text>
+    <rect x="944" y="316" width="56" height="56" rx="20" fill="#FFF" stroke="#E5E5EA"/><text x="950" y="390">20  sheet</text>
+  </g>
+
+  <text x="1060" y="300" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">ELEVATION</text>
+  <g font-size="11" fill="#6E6E73">
+    <rect x="1060" y="316" width="80" height="56" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+    <text x="1066" y="390">0  hairline only</text>
+    <rect x="1160" y="316" width="80" height="56" rx="14" fill="#FFF" filter="url(#sh)"/>
+    <text x="1166" y="390">1  card / node</text>
+    <rect x="1260" y="316" width="80" height="56" rx="14" fill="#FFF" stroke="#E5E5EA" filter="url(#sh)"/>
+    <text x="1266" y="390">2  popover</text>
+  </g>
+
+  <text x="640" y="430" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">SPACING — 4pt base</text>
+  <g font-size="11" fill="#6E6E73">
+    <rect x="640" y="446" width="4"   height="12" rx="2" fill="#C7C7CC"/><text x="640" y="476">4</text>
+    <rect x="672" y="446" width="8"   height="12" rx="2" fill="#C7C7CC"/><text x="672" y="476">8</text>
+    <rect x="704" y="446" width="12"  height="12" rx="2" fill="#C7C7CC"/><text x="704" y="476">12</text>
+    <rect x="740" y="446" width="16"  height="12" rx="2" fill="#C7C7CC"/><text x="740" y="476">16</text>
+    <rect x="780" y="446" width="24"  height="12" rx="2" fill="#C7C7CC"/><text x="780" y="476">24</text>
+    <rect x="824" y="446" width="32"  height="12" rx="2" fill="#C7C7CC"/><text x="824" y="476">32</text>
+    <rect x="872" y="446" width="40"  height="12" rx="2" fill="#C7C7CC"/><text x="872" y="476">40</text>
+    <text x="932" y="456">Gutter 24 · Section gap 40 · Canvas margin 100</text>
+  </g>
+
+  <!-- BUTTONS -->
+  <text x="64" y="560" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">BUTTONS — exactly one filled primary per screen</text>
+  <g font-size="14" font-weight="600">
+    <rect x="64"   y="576" width="132" height="44" rx="12" fill="#0071E3"/><text x="130" y="604" text-anchor="middle" fill="#FFF">Continue</text>
+    <rect x="212"  y="576" width="132" height="44" rx="12" fill="#FFF" stroke="#E5E5EA" filter="url(#sh)"/><text x="278" y="604" text-anchor="middle" fill="#1D1D1F">Try draft</text>
+    <rect x="360"  y="576" width="132" height="44" rx="12" fill="#F5F5F7"/><text x="426" y="604" text-anchor="middle" fill="#6E6E73">Skip</text>
+    <rect x="508"  y="576" width="132" height="44" rx="12" fill="#C7C7CC"/><text x="574" y="604" text-anchor="middle" fill="#FFF">Give it life</text>
+    <rect x="656"  y="576" width="132" height="44" rx="12" fill="#FFF" stroke="#FF453A" stroke-opacity="0.35"/><text x="722" y="604" text-anchor="middle" fill="#FF453A">Discard</text>
+  </g>
+  <text x="64" y="646" font-size="11" fill="#A1A1A6">primary · secondary · quiet · blocked-but-tappable · destructive-confirm</text>
+
+  <!-- STATUS -->
+  <text x="64" y="700" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">STATUS — never colour alone; always dot + word</text>
+  <g font-size="12" fill="#1D1D1F">
+    <circle cx="70" cy="726" r="5" fill="#34C759"/><text x="84" y="730">Ready</text>
+    <circle cx="160" cy="726" r="5" fill="#FF9F0A"/><circle cx="160" cy="726" r="9" fill="none" stroke="#FF9F0A" stroke-opacity="0.25" stroke-width="4"/><text x="178" y="730">Needs attention</text>
+    <circle cx="300" cy="726" r="5" fill="#C7C7CC"/><text x="314" y="730">Skipped</text>
+    <circle cx="400" cy="726" r="5" fill="#FF453A"/><text x="414" y="730">Hard failure</text>
+    <circle cx="520" cy="726" r="5" fill="#0071E3"/><text x="534" y="730">In progress</text>
+  </g>
+
+  <!-- INPUT + TOGGLE + PILL -->
+  <text x="700" y="700" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">CONTROLS</text>
+  <rect x="700" y="716" width="320" height="44" rx="12" fill="#FFF" stroke="#E5E5EA" filter="url(#sh)"/>
+  <text x="716" y="743" font-size="14" fill="#A1A1A6">Ghost input — 14px placeholder</text>
+  <rect x="700" y="716" width="2" height="20" rx="1" fill="#0071E3" transform="translate(0,12)"/>
+  <rect x="1040" y="724" width="42" height="26" rx="13" fill="#34C759"/><circle cx="1069" cy="737" r="11" fill="#FFF"/>
+  <text x="1092" y="742" font-size="12" fill="#6E6E73">iOS toggle 42×26</text>
+  <rect x="700" y="784" width="66" height="24" rx="12" fill="#F5F5F7" stroke="#E5E5EA"/><text x="733" y="800" font-size="11" fill="#6E6E73" text-anchor="middle">Draft</text>
+  <rect x="776" y="784" width="98" height="24" rx="12" fill="#FFF4E5" stroke="#FF9F0A" stroke-opacity="0.3"/><text x="825" y="800" font-size="11" fill="#B25E00" text-anchor="middle">Needs setup · 2</text>
+  <rect x="884" y="784" width="86" height="24" rx="12" fill="#EAF9EF" stroke="#34C759" stroke-opacity="0.3"/><text x="927" y="800" font-size="11" fill="#1E7A3C" text-anchor="middle">Compatible</text>
+
+  <!-- MOTION -->
+  <text x="64" y="790" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">MOTION</text>
+  <text x="64" y="814" font-size="12" fill="#6E6E73">fadeUp 280ms · ease [0.22, 1, 0.36, 1]</text>
+  <text x="64" y="834" font-size="12" fill="#6E6E73">spring.snappy  stiffness 400 / damping 32 — popovers, drawers</text>
+  <text x="64" y="854" font-size="12" fill="#6E6E73">spring.weighty  stiffness 180 / damping 24 — node attach, launch lift</text>
+  <text x="64" y="874" font-size="12" fill="#A1A1A6">prefers-reduced-motion → all motion becomes instant. Launch cinematic capped at 900ms and skippable.</text>
+</svg>

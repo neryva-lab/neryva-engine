@@ -220,6 +220,12 @@ export const memoryItems = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }),
     /** FL-2.4: approval-time embedding - semantic memory search (HNSW cosine). */
     embedding: vector('embedding'),
+    /**
+     * P0 (ai-native-review.md BUG-1): the model that produced `embedding`.
+     * The memory leg scopes to it (NULL = legacy row, still participates).
+     * Stamped at write time — the only honest provenance for the vector.
+     */
+    embeddingModel: varchar('embedding_model', { length: 64 }),
     /** FL-3.9: temporal validity - supersedes marks the replaced prior item. */
     validFrom: timestamp('valid_from', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
     invalidAt: timestamp('invalid_at', { withTimezone: true, mode: 'string' }),

@@ -130,13 +130,20 @@ export class ChannelIngestConsumer implements OutboxConsumer {
     if (!payload.channel_account_id || !payload.channel_event_id) {
       throw new PermanentConsumerError('channel.event.received payload incomplete');
     }
-    const accountRows = await this.db.root.select().from(channelAccounts).where(eq(channelAccounts.id, payload.channel_account_id)).limit(1);
-    const account = accountRows[0];
+    // Same FORCE-RLS root-read class as the G1 getByPublicKey fix: the
+    // worker resolves by exact ids from a trusted outbox event (no tenant
+    // context exists here) — bypass vehicle, matching settle() below.
+    // (Hoisted locals: property narrowing does not survive the closure.)
+    const accountId = payload.channel_account_id as string;
+    const eventId = payload.channel_event_id as string;
+    const { account, stored } = await this.db.withBypass(async (tx) => {
+      const accountRows = await tx.select().from(channelAccounts).where(eq(channelAccounts.id, accountId)).limit(1);
+      const eventRows = await tx.select().from(channelEvents).where(eq(channelEvents.id, eventId)).limit(1);
+      return { account: accountRows[0], stored: eventRows[0] };
+    });
     if (!account) {
       throw new PermanentConsumerError(`channel account ${payload.channel_account_id} vanished`);
     }
-    const eventRows = await this.db.root.select().from(channelEvents).where(eq(channelEvents.id, payload.channel_event_id)).limit(1);
-    const stored = eventRows[0];
     if (!stored) {
       throw new PermanentConsumerError(`channel event ${payload.channel_event_id} vanished`);
     }

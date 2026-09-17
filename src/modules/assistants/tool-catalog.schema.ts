@@ -1,4 +1,15 @@
-import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from 'drizzle-orm/pg-core';
 
 /**
  * Tool catalog — org-scoped, versioned tool definitions (ai_harness_plan.md
@@ -25,6 +36,17 @@ export const toolCatalog = pgTable(
     annotations: jsonb('annotations').notNull().default({}),
     /** FL-2.10: customer HTTP endpoint binding {url, method, timeout_ms, header_name}. */
     httpBinding: jsonb('http_binding'),
+    /**
+     * P4 (execution perimeter): in_process | sandboxed_microvm |
+     * external_gateway. Default external_gateway (the pre-P4 posture).
+     * in_process rows must carry no http_binding and no egress list (pure
+     * compute over arguments — enforced at upsert, not here).
+     */
+    executionEnvironment: varchar('execution_environment', { length: 24 })
+      .notNull()
+      .default('external_gateway'),
+    /** P4: declared egress allowlist (JSON string array) — null = none declared. */
+    allowedEgressDomains: jsonb('allowed_egress_domains'),
     /** FL-2.10: envelope-sealed (enc:v1:) per-tool credential — never in the manifest. */
     credentialSealed: text('credential_sealed'),
     /** FL-2.10: max executions per run (default platform cap when null). */
@@ -33,8 +55,12 @@ export const toolCatalog = pgTable(
     hash: varchar('hash', { length: 64 }).notNull(),
     enabled: boolean('enabled').notNull().default(true),
     createdBy: varchar('created_by', { length: 128 }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_tool_catalog_org_name').on(t.organizationId, t.name),
@@ -46,6 +72,14 @@ export type ToolCatalogEntry = typeof toolCatalog.$inferSelect;
 
 export const TOOL_EFFECT_CLASSES = ['READ_ONLY', 'MUTATING', 'DESTRUCTIVE'] as const;
 export const TOOL_APPROVAL_REQUIREMENTS = ['NONE', 'REQUIRED'] as const;
+/** P4: where a tool may execute. */
+export const TOOL_EXECUTION_ENVIRONMENTS = [
+  'in_process',
+  'sandboxed_microvm',
+  'external_gateway',
+] as const;
+/** P4: per-binding execution mode (version payload choice, default live). */
+export const TOOL_EXECUTION_MODES = ['live', 'shadow'] as const;
 
 export interface ToolAnnotations {
   read_only?: boolean;

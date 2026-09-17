@@ -45,6 +45,11 @@ export const assistantPayloadSchema = z.object({
   // payloads still validate; the publish path rejects v2 drafts without one
   // (a published assistant without instructions cannot execute).
   instructions: z.string().min(1).max(32_768).optional(),
+  // G4 (customer-setup-review.md): brand voice is FIRST-CLASS runtime input,
+  // not a consumer-side note. Persisted on the version row + snapshot,
+  // covered by the content hash, and composed into the served system prompt
+  // at context assembly (pinned snapshot = deterministic, auditable).
+  brand: z.string().max(2_000).optional(),
   model_params: modelParamsSchema.optional(),
   budget_policy: budgetPolicySchema.optional(),
   model_policy: z.object({
@@ -55,7 +60,10 @@ export const assistantPayloadSchema = z.object({
     history_limit: z.number().int().min(1).max(100).default(30),
     summary_enabled: z.boolean().optional().default(true),
     knowledge_sources: z.array(z.string()).optional().default([]),
-    memory_scope: z.enum(['user', 'organization', 'conversation', 'none']).optional().default('user'),
+    memory_scope: z
+      .enum(['user', 'organization', 'conversation', 'none'])
+      .optional()
+      .default('user'),
   }),
   tool_policy: z.object({
     tools: z
@@ -66,6 +74,12 @@ export const assistantPayloadSchema = z.object({
           approval: z.enum(['required', 'optional']).optional().default('optional'),
           /** Pin to a tool_catalog entry: publish rejects a mutated/absent schema. */
           schema_hash: z.string().length(64).optional(),
+          /**
+           * P4: per-binding execution mode. `shadow` simulates the call
+           * (Studio returns a marked-simulated result, executes nothing) —
+           * the enterprise rollout path for mutating tools. Default live.
+           */
+          execution_mode: z.enum(['live', 'shadow']).optional().default('live'),
         }),
       )
       .max(50)
@@ -81,6 +95,18 @@ export const assistantPayloadSchema = z.object({
     input_policy: z.string().min(1).default('default'),
     output_policy: z.string().min(1).default('brand-safe'),
     pii_redaction: z.boolean().optional().default(true),
+    /**
+     * P3 (ai-native-review.md §7.3): verdict execution mode. `blocking`
+     * refuses violating content; `logging` records the verdict (span +
+     * Studio-side observation) without severing — the safe rollout path for
+     * new guardrails (measure two weeks, then flip to blocking). Default
+     * blocking: existing versions behave exactly as before. The flip is a
+     * definition change (new draft, auditable) — never a silent toggle.
+     * Engine verdict points are Studio-resolved (moderation hook runs in the
+     * runtime); the engine versions the contract, hands the mode to Studio
+     * in the authorized context, and emits the policy span per run.
+     */
+    execution_mode: z.enum(['blocking', 'logging']).optional().default('blocking'),
   }),
 });
 
@@ -133,7 +159,9 @@ function containsSecret(value: unknown): string | null {
   return containsSecretValue(value);
 }
 
-export function validateAssistantPayload(payload: unknown): { ok: true; normalized: AssistantPayload } | { ok: false; issues: unknown } {
+export function validateAssistantPayload(
+  payload: unknown,
+): { ok: true; normalized: AssistantPayload } | { ok: false; issues: unknown } {
   const secret = containsSecret(payload);
   if (secret) {
     return { ok: false, issues: [{ path: ['payload'], message: secret }] };
@@ -155,7 +183,9 @@ export function assertPublishable(payload: AssistantPayload): void {
   if (typeof payload.instructions !== 'string' || payload.instructions.trim().length === 0) {
     // Typed 422 (never a 500): a draft that reached publish without a prompt
     // is a caller error, not an invariant failure.
-    throw ApiError.validation({ instructions: 'schema v2 assistants require non-empty instructions to publish' });
+    throw ApiError.validation({
+      instructions: 'schema v2 assistants require non-empty instructions to publish',
+    });
   }
 }
 
@@ -168,7 +198,9 @@ export function assertPublishable(payload: AssistantPayload): void {
  * explicit key diff against the schema tree. Known keys are derived from the
  * schema shapes themselves — no second list to drift.
  */
-export function rejectUnknownPayloadKeys(payload: Record<string, unknown>): Record<string, unknown> {
+export function rejectUnknownPayloadKeys(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
   const offenders = collectUnknownKeys(payload, assistantPayloadSchema, []);
   if (offenders.length > 0) {
     throw ApiError.validation({
@@ -194,7 +226,9 @@ function collectUnknownKeys(value: unknown, schema: z.ZodTypeAny, path: string[]
     const element = arrayElement(childSchema);
     if (element) {
       if (Array.isArray(child)) {
-        child.forEach((item, index) => offenders.push(...collectUnknownKeys(item, element, [...childPath, String(index)])));
+        child.forEach((item, index) =>
+          offenders.push(...collectUnknownKeys(item, element, [...childPath, String(index)])),
+        );
       }
       continue;
     }
@@ -210,7 +244,9 @@ function objectShape(schema: z.ZodTypeAny): Record<string, z.ZodTypeAny> | null 
     if (current instanceof z.ZodObject) {
       return current.shape as Record<string, z.ZodTypeAny>;
     }
-    const def = (current as unknown as { _def?: { innerType?: z.ZodTypeAny; schema?: z.ZodTypeAny } })._def;
+    const def = (
+      current as unknown as { _def?: { innerType?: z.ZodTypeAny; schema?: z.ZodTypeAny } }
+    )._def;
     const inner = def?.innerType ?? def?.schema ?? null;
     if (!inner) {
       return null;
@@ -227,7 +263,9 @@ function arrayElement(schema: z.ZodTypeAny): z.ZodTypeAny | null {
     if (current instanceof z.ZodArray) {
       return current._def.type as z.ZodTypeAny;
     }
-    const def = (current as unknown as { _def?: { innerType?: z.ZodTypeAny; schema?: z.ZodTypeAny } })._def;
+    const def = (
+      current as unknown as { _def?: { innerType?: z.ZodTypeAny; schema?: z.ZodTypeAny } }
+    )._def;
     const inner = def?.innerType ?? def?.schema ?? null;
     if (!inner) {
       return null;

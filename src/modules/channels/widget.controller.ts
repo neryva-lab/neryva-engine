@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Header, HttpCode, Options, Param, Post, Query, Req, Res, Sse } from '@nestjs/common';
+import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { createHash } from 'node:crypto';
 import { Observable } from 'rxjs';
@@ -20,12 +21,33 @@ import { ChannelConfig } from './schema';
 
 const SESSION_COOKIE = 'nrv_channel_session';
 
-class MintSessionDto {
+/**
+ * G1 live-verification fix: both DTOs were decorator-less classes, so the
+ * global forbidNonWhitelisted pipe 400d EVERY body — no widget message (or
+ * turnstile-bearing session) could ever post. Declared shapes mirror the
+ * service bounds (text 1..16000 per WidgetService.sendMessage).
+ */
+/** Exported for the pipe contract test (tests/unit/widget-dto.test.ts) — the DTO IS the contract. */
+export class MintSessionDto {
+  @IsOptional()
+  @IsString()
   turnstile_token?: string;
 }
 
-class WidgetMessageDto {
+/** Exported for the pipe contract test (tests/unit/widget-dto.test.ts) — the DTO IS the contract. */
+export class WidgetMessageDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(16_000)
   text!: string;
+
+  /**
+   * Tolerated but IGNORED — idempotency rides the Idempotency-Key header
+   * (see sendMessage). Declared so automation sending both is not refused
+   * for a field the handler never reads.
+   */
+  @IsOptional()
+  @IsString()
   idempotency_key?: string;
 }
 

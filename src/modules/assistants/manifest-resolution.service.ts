@@ -8,7 +8,7 @@ import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { toolCatalog } from './tool-catalog.schema';
 import { BUILT_IN_TOOLS } from './tool-catalog.service';
 import { assistantInstalls, assistantTemplates } from './schema';
-import { documents, documentVersions } from '../knowledge/schema';
+import { chunks, documents, documentVersions, embeddings } from '../knowledge/schema';
 import type { AssistantPayload } from './validation';
 
 /**
@@ -51,6 +51,27 @@ export interface ToolBinding {
   timeout_ms: number;
   retry_policy: { max_attempts: number; backoff_ms: number };
   rate_limit_per_run: number | null;
+  /**
+   * P4 (execution perimeter): environment + egress pinned from the catalog
+   * row AT PUBLISH (built-ins: in_process + []). authorizeToolCall denies
+   * when the live row disagrees (perimeter drift) — the schema hash is
+   * schema identity and intentionally does NOT cover these (see
+   * normalizeToolPerimeter).
+   */
+  execution_environment: 'in_process' | 'sandboxed_microvm' | 'external_gateway';
+  allowed_egress_domains: string[];
+  /** P4: live | shadow, from the version's tool_policy entry (default live). */
+  execution_mode: 'live' | 'shadow';
+}
+
+export interface EmbeddingCoverage {
+  /** The model the pinned version's chunks must be embedded with. */
+  model: string;
+  /** Chunks in the pinned document version. */
+  chunk_total: number;
+  /** Of those, rows present in `embeddings` for `model`. */
+  chunk_embedded: number;
+  complete: boolean;
 }
 
 export interface KnowledgePin {
@@ -62,6 +83,14 @@ export interface KnowledgePin {
   sha256_hex: string | null;
   parser_version: string | null;
   embedding_model: string | null;
+  /**
+   * P0 (ai-native-review.md GAP-1): embedding coverage of the PINNED version
+   * for the pin's model. A READY document whose vectors are not (yet) indexed
+   * for the active model retrieval-scores nothing — the publish gate treats
+   * incomplete coverage as degraded. Null when unresolved (unknown ≠
+   * incomplete) or when the pin carries no model (legacy snapshots).
+   */
+  embedding_coverage: EmbeddingCoverage | null;
   /** Org knowledge_config at publish (id + payload hash + chunking params), null when unpublished. */
   knowledge_config: {
     config_id: string;
@@ -108,6 +137,34 @@ export function unresolvedPinSlugs(manifest: Pick<ResolvedManifest, 'knowledgePi
   return manifest.knowledgePins.filter((p) => !p.resolved).map((p) => p.source_slug);
 }
 
+/**
+ * P0 (ai-native-review.md GAP-1) — pins that resolve to a document but whose
+ * pinned version is NOT fully embedded for the pin's model. Pure over the
+ * resolved manifest — unit-tested. Pins with null coverage (unresolved, or
+ * legacy snapshots predating coverage) are NOT listed here: unknown coverage
+ * is not incomplete coverage, and legacy rows must keep publishing exactly as
+ * before this field existed.
+ */
+export function undercoveredPinSlugs(
+  manifest: Pick<ResolvedManifest, 'knowledgePins'>,
+): Array<{ slug: string; model: string; embedded: number; total: number }> {
+  const out: Array<{ slug: string; model: string; embedded: number; total: number }> = [];
+  for (const pin of manifest.knowledgePins) {
+    // Legacy snapshot rows predate the field (undefined at runtime) — the
+    // nullish coalescing keeps them out: unknown coverage is not incomplete.
+    const coverage = pin.embedding_coverage ?? null;
+    if (pin.resolved && coverage && !coverage.complete) {
+      out.push({
+        slug: pin.source_slug,
+        model: coverage.model,
+        embedded: coverage.chunk_embedded,
+        total: coverage.chunk_total,
+      });
+    }
+  }
+  return out;
+}
+
 /** Default retry posture, versioned with the snapshot (auditable, overridable later). */
 const RETRY_POLICY_V1 = {
   READ_ONLY: { max_attempts: 2, backoff_ms: 500 },
@@ -122,9 +179,18 @@ export class ManifestResolutionService {
     private readonly configPublish: ConfigPublishService,
   ) {}
 
-  async resolveForPublish(tx: NodePgDatabase, orgId: string, assistantId: string, payload: AssistantPayload): Promise<ResolvedManifest> {
+  async resolveForPublish(
+    tx: NodePgDatabase,
+    orgId: string,
+    assistantId: string,
+    payload: AssistantPayload,
+  ): Promise<ResolvedManifest> {
     const toolBindings = await this.resolveToolBindings(tx, orgId, payload.tool_policy.tools);
-    const knowledgePins = await this.resolveKnowledgePins(tx, orgId, payload.context_policy.knowledge_sources ?? []);
+    const knowledgePins = await this.resolveKnowledgePins(
+      tx,
+      orgId,
+      payload.context_policy.knowledge_sources ?? [],
+    );
     const modelRef = await this.resolveModelRef(orgId, payload);
     const templateRef = await this.resolveTemplateRef(tx, orgId, assistantId);
     const manifestHash = canonicalHash({
@@ -134,6 +200,9 @@ export class ManifestResolutionService {
       template_ref: templateRef,
       guardrail_policy: payload.guardrail_policy,
       budget_policy: payload.budget_policy ?? null,
+      // G4: brand is prompt-affecting — it joins the manifest hash so a
+      // voice change is a manifest change (pins, diffs, and audits agree).
+      brand_voice: payload.brand ?? null,
     });
     return { toolBindings, knowledgePins, modelRef, templateRef, manifestHash };
   }
@@ -143,7 +212,13 @@ export class ManifestResolutionService {
   private async resolveToolBindings(
     tx: NodePgDatabase,
     orgId: string,
-    tools: Array<{ name: string; access: string; approval?: string; schema_hash?: string }>,
+    tools: Array<{
+      name: string;
+      access: string;
+      approval?: string;
+      schema_hash?: string;
+      execution_mode?: string;
+    }>,
   ): Promise<ToolBinding[]> {
     const catalogNames = tools.map((t) => t.name).filter((n) => !BUILT_IN_TOOLS.has(n));
     const rows =
@@ -153,6 +228,8 @@ export class ManifestResolutionService {
     const byName = new Map(rows.map((r) => [r.name, r]));
     return tools.map((entry) => {
       const builtin = BUILT_IN_TOOLS.get(entry.name);
+      const executionMode =
+        entry.execution_mode === 'shadow' ? ('shadow' as const) : ('live' as const);
       if (builtin) {
         return {
           tool_id: null,
@@ -161,11 +238,18 @@ export class ManifestResolutionService {
           schema_hash: null,
           capability_class: builtin.effectClass,
           authorization_policy: null,
-          approval_mode: entry.approval === 'required' || builtin.approvalRequirement === 'REQUIRED' ? 'REQUIRED' : 'NONE',
+          approval_mode:
+            entry.approval === 'required' || builtin.approvalRequirement === 'REQUIRED'
+              ? 'REQUIRED'
+              : 'NONE',
           credential_binding: null,
           timeout_ms: 30000,
           retry_policy: { ...RETRY_POLICY_V1[builtin.effectClass] },
           rate_limit_per_run: null,
+          // Built-ins execute in the platform itself — no egress surface.
+          execution_environment: 'in_process',
+          allowed_egress_domains: [],
+          execution_mode: executionMode,
         } satisfies ToolBinding;
       }
       const row = byName.get(entry.name);
@@ -173,13 +257,30 @@ export class ManifestResolutionService {
         // assertToolPins runs before resolution in the publish path and
         // rejects this case with a typed error — this is the fail-closed
         // backstop if resolution is ever called without it.
-        throw ApiError.validation({ tool_policy: `tool pins rejected: ${entry.name}: not present in the tool catalog or disabled` });
+        throw ApiError.validation({
+          tool_policy: `tool pins rejected: ${entry.name}: not present in the tool catalog or disabled`,
+        });
       }
       if (entry.schema_hash !== undefined && entry.schema_hash !== row.hash) {
-        throw ApiError.validation({ tool_policy: `tool pins rejected: ${entry.name}: schema_hash does not match the catalog entry (pin is stale)` });
+        throw ApiError.validation({
+          tool_policy: `tool pins rejected: ${entry.name}: schema_hash does not match the catalog entry (pin is stale)`,
+        });
       }
       const httpBinding = (row.httpBinding ?? {}) as { timeout_ms?: number };
       const capability = row.effectClass as ToolBinding['capability_class'];
+      // P4: perimeter pinned from the live row. Migration 0066 backfills
+      // environment (default external_gateway = historical posture); egress
+      // stays null for binding-less rows. Defensive read: a null egress is
+      // [] (no declared surface), never "unbounded".
+      const envRaw = row.executionEnvironment;
+      const executionEnvironment =
+        envRaw === 'in_process' || envRaw === 'sandboxed_microvm' || envRaw === 'external_gateway'
+          ? envRaw
+          : ('external_gateway' as const);
+      const egressRaw = row.allowedEgressDomains as unknown;
+      const allowedEgress = Array.isArray(egressRaw)
+        ? egressRaw.filter((d): d is string => typeof d === 'string')
+        : [];
       return {
         tool_id: row.id,
         name: entry.name,
@@ -187,18 +288,28 @@ export class ManifestResolutionService {
         schema_hash: row.hash,
         capability_class: capability,
         authorization_policy: null,
-        approval_mode: entry.approval === 'required' || row.approvalRequirement === 'REQUIRED' ? 'REQUIRED' : 'NONE',
+        approval_mode:
+          entry.approval === 'required' || row.approvalRequirement === 'REQUIRED'
+            ? 'REQUIRED'
+            : 'NONE',
         credential_binding: row.credentialSealed != null ? { catalog_tool_id: row.id } : null,
         timeout_ms: typeof httpBinding.timeout_ms === 'number' ? httpBinding.timeout_ms : 30000,
         retry_policy: { ...RETRY_POLICY_V1[capability] },
         rate_limit_per_run: row.rateLimitPerRun,
+        execution_environment: executionEnvironment,
+        allowed_egress_domains: allowedEgress,
+        execution_mode: executionMode,
       } satisfies ToolBinding;
     });
   }
 
   // ── Knowledge (TPL-5.3) ──────────────────────────────────────────────
 
-  private async resolveKnowledgePins(tx: NodePgDatabase, orgId: string, sources: string[]): Promise<KnowledgePin[]> {
+  private async resolveKnowledgePins(
+    tx: NodePgDatabase,
+    orgId: string,
+    sources: string[],
+  ): Promise<KnowledgePin[]> {
     if (sources.length === 0) {
       return [];
     }
@@ -240,6 +351,7 @@ export class ManifestResolutionService {
       sha256_hex: null,
       parser_version: null,
       embedding_model: null,
+      embedding_coverage: null,
       knowledge_config: configRef,
     };
     // E-2 convention (deterministic): a seed slug matches the READY document
@@ -249,7 +361,13 @@ export class ManifestResolutionService {
     const docs = await tx
       .select({ id: documents.id, embeddingModel: documents.embeddingModel })
       .from(documents)
-      .where(and(eq(documents.organizationId, orgId), eq(documents.sourceSlug, slug), eq(documents.state, 'ready')))
+      .where(
+        and(
+          eq(documents.organizationId, orgId),
+          eq(documents.sourceSlug, slug),
+          eq(documents.state, 'ready'),
+        ),
+      )
       .limit(1);
     if (docs.length === 0) {
       return unresolved;
@@ -257,13 +375,23 @@ export class ManifestResolutionService {
     const versions = await tx
       .select()
       .from(documentVersions)
-      .where(and(eq(documentVersions.organizationId, orgId), eq(documentVersions.documentId, docs[0].id)))
+      .where(
+        and(
+          eq(documentVersions.organizationId, orgId),
+          eq(documentVersions.documentId, docs[0].id),
+        ),
+      )
       .orderBy(desc(documentVersions.version))
       .limit(1);
     if (versions.length === 0) {
       return unresolved;
     }
     const v = versions[0];
+    // P0 (GAP-1): coverage of the PINNED version for the doc's active model.
+    // One aggregate: chunks in the pinned version vs embedding rows for the
+    // model. A null doc model means legacy vectors — coverage is unknown, not
+    // incomplete (null keeps legacy publishes behaving exactly as before).
+    const coverage = await this.resolveEmbeddingCoverage(tx, orgId, v.id, docs[0].embeddingModel);
     return {
       source_slug: slug,
       resolved: true,
@@ -273,15 +401,45 @@ export class ManifestResolutionService {
       sha256_hex: Buffer.from(v.sha256 as unknown as Uint8Array).toString('hex'),
       parser_version: v.parserVersion,
       embedding_model: docs[0].embeddingModel,
+      embedding_coverage: coverage,
       knowledge_config: configRef,
     };
+  }
+
+  private async resolveEmbeddingCoverage(
+    tx: NodePgDatabase,
+    orgId: string,
+    documentVersionId: string,
+    model: string | null,
+  ): Promise<EmbeddingCoverage | null> {
+    if (!model) {
+      return null;
+    }
+    const rows = await tx
+      .select({ chunkId: chunks.id, embedded: embeddings.id })
+      .from(chunks)
+      .leftJoin(embeddings, and(eq(embeddings.chunkId, chunks.id), eq(embeddings.model, model)))
+      .where(
+        and(eq(chunks.documentVersionId, documentVersionId), eq(chunks.organizationId, orgId)),
+      );
+    const total = rows.length;
+    const embedded = rows.filter((r) => r.embedded !== null).length;
+    // Vacuous truth: a chunkless version has nothing to index, so there is
+    // no indexing gap to refuse over — degraded means "vectors missing", not
+    // "document empty".
+    return { model, chunk_total: total, chunk_embedded: embedded, complete: embedded === total };
   }
 
   // ── Models (TPL-5.4) ─────────────────────────────────────────────────
 
   private async resolveModelRef(orgId: string, payload: AssistantPayload): Promise<ModelRef> {
     const catalog = await this.safeLatestConfig(orgId, 'model_catalog');
-    const entries = (catalog?.payload as { models?: Array<{ provider: string; model: string; enabled: boolean }> } | null)?.models ?? null;
+    const entries =
+      (
+        catalog?.payload as {
+          models?: Array<{ provider: string; model: string; enabled: boolean }>;
+        } | null
+      )?.models ?? null;
     const catalogPayloadHash = catalog !== null ? canonicalHash(catalog.payload) : null;
     return {
       models: payload.model_policy.allowed_models.map((alias) => {
@@ -307,8 +465,16 @@ export class ManifestResolutionService {
 
   // ── Template provenance (TPL-5.5) ────────────────────────────────────
 
-  private async resolveTemplateRef(tx: NodePgDatabase, orgId: string, assistantId: string): Promise<TemplateRef | null> {
-    const installs = await tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1);
+  private async resolveTemplateRef(
+    tx: NodePgDatabase,
+    orgId: string,
+    assistantId: string,
+  ): Promise<TemplateRef | null> {
+    const installs = await tx
+      .select()
+      .from(assistantInstalls)
+      .where(eq(assistantInstalls.assistantId, assistantId))
+      .limit(1);
     const install = installs[0];
     if (!install || install.organizationId !== orgId) {
       return null;
@@ -316,16 +482,31 @@ export class ManifestResolutionService {
     const templates = await tx
       .select({ hash: assistantTemplates.hash })
       .from(assistantTemplates)
-      .where(and(eq(assistantTemplates.slug, install.slug), eq(assistantTemplates.version, install.templateVersion)))
+      .where(
+        and(
+          eq(assistantTemplates.slug, install.slug),
+          eq(assistantTemplates.version, install.templateVersion),
+        ),
+      )
       .limit(1);
-    return { slug: install.slug, version: install.templateVersion, definition_hash: templates[0]?.hash ?? null };
+    return {
+      slug: install.slug,
+      version: install.templateVersion,
+      definition_hash: templates[0]?.hash ?? null,
+    };
   }
 
-  private async safeLatestConfig(orgId: string, scope: 'model_catalog' | 'knowledge_config'): Promise<{ id: string; payload: unknown } | null> {
+  private async safeLatestConfig(
+    orgId: string,
+    scope: 'model_catalog' | 'knowledge_config',
+  ): Promise<{ id: string; payload: unknown } | null> {
     try {
       const latest = await this.configPublish.latest(orgId, scope, null);
       if (!latest) return null;
-      return { id: (latest as { id?: string }).id ?? 'unknown', payload: (latest as { payload?: unknown }).payload ?? null };
+      return {
+        id: (latest as { id?: string }).id ?? 'unknown',
+        payload: (latest as { payload?: unknown }).payload ?? null,
+      };
     } catch {
       return null;
     }

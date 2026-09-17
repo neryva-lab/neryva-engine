@@ -23,11 +23,20 @@ import { ConfigPublishModule } from '../config-publish/config-publish.module';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { ConversationsModule } from '../conversations/conversations.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   // ConversationsModule (ConversationsService) backs the REL-2.4 test-run
   // endpoint; the conversations cone does not import this module, so no cycle.
-  imports: [ConfigPublishModule, KnowledgeModule, OrganizationsModule, ConversationsModule],
+  // NotificationsModule (P6 compromise alerts): imports Corporate/Identity/
+  // Organizations — none import this module, so no cycle either.
+  imports: [
+    ConfigPublishModule,
+    KnowledgeModule,
+    OrganizationsModule,
+    ConversationsModule,
+    NotificationsModule,
+  ],
   controllers: [
     AssistantsController,
     TemplatesController,
@@ -52,6 +61,12 @@ import { ConversationsModule } from '../conversations/conversations.module';
     ModelCostService,
     BurnRateService,
   ],
-  exports: [AssistantsService, TemplatesService, ToolCatalogService, ControlBlocksService, BurnRateService],
+  exports: [
+    AssistantsService,
+    TemplatesService,
+    ToolCatalogService,
+    ControlBlocksService,
+    BurnRateService,
+  ],
 })
 export class AssistantsModule {}

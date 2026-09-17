@@ -8,9 +8,14 @@ import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
-import { claimIdempotency, completeIdempotency, IdempotencyScope } from '../../common/http/idempotency-records';
+import {
+  claimIdempotency,
+  completeIdempotency,
+  IdempotencyScope,
+} from '../../common/http/idempotency-records';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { uuidv7 } from '../../common/ids/uuidv7';
+import { newTraceId, withSpan } from '../../common/observability/spans';
 import {
   conversations,
   conversationParticipants,
@@ -55,7 +60,11 @@ import { EscalationsService } from './escalations.service';
 import { assistants, policySnapshots, runManifests } from '../assistants/schema';
 import { ControlBlocksService } from '../assistants/control-blocks.service';
 import { ModelCostService } from '../assistants/model-cost.service';
-import { estimateCostMicros, microsToLedgerString } from '../assistants/model-cost.schema';
+import {
+  estimateCostMicros,
+  microsToLedgerString,
+  normalizeUsageCacheSplit,
+} from '../assistants/model-cost.schema';
 import { productEntitlements } from '../organizations/schema';
 import { quotaReservations } from '../billing/usage-ledger.schema';
 import { env } from '../../common/config/env';
@@ -106,7 +115,9 @@ export class ConversationsService {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.assistantId, 'assistantId');
     const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const exists = await tx.execute(sql`select 1 from assistants where id = ${input.assistantId}::uuid limit 1`);
+      const exists = await tx.execute(
+        sql`select 1 from assistants where id = ${input.assistantId}::uuid limit 1`,
+      );
       if (exists.rows.length === 0) {
         throw ApiError.notFound('assistant');
       }
@@ -147,11 +158,16 @@ export class ConversationsService {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
     await this.purge.assertNotTombstoned('conversation', conversationId);
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1));
+    const rows = await this.db.withOrg(orgId, (tx) =>
+      tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1),
+    );
     return rows[0] ?? null;
   }
 
-  async listConversations(orgId: string, opts?: { limit?: number; assistantId?: string }): Promise<Conversation[]> {
+  async listConversations(
+    orgId: string,
+    opts?: { limit?: number; assistantId?: string },
+  ): Promise<Conversation[]> {
     assertUuid(orgId, 'orgId');
     const limit = clampLimit(opts?.limit);
     const conditions = [eq(conversations.organizationId, orgId)];
@@ -169,16 +185,29 @@ export class ConversationsService {
     );
   }
 
-  async setConversationStatus(orgId: string, conversationId: string, status: 'active' | 'archived', expectedVersion?: number): Promise<Conversation> {
+  async setConversationStatus(
+    orgId: string,
+    conversationId: string,
+    status: 'active' | 'archived',
+    expectedVersion?: number,
+  ): Promise<Conversation> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
     return this.db.withOrg(orgId, async (tx) => {
-      const current = await tx.select().from(conversations).where(eq(conversations.id, conversationId)).for('update').limit(1);
+      const current = await tx
+        .select()
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .for('update')
+        .limit(1);
       if (current.length === 0) {
         throw ApiError.notFound('conversation');
       }
       if (expectedVersion !== undefined && current[0].version !== expectedVersion) {
-        throw ApiError.conflict('stale conversation version', { expected: expectedVersion, actual: current[0].version });
+        throw ApiError.conflict('stale conversation version', {
+          expected: expectedVersion,
+          actual: current[0].version,
+        });
       }
       const updated = await tx
         .update(conversations)
@@ -213,7 +242,14 @@ export class ConversationsService {
      * pin a draft whose snapshot the caller materialized first).
      */
     pinVersionId?: string;
-  }): Promise<{ message_id: string; run_id: string | null; sequence: number; conversation_version: number; auto_responder?: 'paused'; replay?: boolean }> {
+  }): Promise<{
+    message_id: string;
+    run_id: string | null;
+    sequence: number;
+    conversation_version: number;
+    auto_responder?: 'paused';
+    replay?: boolean;
+  }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     validateMessageContent(input.content);
@@ -233,20 +269,43 @@ export class ConversationsService {
         }
       : undefined;
 
-    return this.db.withOrg(input.orgId, async (tx) => {
-      if (scope) {
-        const claim = await claimIdempotency(tx, scope);
-        if (claim.kind === 'replay') {
-          return { ...(claim.response as { message_id: string; run_id: string | null; sequence: number; conversation_version: number }), replay: true };
-        }
-      }
+    // P1 (ai-native-review.md §6a) — the run's root span. The trace id is
+    // minted here when the caller supplies none, then pinned into BOTH the
+    // run manifest (execution identity) and the outbox event (async
+    // propagation substrate) — one id from accept to run completion.
+    const traceId = input.traceId ?? newTraceId();
+    const traced = { ...input, traceId };
+    return withSpan(
+      'run.accept',
+      {
+        org_id: input.orgId,
+        conversation_id: input.conversationId,
+        run_kind: input.runKind ?? 'standard',
+      },
+      async () =>
+        this.db.withOrg(input.orgId, async (tx) => {
+          if (scope) {
+            const claim = await claimIdempotency(tx, scope);
+            if (claim.kind === 'replay') {
+              return {
+                ...(claim.response as {
+                  message_id: string;
+                  run_id: string | null;
+                  sequence: number;
+                  conversation_version: number;
+                }),
+                replay: true,
+              };
+            }
+          }
 
-      const result = await this.executeStartMessage(tx, input);
-      if (scope) {
-        await completeIdempotency(tx, scope, result);
-      }
-      return result;
-    });
+          const result = await this.executeStartMessage(tx, traced);
+          if (scope) {
+            await completeIdempotency(tx, scope, result);
+          }
+          return result;
+        }),
+    );
   }
 
   /** The atomic core — everything here commits or rolls back together. */
@@ -263,9 +322,20 @@ export class ConversationsService {
       runKind?: 'standard' | 'test' | 'eval';
       pinVersionId?: string;
     },
-  ): Promise<{ message_id: string; run_id: string | null; sequence: number; conversation_version: number; auto_responder?: 'paused' }> {
+  ): Promise<{
+    message_id: string;
+    run_id: string | null;
+    sequence: number;
+    conversation_version: number;
+    auto_responder?: 'paused';
+  }> {
     // Row lock serializes sequence allocation + the one-active-turn policy.
-    const conv = await tx.select().from(conversations).where(eq(conversations.id, input.conversationId)).for('update').limit(1);
+    const conv = await tx
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, input.conversationId))
+      .for('update')
+      .limit(1);
     if (conv.length === 0) {
       throw ApiError.notFound('conversation');
     }
@@ -273,7 +343,10 @@ export class ConversationsService {
     if (conversation.status !== 'active' && conversation.status !== 'escalated') {
       throw ApiError.conflict('conversation is not active', { status: conversation.status });
     }
-    if (input.expectedConversationVersion !== undefined && conversation.version !== input.expectedConversationVersion) {
+    if (
+      input.expectedConversationVersion !== undefined &&
+      conversation.version !== input.expectedConversationVersion
+    ) {
       throw ApiError.conflict('stale conversation version', {
         expected: input.expectedConversationVersion,
         actual: conversation.version,
@@ -294,16 +367,27 @@ export class ConversationsService {
     }
 
     // Pin the assistant's active published version + policy snapshot at acceptance.
-    // REL-2.2/REL-2.4: an explicit pinVersionId overrides the release-pointer
-    // selection — the eval harness pins ITS version (production pointers may
-    // disagree), and test runs pin a draft (snapshot materialized by the
-    // caller). Explicit pins still resolve a snapshot: no run without one.
+    // REL-2.2/REL-2.4 + R-2 (team_setup_ledger.md §3): an explicit
+    // pinVersionId overrides the release-pointer selection — the eval harness
+    // pins ITS version (production pointers may disagree), and test AND eval
+    // runs pin drafts (snapshot materialized by the caller). Serving traffic
+    // (standard) never takes a draft pin. Explicit pins still resolve a
+    // snapshot: no run without one.
     let pin: { version_id: string; snapshot_id: string; release: ReleasePointer } | null = null;
     if (!escalated) {
       pin =
         input.pinVersionId !== undefined
-          ? await this.pinExplicitVersion(tx, input.pinVersionId, input.runKind === 'test')
-          : await this.pickVersionPin(tx, conversation.assistantId, conversation.id, conversationReleaseChannel(conversation.channelBinding));
+          ? await this.pinExplicitVersion(
+              tx,
+              input.pinVersionId,
+              input.runKind === 'test' || input.runKind === 'eval',
+            )
+          : await this.pickVersionPin(
+              tx,
+              conversation.assistantId,
+              conversation.id,
+              conversationReleaseChannel(conversation.channelBinding),
+            );
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
@@ -318,7 +402,9 @@ export class ConversationsService {
     // follow the knowledge plane's claim-check policy). The pinned ref keeps
     // only digests and types — never object keys or credentials.
     const attachmentRefs =
-      input.attachments && input.attachments.length > 0 ? await this.validateAttachments(tx, input.orgId, input.attachments) : null;
+      input.attachments && input.attachments.length > 0
+        ? await this.validateAttachments(tx, input.orgId, input.attachments)
+        : null;
 
     await tx.insert(messages).values({
       id: messageId,
@@ -348,7 +434,9 @@ export class ConversationsService {
         });
       } catch (err) {
         if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-          throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+          throw ApiError.conflict('conversation already has an active run', {
+            conversation_id: input.conversationId,
+          });
         }
         throw err;
       }
@@ -371,6 +459,7 @@ export class ConversationsService {
         messageId,
         channel: (conversation.channelBinding ?? null) as unknown,
         release: activePin.release,
+        traceId: input.traceId,
       });
 
       await recordOutboxEvent(tx, {
@@ -392,10 +481,19 @@ export class ConversationsService {
     }
 
     const nextVersion = conversation.version + 1;
-    await tx.update(conversations).set({ version: nextVersion, updatedAt: new Date().toISOString() }).where(eq(conversations.id, input.conversationId));
+    await tx
+      .update(conversations)
+      .set({ version: nextVersion, updatedAt: new Date().toISOString() })
+      .where(eq(conversations.id, input.conversationId));
 
     if (escalated) {
-      return { message_id: messageId, run_id: null, sequence, conversation_version: nextVersion, auto_responder: 'paused' };
+      return {
+        message_id: messageId,
+        run_id: null,
+        sequence,
+        conversation_version: nextVersion,
+        auto_responder: 'paused',
+      };
     }
     return { message_id: messageId, run_id: runId, sequence, conversation_version: nextVersion };
   }
@@ -418,10 +516,11 @@ export class ConversationsService {
    * (production, default) → newest active row of any address.
    */
   /**
-   * REL-2.2/REL-2.4 — explicit version pin (bypasses release pointers).
-   * allowDraft=true (test runs) accepts any version status; eval pins its
-   * PUBLISHED version. The snapshot must already exist — drafts get one
-   * materialized by the test-run entry point before this runs.
+   * REL-2.2/REL-2.4 + R-2 (team_setup_ledger.md §3) — explicit version pin
+   * (bypasses release pointers). allowDraft=true (test runs AND eval runs)
+   * accepts DRAFT + PUBLISHED; anything else (e.g. RETIRED) refuses. The
+   * snapshot must already exist — drafts get one materialized by the
+   * test-run / evaluate entry points before this runs (no snapshot → no run).
    */
   private async pinExplicitVersion(
     tx: NodePgDatabase,
@@ -440,7 +539,13 @@ export class ConversationsService {
       limit 1
     `);
     const row = rows.rows[0] as { version_id: string; snapshot_id: string } | undefined;
-    return row ? { version_id: row.version_id, snapshot_id: row.snapshot_id, release: { type: 'active_pointer' } } : null;
+    return row
+      ? {
+          version_id: row.version_id,
+          snapshot_id: row.snapshot_id,
+          release: { type: 'active_pointer' },
+        }
+      : null;
   }
 
   /**
@@ -460,8 +565,12 @@ export class ConversationsService {
     if (ent.length === 0) {
       return; // no plan row → no plan limits (the entitlement guard owns unentitled access)
     }
-    const limits = (ent[0].limits ?? {}) as { monthly_spend_usd?: unknown; monthly_events?: unknown };
-    const spendLimit = typeof limits.monthly_spend_usd === 'number' ? limits.monthly_spend_usd : null;
+    const limits = (ent[0].limits ?? {}) as {
+      monthly_spend_usd?: unknown;
+      monthly_events?: unknown;
+    };
+    const spendLimit =
+      typeof limits.monthly_spend_usd === 'number' ? limits.monthly_spend_usd : null;
     const eventsLimit = typeof limits.monthly_events === 'number' ? limits.monthly_events : null;
     if (spendLimit === null && eventsLimit === null) {
       return;
@@ -486,7 +595,10 @@ export class ConversationsService {
       `);
       const spendUsed = Number((spend.rows[0] as { spend: string | null } | undefined)?.spend ?? 0);
       if (spendUsed >= spendLimit) {
-        throw ApiError.quotaExceeded('monthly_spend', { limit_usd: spendLimit, used_usd: spendUsed });
+        throw ApiError.quotaExceeded('monthly_spend', {
+          limit_usd: spendLimit,
+          used_usd: spendUsed,
+        });
       }
     }
     const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
@@ -503,7 +615,11 @@ export class ConversationsService {
   }
 
   /** REL-4.4 — terminal reservation transition (COMMITTED on success, RELEASED on failure). */
-  private async settleRunQuota(tx: NodePgDatabase, runId: string, committed: boolean): Promise<void> {
+  private async settleRunQuota(
+    tx: NodePgDatabase,
+    runId: string,
+    committed: boolean,
+  ): Promise<void> {
     await tx.execute(sql`
       update quota_reservations
       set state = ${committed ? 'COMMITTED' : 'RELEASED'},
@@ -518,15 +634,20 @@ export class ConversationsService {
     conversationId: string,
     channelLabel?: string,
   ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> {
-    const byVersionId = (versionId: string, release: ReleasePointer): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> =>
+    const byVersionId = (
+      versionId: string,
+      release: ReleasePointer,
+    ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> =>
       tx
-        .execute(sql`
+        .execute(
+          sql`
           select av.id as version_id, ps.id as snapshot_id
           from assistant_versions av
           join policy_snapshots ps on ps.assistant_version_id = av.id
           where av.id = ${versionId}::uuid and av.status = 'PUBLISHED'
           limit 1
-        `)
+        `,
+        )
         .then((r) => {
           const row = r.rows[0] as { version_id: string; snapshot_id: string } | undefined;
           return row ? { ...row, release } : null;
@@ -538,10 +659,17 @@ export class ConversationsService {
       order by created_at desc
       limit 20
     `);
-    const rollouts = rolloutRows.rows as Array<{ id: string; versions: unknown; environment: string; channel: string }>;
+    const rollouts = rolloutRows.rows as Array<{
+      id: string;
+      versions: unknown;
+      environment: string;
+      channel: string;
+    }>;
     const preferred =
       // 1. the conversation's own channel (operator-addressed release)
-      (channelLabel ? rollouts.find((r) => r.environment === 'production' && r.channel === channelLabel) : undefined) ??
+      (channelLabel
+        ? rollouts.find((r) => r.environment === 'production' && r.channel === channelLabel)
+        : undefined) ??
       // 2. the default production address
       rollouts.find((r) => r.environment === 'production' && r.channel === 'default') ??
       // 3. back-compat: the newest active row of any address
@@ -553,7 +681,12 @@ export class ConversationsService {
         const variants: Array<{ version_id: string; weight: number }> = [];
         for (const v of raw) {
           const rec = v as { version_id?: unknown; weight?: unknown };
-          if (typeof rec?.version_id === 'string' && typeof rec?.weight === 'number' && Number.isFinite(rec.weight) && rec.weight > 0) {
+          if (
+            typeof rec?.version_id === 'string' &&
+            typeof rec?.weight === 'number' &&
+            Number.isFinite(rec.weight) &&
+            rec.weight > 0
+          ) {
             variants.push({ version_id: rec.version_id, weight: Math.floor(rec.weight) });
           }
         }
@@ -588,19 +721,32 @@ export class ConversationsService {
    * Disabled flag or active assistant block refuses NEW runs with a typed
    * conflict; in-flight runs are never touched here.
    */
-  private async assertAssistantRunnable(tx: NodePgDatabase, orgId: string, assistantId: string): Promise<void> {
-    const assistantRows = await tx.select({ id: assistants.id, disabledAt: assistants.disabledAt }).from(assistants).where(eq(assistants.id, assistantId)).limit(1);
+  private async assertAssistantRunnable(
+    tx: NodePgDatabase,
+    orgId: string,
+    assistantId: string,
+  ): Promise<void> {
+    const assistantRows = await tx
+      .select({ id: assistants.id, disabledAt: assistants.disabledAt })
+      .from(assistants)
+      .where(eq(assistants.id, assistantId))
+      .limit(1);
     if (assistantRows.length === 0) {
       throw ApiError.notFound('assistant');
     }
     if (assistantRows[0].disabledAt) {
-      throw ApiError.conflict('assistant is disabled — enable it before accepting runs', { assistant_id: assistantId });
+      throw ApiError.conflict('assistant is disabled — enable it before accepting runs', {
+        assistant_id: assistantId,
+      });
     }
     const blocked = await ControlBlocksService.findActiveBlock(tx, orgId, 'assistant', assistantId);
     if (blocked) {
-      throw ApiError.conflict(`assistant is blocked (${blocked.reason}) — clear the block before accepting runs`, {
-        assistant_id: assistantId,
-      });
+      throw ApiError.conflict(
+        `assistant is blocked (${blocked.reason}) — clear the block before accepting runs`,
+        {
+          assistant_id: assistantId,
+        },
+      );
     }
   }
 
@@ -622,6 +768,8 @@ export class ConversationsService {
       messageId: string;
       channel: unknown;
       release: ReleasePointer;
+      /** P1: the run's trace id. Minted when the caller has none (regenerate/edit paths); accept passes its own. */
+      traceId?: string | null;
     },
   ): Promise<string> {
     const snapRows = await tx
@@ -637,6 +785,9 @@ export class ConversationsService {
       input_message_id: input.messageId,
       channel: input.channel ?? null,
       release: input.release,
+      // P1: execution identity answers "exactly what produced this outcome"
+      // — the trace id joins it so a run maps to its spans without joins.
+      trace_id: input.traceId ?? newTraceId(),
     };
     const manifestHash = canonicalHash(manifest);
     await tx.insert(runManifests).values({
@@ -673,7 +824,10 @@ export class ConversationsService {
           principalId: input.principalId,
           endpointFamily: 'messages:regenerate',
           idempotencyKey: input.idempotencyKey,
-          requestHash: canonicalHash({ conversation_id: input.conversationId, message_id: input.messageId ?? null }),
+          requestHash: canonicalHash({
+            conversation_id: input.conversationId,
+            message_id: input.messageId ?? null,
+          }),
         }
       : undefined;
 
@@ -681,18 +835,33 @@ export class ConversationsService {
       if (scope) {
         const claim = await claimIdempotency(tx, scope);
         if (claim.kind === 'replay') {
-          return claim.response as { run_id: string; regenerated_message_id: string; conversation_version: number };
+          return claim.response as {
+            run_id: string;
+            regenerated_message_id: string;
+            conversation_version: number;
+          };
         }
       }
-      const conv = await tx.select().from(conversations).where(eq(conversations.id, input.conversationId)).for('update').limit(1);
+      const conv = await tx
+        .select()
+        .from(conversations)
+        .where(eq(conversations.id, input.conversationId))
+        .for('update')
+        .limit(1);
       if (conv.length === 0) {
         throw ApiError.notFound('conversation');
       }
       if (conv[0].status !== 'active') {
         throw ApiError.conflict('conversation is not active', { status: conv[0].status });
       }
-      if (input.expectedConversationVersion !== undefined && conv[0].version !== input.expectedConversationVersion) {
-        throw ApiError.conflict('stale conversation version', { expected: input.expectedConversationVersion, actual: conv[0].version });
+      if (
+        input.expectedConversationVersion !== undefined &&
+        conv[0].version !== input.expectedConversationVersion
+      ) {
+        throw ApiError.conflict('stale conversation version', {
+          expected: input.expectedConversationVersion,
+          actual: conv[0].version,
+        });
       }
 
       let target: Message | undefined;
@@ -701,7 +870,12 @@ export class ConversationsService {
         const rows = await tx
           .select()
           .from(messages)
-          .where(and(eq(messages.id, input.messageId), eq(messages.conversationId, input.conversationId)))
+          .where(
+            and(
+              eq(messages.id, input.messageId),
+              eq(messages.conversationId, input.conversationId),
+            ),
+          )
           .limit(1);
         if (rows.length === 0 || rows[0].role !== 'assistant') {
           throw ApiError.notFound('assistant message');
@@ -711,7 +885,13 @@ export class ConversationsService {
         const rows = await tx
           .select()
           .from(messages)
-          .where(and(eq(messages.conversationId, input.conversationId), eq(messages.role, 'assistant'), isNull(messages.supersededBy)))
+          .where(
+            and(
+              eq(messages.conversationId, input.conversationId),
+              eq(messages.role, 'assistant'),
+              isNull(messages.supersededBy),
+            ),
+          )
           .orderBy(desc(messages.sequence))
           .limit(1);
         target = rows[0];
@@ -720,13 +900,22 @@ export class ConversationsService {
         throw ApiError.notFound('assistant message');
       }
       if (target.supersededBy) {
-        throw ApiError.conflict('message was already regenerated', { superseded_by: target.supersededBy });
+        throw ApiError.conflict('message was already regenerated', {
+          superseded_by: target.supersededBy,
+        });
       }
       // The regeneration replays the ORIGINAL input user message.
       const userRows = await tx
         .select()
         .from(messages)
-        .where(and(eq(messages.conversationId, input.conversationId), eq(messages.role, 'user'), sql`${messages.sequence} < ${target.sequence}`, isNull(messages.supersededBy)))
+        .where(
+          and(
+            eq(messages.conversationId, input.conversationId),
+            eq(messages.role, 'user'),
+            sql`${messages.sequence} < ${target.sequence}`,
+            isNull(messages.supersededBy),
+          ),
+        )
         .orderBy(desc(messages.sequence))
         .limit(1);
       const userMessage = userRows[0];
@@ -734,7 +923,12 @@ export class ConversationsService {
         throw ApiError.conflict('no user message precedes the assistant reply');
       }
 
-      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id, conversationReleaseChannel(conv[0].channelBinding));
+      const pin = await this.pickVersionPin(
+        tx,
+        conv[0].assistantId,
+        conv[0].id,
+        conversationReleaseChannel(conv[0].channelBinding),
+      );
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
@@ -753,7 +947,9 @@ export class ConversationsService {
         });
       } catch (err) {
         if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-          throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+          throw ApiError.conflict('conversation already has an active run', {
+            conversation_id: input.conversationId,
+          });
         }
         throw err;
       }
@@ -788,7 +984,11 @@ export class ConversationsService {
         .update(conversations)
         .set({ version: nextVersion, updatedAt: new Date().toISOString() })
         .where(eq(conversations.id, input.conversationId));
-      const result = { run_id: runId, regenerated_message_id: target.id, conversation_version: nextVersion };
+      const result = {
+        run_id: runId,
+        regenerated_message_id: target.id,
+        conversation_version: nextVersion,
+      };
       if (scope) {
         await completeIdempotency(tx, scope, result);
       }
@@ -822,12 +1022,22 @@ export class ConversationsService {
     expectedConversationVersion?: number;
     idempotencyKey?: string;
     attachments?: string[];
-  }): Promise<{ message_id: string; run_id: string; sequence: number; conversation_version: number; branched_from: string }> {
+  }): Promise<{
+    message_id: string;
+    run_id: string;
+    sequence: number;
+    conversation_version: number;
+    branched_from: string;
+  }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     assertUuid(input.messageId, 'messageId');
     validateMessageContent(input.content);
-    const requestHash = canonicalHash({ conversation_id: input.conversationId, message_id: input.messageId, content: input.content });
+    const requestHash = canonicalHash({
+      conversation_id: input.conversationId,
+      message_id: input.messageId,
+      content: input.content,
+    });
     const scope: IdempotencyScope | undefined = input.idempotencyKey
       ? {
           organizationId: input.orgId,
@@ -842,44 +1052,80 @@ export class ConversationsService {
       if (scope) {
         const claim = await claimIdempotency(tx, scope);
         if (claim.kind === 'replay') {
-          return claim.response as { message_id: string; run_id: string; sequence: number; conversation_version: number; branched_from: string };
+          return claim.response as {
+            message_id: string;
+            run_id: string;
+            sequence: number;
+            conversation_version: number;
+            branched_from: string;
+          };
         }
       }
-      const conv = await tx.select().from(conversations).where(eq(conversations.id, input.conversationId)).for('update').limit(1);
+      const conv = await tx
+        .select()
+        .from(conversations)
+        .where(eq(conversations.id, input.conversationId))
+        .for('update')
+        .limit(1);
       if (conv.length === 0) {
         throw ApiError.notFound('conversation');
       }
       if (conv[0].status !== 'active') {
         throw ApiError.conflict('conversation is not active', { status: conv[0].status });
       }
-      if (input.expectedConversationVersion !== undefined && conv[0].version !== input.expectedConversationVersion) {
-        throw ApiError.conflict('stale conversation version', { expected: input.expectedConversationVersion, actual: conv[0].version });
+      if (
+        input.expectedConversationVersion !== undefined &&
+        conv[0].version !== input.expectedConversationVersion
+      ) {
+        throw ApiError.conflict('stale conversation version', {
+          expected: input.expectedConversationVersion,
+          actual: conv[0].version,
+        });
       }
       const targetRows = await tx
         .select()
         .from(messages)
-        .where(and(eq(messages.id, input.messageId), eq(messages.conversationId, input.conversationId), eq(messages.role, 'user')))
+        .where(
+          and(
+            eq(messages.id, input.messageId),
+            eq(messages.conversationId, input.conversationId),
+            eq(messages.role, 'user'),
+          ),
+        )
         .limit(1);
       const target = targetRows[0];
       if (!target) {
         throw ApiError.notFound('user message');
       }
       if (target.supersededBy) {
-        throw ApiError.conflict('message was already edited', { superseded_by: target.supersededBy });
+        throw ApiError.conflict('message was already edited', {
+          superseded_by: target.supersededBy,
+        });
       }
       // Only the LATEST user message is editable — editing an older one would
       // silently fork the transcript's meaning.
       const latest = await tx
         .select({ id: messages.id })
         .from(messages)
-        .where(and(eq(messages.conversationId, input.conversationId), eq(messages.role, 'user'), isNull(messages.supersededBy)))
+        .where(
+          and(
+            eq(messages.conversationId, input.conversationId),
+            eq(messages.role, 'user'),
+            isNull(messages.supersededBy),
+          ),
+        )
         .orderBy(desc(messages.sequence))
         .limit(1);
       if (latest[0]?.id !== target.id) {
         throw ApiError.conflict('only the latest user message can be edited');
       }
 
-      const pin = await this.pickVersionPin(tx, conv[0].assistantId, conv[0].id, conversationReleaseChannel(conv[0].channelBinding));
+      const pin = await this.pickVersionPin(
+        tx,
+        conv[0].assistantId,
+        conv[0].id,
+        conversationReleaseChannel(conv[0].channelBinding),
+      );
       if (!pin) {
         throw ApiError.conflict('assistant has no published version with a policy snapshot');
       }
@@ -890,7 +1136,9 @@ export class ConversationsService {
 
       // FL-1.6 attachment gate — shared validator (same bounds as start-message).
       const attachmentRefs =
-        input.attachments && input.attachments.length > 0 ? await this.validateAttachments(tx, input.orgId, input.attachments) : null;
+        input.attachments && input.attachments.length > 0
+          ? await this.validateAttachments(tx, input.orgId, input.attachments)
+          : null;
 
       await tx.insert(messages).values({
         id: messageId,
@@ -925,7 +1173,9 @@ export class ConversationsService {
         });
       } catch (err) {
         if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-          throw ApiError.conflict('conversation already has an active run', { conversation_id: input.conversationId });
+          throw ApiError.conflict('conversation already has an active run', {
+            conversation_id: input.conversationId,
+          });
         }
         throw err;
       }
@@ -957,9 +1207,19 @@ export class ConversationsService {
       const nextVersion = conv[0].version + 1;
       await tx
         .update(conversations)
-        .set({ version: nextVersion, branchedFromMessageId: target.id, updatedAt: new Date().toISOString() })
+        .set({
+          version: nextVersion,
+          branchedFromMessageId: target.id,
+          updatedAt: new Date().toISOString(),
+        })
         .where(eq(conversations.id, input.conversationId));
-      const result = { message_id: messageId, run_id: runId, sequence, conversation_version: nextVersion, branched_from: target.id };
+      const result = {
+        message_id: messageId,
+        run_id: runId,
+        sequence,
+        conversation_version: nextVersion,
+        branched_from: target.id,
+      };
       if (scope) {
         await completeIdempotency(tx, scope, result);
       }
@@ -982,7 +1242,15 @@ export class ConversationsService {
     tx: NodePgDatabase,
     orgId: string,
     attachments: string[],
-  ): Promise<Array<{ artifact_id: string; media_type: string; byte_length: number; sha256: string; purpose: string }>> {
+  ): Promise<
+    Array<{
+      artifact_id: string;
+      media_type: string;
+      byte_length: number;
+      sha256: string;
+      purpose: string;
+    }>
+  > {
     const ids = [...new Set(attachments)];
     if (ids.length > 4) {
       throw ApiError.validation({ attachments: 'at most 4 attachments per message' });
@@ -992,21 +1260,29 @@ export class ConversationsService {
       .from(artifacts)
       .where(and(eq(artifacts.organizationId, orgId), inArray(artifacts.id, ids)));
     if (rows.length !== ids.length) {
-      throw ApiError.validation({ attachments: 'one or more artifact ids not found in this organization' });
+      throw ApiError.validation({
+        attachments: 'one or more artifact ids not found in this organization',
+      });
     }
     for (const a of rows) {
       if (a.purpose !== 'MESSAGE_ATTACHMENT') {
-        throw ApiError.validation({ attachments: `artifact ${a.id} purpose ${a.purpose} is not an attachment` });
+        throw ApiError.validation({
+          attachments: `artifact ${a.id} purpose ${a.purpose} is not an attachment`,
+        });
       }
       if (a.state !== 'active') {
         throw ApiError.validation({ attachments: `artifact ${a.id} is not active` });
       }
       const mediaType = a.contentTypeDetected ?? a.contentTypeDeclared;
       if (!ATTACHMENT_MEDIA_TYPES.has(mediaType)) {
-        throw ApiError.validation({ attachments: `artifact ${a.id} media type ${mediaType} is not supported` });
+        throw ApiError.validation({
+          attachments: `artifact ${a.id} media type ${mediaType} is not supported`,
+        });
       }
       if (a.byteLength > MAX_ATTACHMENT_BYTES) {
-        throw ApiError.validation({ attachments: `artifact ${a.id} exceeds ${MAX_ATTACHMENT_BYTES} bytes` });
+        throw ApiError.validation({
+          attachments: `artifact ${a.id} exceeds ${MAX_ATTACHMENT_BYTES} bytes`,
+        });
       }
     }
     return rows.map((a) => ({
@@ -1020,7 +1296,11 @@ export class ConversationsService {
 
   // ── Messages (read path) ─────────────────────────────────────────────────
 
-  async listMessages(orgId: string, conversationId: string, opts?: { afterSequence?: number; limit?: number; includeSuperseded?: boolean }): Promise<{ messages: Message[]; next_cursor: number | null }> {
+  async listMessages(
+    orgId: string,
+    conversationId: string,
+    opts?: { afterSequence?: number; limit?: number; includeSuperseded?: boolean },
+  ): Promise<{ messages: Message[]; next_cursor: number | null }> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
     const limit = clampLimit(opts?.limit);
@@ -1049,7 +1329,9 @@ export class ConversationsService {
     assertUuid(orgId, 'orgId');
     assertUuid(runId, 'runId');
     await this.purge.assertNotTombstoned('run', runId);
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(runs).where(eq(runs.id, runId)).limit(1));
+    const rows = await this.db.withOrg(orgId, (tx) =>
+      tx.select().from(runs).where(eq(runs.id, runId)).limit(1),
+    );
     const run = rows[0] ?? null;
     if (run) {
       // A purged conversation rejects every reference to its runs (typed 410).
@@ -1086,7 +1368,21 @@ export class ConversationsService {
     expectedVersion?: number;
     leaseEpoch?: number;
     /** Contract v1.1 UsageEntry — recorded in the SAME TX as the terminal commit. */
-    usage?: { provider: string; model: string; promptTokens: number; completionTokens: number; totalTokens: number };
+    usage?: {
+      provider: string;
+      model: string;
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      /**
+       * P2 (cache economics): prompt-cache split. Optional; when present the
+       * ledger prices hits at the cached rate and records the split in
+       * metadata. hit + miss MUST equal promptTokens when both are given —
+       * inconsistent accounting refuses loudly instead of mis-splitting.
+       */
+      promptCacheHitTokens?: number;
+      promptCacheMissTokens?: number;
+    };
     /** FL-3.4 — up to 4 short follow-up suggestions surfaced with the reply. */
     suggestedFollowups?: string[];
   }): Promise<{ message_id: string; run_id: string; replay: boolean }> {
@@ -1095,7 +1391,12 @@ export class ConversationsService {
     validateMessageContent(input.content);
 
     return this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx.select().from(runs).where(eq(runs.id, input.runId)).for('update').limit(1);
+      const found = await tx
+        .select()
+        .from(runs)
+        .where(eq(runs.id, input.runId))
+        .for('update')
+        .limit(1);
       if (found.length === 0) {
         throw ApiError.notFound('run');
       }
@@ -1113,7 +1414,10 @@ export class ConversationsService {
         });
       }
       if (input.expectedVersion !== undefined && input.expectedVersion !== run.version) {
-        throw ApiError.conflict('stale run version', { expected: input.expectedVersion, actual: run.version });
+        throw ApiError.conflict('stale run version', {
+          expected: input.expectedVersion,
+          actual: run.version,
+        });
       }
       if (!isRunState(run.state)) {
         throw ApiError.internal();
@@ -1123,7 +1427,12 @@ export class ConversationsService {
       // The conversation row lock makes the MAX(sequence)+1 allocation
       // airtight against ANY second writer (the one-active-turn index keeps
       // this contention near zero; the lock makes it correct, not lucky).
-      const conv = await tx.select().from(conversations).where(eq(conversations.id, run.conversationId)).for('update').limit(1);
+      const conv = await tx
+        .select()
+        .from(conversations)
+        .where(eq(conversations.id, run.conversationId))
+        .for('update')
+        .limit(1);
       if (conv.length === 0) {
         throw ApiError.notFound('conversation');
       }
@@ -1142,7 +1451,9 @@ export class ConversationsService {
         order by engine_sequence desc
         limit 5
       `);
-      const citations = (retrievalRows.rows as Array<{ citations?: Array<Record<string, unknown>> } | null>)
+      const citations = (
+        retrievalRows.rows as Array<{ citations?: Array<Record<string, unknown>> } | null>
+      )
         .flatMap((r) => (r?.citations ?? []).slice(0, 5))
         .slice(0, 10)
         .map((c) => ({
@@ -1167,10 +1478,16 @@ export class ConversationsService {
         limit 8
       `);
       const mediaRefs: Array<{ artifact_id: string; media_type: string }> = [];
-      for (const row of mediaRows.rows as Array<{ value: { artifact_id?: unknown; media_type?: unknown } | null }>) {
+      for (const row of mediaRows.rows as Array<{
+        value: { artifact_id?: unknown; media_type?: unknown } | null;
+      }>) {
         const artifactId = row.value?.artifact_id;
         const mediaType = row.value?.media_type;
-        if (typeof artifactId !== 'string' || typeof mediaType !== 'string' || mediaRefs.length >= 4) {
+        if (
+          typeof artifactId !== 'string' ||
+          typeof mediaType !== 'string' ||
+          mediaRefs.length >= 4
+        ) {
           continue;
         }
         const owned = await tx
@@ -1178,7 +1495,11 @@ export class ConversationsService {
           .from(artifacts)
           .where(and(eq(artifacts.id, artifactId), eq(artifacts.organizationId, input.orgId)))
           .limit(1);
-        if (owned[0]?.purpose === 'GENERATED_MEDIA' && owned[0].state === 'active' && !mediaRefs.some((m) => m.artifact_id === artifactId)) {
+        if (
+          owned[0]?.purpose === 'GENERATED_MEDIA' &&
+          owned[0].state === 'active' &&
+          !mediaRefs.some((m) => m.artifact_id === artifactId)
+        ) {
           mediaRefs.push({ artifact_id: artifactId, media_type: mediaType.slice(0, 100) });
         }
       }
@@ -1213,18 +1534,20 @@ export class ConversationsService {
 
       const insertedEvent = await tx
         .insert(runEvents)
-        .values((() => {
-          const rowId = uuidv7();
-          return {
-            id: rowId,
-            eventId: rowId,
-            runId: run.id,
-            organizationId: input.orgId,
-            eventType: 'run.completed',
-            payload: { message_id: messageId, terminal_reason: 'completed' },
-            producerIdentity: 'engine:conversations',
-          };
-        })())
+        .values(
+          (() => {
+            const rowId = uuidv7();
+            return {
+              id: rowId,
+              eventId: rowId,
+              runId: run.id,
+              organizationId: input.orgId,
+              eventType: 'run.completed',
+              payload: { message_id: messageId, terminal_reason: 'completed' },
+              producerIdentity: 'engine:conversations',
+            };
+          })(),
+        )
         .returning({ engineSequence: runEvents.engineSequence });
 
       await tx
@@ -1261,10 +1584,32 @@ export class ConversationsService {
       await this.settleRunQuota(tx, run.id, true);
       let estimatedCost: string | null = null;
       if (run.runKind === 'standard' && input.usage && input.usage.totalTokens > 0) {
-        const point = await ModelCostService.latestForRunPricing(tx, input.usage.provider, input.usage.model);
+        // P2: normalize the cache split BEFORE pricing. Integers ≥ 0; a lone
+        // half derives from promptTokens; a full pair must sum exactly.
+        // Helper throws plain Errors — mapped to 422 (caller-fixable).
+        let split: { reported: boolean; hitTokens: number; missTokens: number };
+        try {
+          split = normalizeUsageCacheSplit(input.usage);
+        } catch (err) {
+          throw ApiError.validation({ usage: (err as Error).message });
+        }
+        const point = await ModelCostService.latestForRunPricing(
+          tx,
+          input.usage.provider,
+          input.usage.model,
+        );
         if (point) {
           estimatedCost = microsToLedgerString(
-            estimateCostMicros({ costMicrosPer1kInput: point.inputMicros, costMicrosPer1kOutput: point.outputMicros }, input.usage.promptTokens, input.usage.completionTokens),
+            estimateCostMicros(
+              {
+                costMicrosPer1kInput: point.inputMicros,
+                costMicrosPer1kOutput: point.outputMicros,
+                costMicrosPer1kCachedInput: point.cachedMicros,
+              },
+              input.usage.promptTokens,
+              input.usage.completionTokens,
+              split.hitTokens,
+            ),
           );
         }
         // REL-11.1: resolve the active credential's source for BYOK accounting.
@@ -1274,7 +1619,13 @@ export class ConversationsService {
         const credSourceRows = await tx
           .select({ source: providerCredentials.source })
           .from(providerCredentials)
-          .where(and(eq(providerCredentials.organizationId, input.orgId), eq(providerCredentials.provider, input.usage.provider), eq(providerCredentials.status, 'active')))
+          .where(
+            and(
+              eq(providerCredentials.organizationId, input.orgId),
+              eq(providerCredentials.provider, input.usage.provider),
+              eq(providerCredentials.status, 'active'),
+            ),
+          )
           .limit(1);
         const credentialSource = credSourceRows[0]?.source ?? 'unknown';
         await tx.insert(usageLedgerEntries).values({
@@ -1295,6 +1646,15 @@ export class ConversationsService {
           metadata: {
             prompt_tokens: input.usage.promptTokens,
             completion_tokens: input.usage.completionTokens,
+            // P2: present only when the runtime reported a split (legacy
+            // commits keep the two-key shape — invoice readers must not
+            // require the split).
+            ...(split.reported
+              ? {
+                  prompt_cache_hit_tokens: split.hitTokens,
+                  prompt_cache_miss_tokens: split.missTokens,
+                }
+              : {}),
             credential_source: credentialSource,
           },
         });
@@ -1306,7 +1666,12 @@ export class ConversationsService {
         organizationId: input.orgId,
         eventType: 'run.completed',
         partitionKey: run.conversationId,
-        payload: { run_id: run.id, conversation_id: run.conversationId, message_id: messageId, run_kind: run.runKind },
+        payload: {
+          run_id: run.id,
+          conversation_id: run.conversationId,
+          message_id: messageId,
+          run_kind: run.runKind,
+        },
       });
 
       return { message_id: messageId, run_id: run.id, replay: false };
@@ -1318,7 +1683,10 @@ export class ConversationsService {
    * computed `expired` flag (expiry evaluated at READ time — no sweeper,
    * same philosophy as control blocks; the decision path still enforces it).
    */
-  async listApprovals(input: { orgId: string; state?: string }): Promise<Array<Record<string, unknown>>> {
+  async listApprovals(input: {
+    orgId: string;
+    state?: string;
+  }): Promise<Array<Record<string, unknown>>> {
     assertUuid(input.orgId, 'orgId');
     const stateFilter = input.state !== undefined;
     const state = input.state ?? '';
@@ -1345,7 +1713,10 @@ export class ConversationsService {
         ? await base.where(eq(approvals.state, state)).orderBy(desc(approvals.createdAt)).limit(200)
         : await base.orderBy(desc(approvals.createdAt)).limit(200);
       const now = new Date().toISOString();
-      return rows.map((r) => ({ ...r, expired: r.state === 'PENDING' && r.expiresAt !== null && r.expiresAt < now }));
+      return rows.map((r) => ({
+        ...r,
+        expired: r.state === 'PENDING' && r.expiresAt !== null && r.expiresAt < now,
+      }));
     });
   }
 
@@ -1355,7 +1726,12 @@ export class ConversationsService {
    * REL-11.4: any owner/admin may decide; extending the window is the
    * operator action that keeps work discoverable and SLA-honest).
    */
-  async extendApproval(input: { orgId: string; approvalId: string; expiresAt: string; actor: string }): Promise<Record<string, unknown>> {
+  async extendApproval(input: {
+    orgId: string;
+    approvalId: string;
+    expiresAt: string;
+    actor: string;
+  }): Promise<Record<string, unknown>> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.approvalId, 'approvalId');
     const parsed = new Date(input.expiresAt);
@@ -1366,11 +1742,19 @@ export class ConversationsService {
       tx
         .update(approvals)
         .set({ expiresAt: parsed.toISOString() })
-        .where(and(eq(approvals.id, input.approvalId), eq(approvals.organizationId, input.orgId), eq(approvals.state, 'PENDING')))
+        .where(
+          and(
+            eq(approvals.id, input.approvalId),
+            eq(approvals.organizationId, input.orgId),
+            eq(approvals.state, 'PENDING'),
+          ),
+        )
         .returning(),
     );
     if (rows.length === 0) {
-      throw ApiError.conflict('approval is not pending (or does not exist) — expired/decided approvals cannot be extended');
+      throw ApiError.conflict(
+        'approval is not pending (or does not exist) — expired/decided approvals cannot be extended',
+      );
     }
     await this.audit.add({
       action: 'approval.extended',
@@ -1388,7 +1772,13 @@ export class ConversationsService {
    * FL-3.4 — pin/unpin a message (rendering affordance; never hides content).
    * The message must belong to the conversation; pin state is metadata only.
    */
-  async setPinned(input: { orgId: string; conversationId: string; messageId: string; pinned: boolean; actor: string }): Promise<Message> {
+  async setPinned(input: {
+    orgId: string;
+    conversationId: string;
+    messageId: string;
+    pinned: boolean;
+    actor: string;
+  }): Promise<Message> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     assertUuid(input.messageId, 'messageId');
@@ -1399,7 +1789,13 @@ export class ConversationsService {
           pinnedAt: input.pinned ? new Date().toISOString() : null,
           pinnedBy: input.pinned ? input.actor.slice(0, 128) : null,
         })
-        .where(and(eq(messages.id, input.messageId), eq(messages.conversationId, input.conversationId), isNull(messages.supersededBy)))
+        .where(
+          and(
+            eq(messages.id, input.messageId),
+            eq(messages.conversationId, input.conversationId),
+            isNull(messages.supersededBy),
+          ),
+        )
         .returning();
       if (rows.length === 0) {
         throw ApiError.notFound('message');
@@ -1425,17 +1821,28 @@ export class ConversationsService {
    * sha256 is stored (same discipline as widget session tokens). TTL is
    * optional; revocation is explicit and audited.
    */
-  async createShare(input: { orgId: string; conversationId: string; ttlSeconds?: number; actor: string }): Promise<{ share: ConversationShare; token: string }> {
+  async createShare(input: {
+    orgId: string;
+    conversationId: string;
+    ttlSeconds?: number;
+    actor: string;
+  }): Promise<{ share: ConversationShare; token: string }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     const token = randomBytes(32).toString('base64url');
     const tokenHash = createHash('sha256').update(token).digest('hex');
     const expiresAt =
       input.ttlSeconds !== undefined
-        ? new Date(Date.now() + Math.min(Math.max(60, input.ttlSeconds), 90 * 86_400) * 1000).toISOString()
+        ? new Date(
+            Date.now() + Math.min(Math.max(60, input.ttlSeconds), 90 * 86_400) * 1000,
+          ).toISOString()
         : null;
     const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const conv = await tx.select({ id: conversations.id }).from(conversations).where(eq(conversations.id, input.conversationId)).limit(1);
+      const conv = await tx
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(eq(conversations.id, input.conversationId))
+        .limit(1);
       if (conv.length === 0) {
         throw ApiError.notFound('conversation');
       }
@@ -1471,20 +1878,35 @@ export class ConversationsService {
       tx
         .select()
         .from(conversationShares)
-        .where(and(eq(conversationShares.organizationId, orgId), eq(conversationShares.conversationId, conversationId)))
+        .where(
+          and(
+            eq(conversationShares.organizationId, orgId),
+            eq(conversationShares.conversationId, conversationId),
+          ),
+        )
         .orderBy(desc(conversationShares.createdAt))
         .limit(100),
     );
   }
 
-  async revokeShare(input: { orgId: string; shareId: string; actor: string }): Promise<ConversationShare> {
+  async revokeShare(input: {
+    orgId: string;
+    shareId: string;
+    actor: string;
+  }): Promise<ConversationShare> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.shareId, 'shareId');
     const row = await this.db.withOrg(input.orgId, async (tx) => {
       const rows = await tx
         .update(conversationShares)
         .set({ revokedAt: new Date().toISOString() })
-        .where(and(eq(conversationShares.id, input.shareId), eq(conversationShares.organizationId, input.orgId), isNull(conversationShares.revokedAt)))
+        .where(
+          and(
+            eq(conversationShares.id, input.shareId),
+            eq(conversationShares.organizationId, input.orgId),
+            isNull(conversationShares.revokedAt),
+          ),
+        )
         .returning();
       if (rows.length === 0) {
         throw ApiError.notFound('share');
@@ -1513,7 +1935,15 @@ export class ConversationsService {
   async resolvePublicShare(token: string): Promise<{
     title: string | null;
     created_at: string;
-    messages: Array<{ sequence: number; role: string; text: string; citations?: unknown; suggested_followups?: string[]; pinned: boolean; created_at: string }>;
+    messages: Array<{
+      sequence: number;
+      role: string;
+      text: string;
+      citations?: unknown;
+      suggested_followups?: string[];
+      pinned: boolean;
+      created_at: string;
+    }>;
   } | null> {
     if (!token || token.length < 16 || token.length > 128) {
       return null;
@@ -1523,13 +1953,19 @@ export class ConversationsService {
       const shareRows = await tx
         .select()
         .from(conversationShares)
-        .where(and(eq(conversationShares.tokenHash, tokenHash), isNull(conversationShares.revokedAt)))
+        .where(
+          and(eq(conversationShares.tokenHash, tokenHash), isNull(conversationShares.revokedAt)),
+        )
         .limit(1);
       const share = shareRows[0];
       if (!share || (share.expiresAt !== null && Date.parse(share.expiresAt) <= Date.now())) {
         return null;
       }
-      const convRows = await tx.select().from(conversations).where(eq(conversations.id, share.conversationId)).limit(1);
+      const convRows = await tx
+        .select()
+        .from(conversations)
+        .where(eq(conversations.id, share.conversationId))
+        .limit(1);
       const conversation = convRows[0];
       if (!conversation || conversation.status === 'deleted') {
         return null;
@@ -1544,13 +1980,19 @@ export class ConversationsService {
         title: conversation.title,
         created_at: conversation.createdAt,
         messages: msgRows.map((m) => {
-          const content = (m.content ?? {}) as { text?: unknown; citations?: unknown; suggested_followups?: unknown };
+          const content = (m.content ?? {}) as {
+            text?: unknown;
+            citations?: unknown;
+            suggested_followups?: unknown;
+          };
           return {
             sequence: m.sequence,
             role: m.role,
             text: typeof content.text === 'string' ? content.text.slice(0, 16_000) : '',
             ...(content.citations !== undefined ? { citations: content.citations } : {}),
-            ...(Array.isArray(content.suggested_followups) ? { suggested_followups: content.suggested_followups.map(String).slice(0, 4) } : {}),
+            ...(Array.isArray(content.suggested_followups)
+              ? { suggested_followups: content.suggested_followups.map(String).slice(0, 4) }
+              : {}),
             pinned: m.pinnedAt !== null,
             created_at: m.createdAt,
           };
@@ -1560,7 +2002,13 @@ export class ConversationsService {
   }
 
   /** Set/update the human-facing conversation title (drizzle/0033). */
-  async setTitle(input: { orgId: string; conversationId: string; title: string; actor: string }): Promise<Conversation> {    assertUuid(input.orgId, 'orgId');
+  async setTitle(input: {
+    orgId: string;
+    conversationId: string;
+    title: string;
+    actor: string;
+  }): Promise<Conversation> {
+    assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     const title = input.title.trim().slice(0, 256);
     if (!title) {
@@ -1570,7 +2018,12 @@ export class ConversationsService {
       const rows = await tx
         .update(conversations)
         .set({ title, updatedAt: new Date().toISOString() })
-        .where(and(eq(conversations.id, input.conversationId), eq(conversations.organizationId, input.orgId)))
+        .where(
+          and(
+            eq(conversations.id, input.conversationId),
+            eq(conversations.organizationId, input.orgId),
+          ),
+        )
         .returning();
       if (rows.length === 0) {
         throw ApiError.notFound('conversation');
@@ -1640,7 +2093,12 @@ export class ConversationsService {
         organizationId: input.orgId,
         eventType: 'message.feedback.recorded',
         partitionKey: input.conversationId,
-        payload: { message_id: input.messageId, conversation_id: input.conversationId, account_id: input.accountId, rating: input.rating },
+        payload: {
+          message_id: input.messageId,
+          conversation_id: input.conversationId,
+          account_id: input.accountId,
+          rating: input.rating,
+        },
       });
       const result = rows[0];
       await this.maybeAutoEscalate({ orgId: input.orgId, conversationId: input.conversationId });
@@ -1669,7 +2127,9 @@ export class ConversationsService {
         });
       }
     } catch (err) {
-      ConversationsService.logger.warn(`auto-escalation hook failed for conversation ${input.conversationId}: ${(err as Error).message}`);
+      ConversationsService.logger.warn(
+        `auto-escalation hook failed for conversation ${input.conversationId}: ${(err as Error).message}`,
+      );
     }
   }
 
@@ -1693,11 +2153,21 @@ export class ConversationsService {
     });
   }
 
-  async cancelRun(input: { orgId: string; runId: string; reason?: string; actor: string }): Promise<Run> {
+  async cancelRun(input: {
+    orgId: string;
+    runId: string;
+    reason?: string;
+    actor: string;
+  }): Promise<Run> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.runId, 'runId');
     const canceled = await this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx.select().from(runs).where(eq(runs.id, input.runId)).for('update').limit(1);
+      const found = await tx
+        .select()
+        .from(runs)
+        .where(eq(runs.id, input.runId))
+        .for('update')
+        .limit(1);
       if (found.length === 0) {
         throw ApiError.notFound('run');
       }
@@ -1712,18 +2182,20 @@ export class ConversationsService {
 
       const insertedEvent = await tx
         .insert(runEvents)
-        .values((() => {
-          const rowId = uuidv7();
-          return {
-            id: rowId,
-            eventId: rowId,
-            runId: run.id,
-            organizationId: input.orgId,
-            eventType: 'run.canceled',
-            payload: { reason: input.reason ?? 'canceled_by_principal' },
-            producerIdentity: 'engine:conversations',
-          };
-        })())
+        .values(
+          (() => {
+            const rowId = uuidv7();
+            return {
+              id: rowId,
+              eventId: rowId,
+              runId: run.id,
+              organizationId: input.orgId,
+              eventType: 'run.canceled',
+              payload: { reason: input.reason ?? 'canceled_by_principal' },
+              producerIdentity: 'engine:conversations',
+            };
+          })(),
+        )
         .returning({ engineSequence: runEvents.engineSequence });
 
       const updated = await tx
@@ -1745,7 +2217,11 @@ export class ConversationsService {
         organizationId: input.orgId,
         eventType: 'run.canceled',
         partitionKey: run.conversationId,
-        payload: { run_id: run.id, conversation_id: run.conversationId, reason: input.reason ?? 'canceled_by_principal' },
+        payload: {
+          run_id: run.id,
+          conversation_id: run.conversationId,
+          reason: input.reason ?? 'canceled_by_principal',
+        },
       });
       return updated[0];
     });
@@ -1761,7 +2237,114 @@ export class ConversationsService {
     return canceled;
   }
 
-  async listRunEvents(orgId: string, runId: string, opts?: { afterSequence?: number; limit?: number }): Promise<{ events: RunEvent[]; next_cursor: number | null }> {
+  /**
+   * P2 (streaming breaker, engine half) — fail a runaway run closed. Called
+   * by the run watchdog when a RUNNING/DISPATCHED run outlives its pinned
+   * `budget_policy.wall_clock_seconds`. Mirrors cancelRun exactly (terminal
+   * event row → state flip → quota release → outbox → audit) with the
+   * fail-closed reason `budget_exceeded_wall_clock`. WAITING_* states are
+   * never failed here (parked approvals burn no tokens; approval expiry
+   * governs them). A terminal run is a no-op success (sweeps re-read).
+   */
+  async failRunForBudget(input: {
+    orgId: string;
+    runId: string;
+    reason: string;
+    actor: string;
+  }): Promise<{ run_id: string; terminal: boolean }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.runId, 'runId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const found = await tx
+        .select()
+        .from(runs)
+        .where(eq(runs.id, input.runId))
+        .for('update')
+        .limit(1);
+      if (found.length === 0) {
+        throw ApiError.notFound('run');
+      }
+      const run = found[0];
+      if (isTerminalRun(run.state)) {
+        return { run_id: run.id, terminal: true };
+      }
+      if (run.state !== 'RUNNING' && run.state !== 'DISPATCHED') {
+        throw ApiError.conflict(
+          'run is not executing — the budget watchdog only fails RUNNING/DISPATCHED runs',
+          {
+            state: run.state,
+          },
+        );
+      }
+      if (!isRunState(run.state)) {
+        throw ApiError.internal();
+      }
+      assertRunTransition(run.state, 'FAILED');
+
+      const insertedEvent = await tx
+        .insert(runEvents)
+        .values(
+          (() => {
+            const rowId = uuidv7();
+            return {
+              id: rowId,
+              eventId: rowId,
+              runId: run.id,
+              organizationId: input.orgId,
+              eventType: 'run.failed',
+              payload: { reason: input.reason, terminal_reason: 'budget_exceeded' },
+              producerIdentity: 'engine:run-watchdog',
+            };
+          })(),
+        )
+        .returning({ engineSequence: runEvents.engineSequence });
+
+      await tx
+        .update(runs)
+        .set({
+          state: 'FAILED',
+          terminalReason: input.reason,
+          finishedAt: new Date().toISOString(),
+          lastEventSequence: insertedEvent[0].engineSequence,
+          version: run.version + 1,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(runs.id, run.id));
+
+      // Release the quota reservation (never commit spend for a killed run —
+      // partial usage already ledgered stays; the reservation must not).
+      await this.settleRunQuota(tx, run.id, false);
+
+      await recordOutboxEvent(tx, {
+        aggregateType: 'run',
+        aggregateId: run.id,
+        organizationId: input.orgId,
+        eventType: 'run.failed',
+        partitionKey: run.conversationId,
+        payload: {
+          run_id: run.id,
+          conversation_id: run.conversationId,
+          reason: input.reason,
+        },
+      });
+      await this.audit.add({
+        action: 'run.failed',
+        resourceType: 'run',
+        resourceId: run.id,
+        actorType: 'service',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { reason: input.reason },
+      });
+      return { run_id: run.id, terminal: true };
+    });
+  }
+
+  async listRunEvents(
+    orgId: string,
+    runId: string,
+    opts?: { afterSequence?: number; limit?: number },
+  ): Promise<{ events: RunEvent[]; next_cursor: number | null }> {
     assertUuid(orgId, 'orgId');
     assertUuid(runId, 'runId');
     const limit = clampLimit(opts?.limit);
@@ -1814,35 +2397,41 @@ export class ConversationsService {
           finish();
           return;
         }
-        void this.db.withOrg(orgId, async (tx) => {
-          const runRows = await tx.select().from(runs).where(eq(runs.id, runId)).limit(1);
-          if (runRows.length === 0) {
-            subscriber.next({ event: 'error', data: 'not_found' });
-            finish();
-            return;
-          }
-          const run = runRows[0];
-          const rows = await tx
-            .select()
-            .from(runEvents)
-            .where(and(eq(runEvents.runId, runId), gt(runEvents.engineSequence, cursor)))
-            .orderBy(asc(runEvents.engineSequence))
-            .limit(batchLimit);
-          for (const e of rows) {
-            cursor = e.engineSequence;
-            // Numeric wire enum (wireEventTypeToStore) → stable stream names;
-            // assistant chunks stream as `delta` so consumers get a
-            // token-stream channel from the same durable replay cursor.
-            const eventName = SSE_EVENT_NAMES[e.eventType] ?? e.eventType;
-            subscriber.next({ id: String(e.engineSequence), event: eventName, data: e.payload ?? {} });
-          }
-          if (isRunState(run.state) && isTerminalRun(run.state) && rows.length < batchLimit) {
-            // Terminal state observed and the tail has been flushed.
-            finish();
-          }
-        }).catch(() => {
-          // Transient DB error: keep the stream open — the next tick retries.
-        });
+        void this.db
+          .withOrg(orgId, async (tx) => {
+            const runRows = await tx.select().from(runs).where(eq(runs.id, runId)).limit(1);
+            if (runRows.length === 0) {
+              subscriber.next({ event: 'error', data: 'not_found' });
+              finish();
+              return;
+            }
+            const run = runRows[0];
+            const rows = await tx
+              .select()
+              .from(runEvents)
+              .where(and(eq(runEvents.runId, runId), gt(runEvents.engineSequence, cursor)))
+              .orderBy(asc(runEvents.engineSequence))
+              .limit(batchLimit);
+            for (const e of rows) {
+              cursor = e.engineSequence;
+              // Numeric wire enum (wireEventTypeToStore) → stable stream names;
+              // assistant chunks stream as `delta` so consumers get a
+              // token-stream channel from the same durable replay cursor.
+              const eventName = SSE_EVENT_NAMES[e.eventType] ?? e.eventType;
+              subscriber.next({
+                id: String(e.engineSequence),
+                event: eventName,
+                data: e.payload ?? {},
+              });
+            }
+            if (isRunState(run.state) && isTerminalRun(run.state) && rows.length < batchLimit) {
+              // Terminal state observed and the tail has been flushed.
+              finish();
+            }
+          })
+          .catch(() => {
+            // Transient DB error: keep the stream open — the next tick retries.
+          });
       }, pollMs);
 
       return () => {
@@ -1861,8 +2450,13 @@ export interface SseMessage {
   retry?: number;
 }
 
-export async function nextMessageSequence(tx: NodePgDatabase, conversationId: string): Promise<number> {
-  const res = await tx.execute(sql`select coalesce(max(sequence), 0) + 1 as next from messages where conversation_id = ${conversationId}::uuid`);
+export async function nextMessageSequence(
+  tx: NodePgDatabase,
+  conversationId: string,
+): Promise<number> {
+  const res = await tx.execute(
+    sql`select coalesce(max(sequence), 0) + 1 as next from messages where conversation_id = ${conversationId}::uuid`,
+  );
   return Number((res.rows[0] as { next: string | number }).next);
 }
 
@@ -1872,12 +2466,16 @@ export async function nextMessageSequence(tx: NodePgDatabase, conversationId: st
  * always lands on the same variant (no per-request randomness), and the
  * traffic share converges to the configured weights.
  */
-function pickStickyVariant(conversationId: string, variants: Array<{ version_id: string; weight: number }>): string {
+function pickStickyVariant(
+  conversationId: string,
+  variants: Array<{ version_id: string; weight: number }>,
+): string {
   const total = variants.reduce((acc, v) => acc + v.weight, 0);
   if (total <= 0) {
     return variants[0].version_id;
   }
-  let point = createHash('sha256').update(`rollout:${conversationId}`).digest().readUInt32BE(0) % total;
+  let point =
+    createHash('sha256').update(`rollout:${conversationId}`).digest().readUInt32BE(0) % total;
   for (const v of variants) {
     point -= v.weight;
     if (point < 0) {
@@ -1939,7 +2537,9 @@ function validateMessageContent(content: unknown): void {
     throw ApiError.validation({ content: 'must carry a non-empty text part' });
   }
   if (text.length > MAX_MESSAGE_TEXT_LENGTH) {
-    throw ApiError.validation({ content: `text exceeds ${MAX_MESSAGE_TEXT_LENGTH} chars — use the artifact claim-check path` });
+    throw ApiError.validation({
+      content: `text exceeds ${MAX_MESSAGE_TEXT_LENGTH} chars — use the artifact claim-check path`,
+    });
   }
   if (JSON.stringify(content).length > MAX_MESSAGE_TEXT_LENGTH * 2) {
     throw ApiError.validation({ content: 'content exceeds the bounded payload size' });

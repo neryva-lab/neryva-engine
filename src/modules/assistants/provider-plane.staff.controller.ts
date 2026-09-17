@@ -78,6 +78,10 @@ class UpsertModelCostPointDto {
 
   cost_micros_per_1k_output!: number;
 
+  /** P2: optional cached-input rate (omit/null = legacy posture). */
+  @IsOptional()
+  cost_micros_per_1k_cached_input?: number | null;
+
   @IsOptional()
   @IsString()
   effective_from?: string | null;
@@ -101,7 +105,10 @@ export class ProviderPlaneStaffController {
     private readonly cost: ModelCostService,
   ) {}
 
-  private actor(principal: L1Principal | L2Principal): { id: string; actorType: 'account' | 'api_key' } {
+  private actor(principal: L1Principal | L2Principal): {
+    id: string;
+    actorType: 'account' | 'api_key';
+  } {
     return { id: principal.id, actorType: principal.kind === 'l2' ? 'api_key' : 'account' };
   }
 
@@ -130,7 +137,9 @@ export class ProviderPlaneStaffController {
   }
 
   @Get('orgs/:orgId/provider-credentials')
-  async listForOrg(@Param('orgId') orgId: string): Promise<{ credentials: ProviderCredentialView[] }> {
+  async listForOrg(
+    @Param('orgId') orgId: string,
+  ): Promise<{ credentials: ProviderCredentialView[] }> {
     return { credentials: await this.credentials.list(orgId) };
   }
 
@@ -145,12 +154,17 @@ export class ProviderPlaneStaffController {
     if (principal.kind !== 'l1' && principal.kind !== 'l2') {
       throw ApiError.forbidden('staff surface requires an L1/L2 principal');
     }
-    return { credential: await this.credentials.revoke({ orgId, credentialId, actorId: principal.id }) };
+    return {
+      credential: await this.credentials.revoke({ orgId, credentialId, actorId: principal.id }),
+    };
   }
 
   @Post('models')
   @Idempotent()
-  async upsertModel(@Body() dto: UpsertModelCatalogEntryDto, @CurrentPrincipal() principal: Principal): Promise<{ entry: ModelCatalogEntry }> {
+  async upsertModel(
+    @Body() dto: UpsertModelCatalogEntryDto,
+    @CurrentPrincipal() principal: Principal,
+  ): Promise<{ entry: ModelCatalogEntry }> {
     if (principal.kind !== 'l1' && principal.kind !== 'l2') {
       throw ApiError.forbidden('staff surface requires an L1/L2 principal');
     }
@@ -177,7 +191,10 @@ export class ProviderPlaneStaffController {
   /** REL-4.2 — the model cost catalog (GAP-06): append-only price points. */
   @Post('model-cost')
   @Idempotent()
-  async upsertCostPoint(@Body() dto: UpsertModelCostPointDto, @CurrentPrincipal() principal: Principal): Promise<{ entry: ModelCostEntry }> {
+  async upsertCostPoint(
+    @Body() dto: UpsertModelCostPointDto,
+    @CurrentPrincipal() principal: Principal,
+  ): Promise<{ entry: ModelCostEntry }> {
     if (principal.kind !== 'l1' && principal.kind !== 'l2') {
       throw ApiError.forbidden('staff surface requires an L1/L2 principal');
     }
@@ -187,6 +204,11 @@ export class ProviderPlaneStaffController {
         model: dto.model,
         costMicrosPer1kInput: Number(dto.cost_micros_per_1k_input),
         costMicrosPer1kOutput: Number(dto.cost_micros_per_1k_output),
+        costMicrosPer1kCachedInput:
+          dto.cost_micros_per_1k_cached_input === undefined ||
+          dto.cost_micros_per_1k_cached_input === null
+            ? null
+            : Number(dto.cost_micros_per_1k_cached_input),
         effectiveFrom: dto.effective_from ?? null,
         actorId: principal.id,
       }),
@@ -194,13 +216,18 @@ export class ProviderPlaneStaffController {
   }
 
   @Get('model-cost')
-  async listCostPoints(@Query('provider') provider?: string): Promise<{ entries: ModelCostEntry[] }> {
+  async listCostPoints(
+    @Query('provider') provider?: string,
+  ): Promise<{ entries: ModelCostEntry[] }> {
     return { entries: await this.cost.listPoints(provider) };
   }
 
   @Post('model-cost/:entryId/retire')
   @Idempotent()
-  async retireCostPoint(@Param('entryId') entryId: string, @CurrentPrincipal() principal: Principal): Promise<{ entry: ModelCostEntry }> {
+  async retireCostPoint(
+    @Param('entryId') entryId: string,
+    @CurrentPrincipal() principal: Principal,
+  ): Promise<{ entry: ModelCostEntry }> {
     if (principal.kind !== 'l1' && principal.kind !== 'l2') {
       throw ApiError.forbidden('staff surface requires an L1/L2 principal');
     }

@@ -3,7 +3,8 @@ import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { Idempotent } from '../../common/http/idempotency';
-import { IsIn, IsInt, IsOptional, IsString, Length, MaxLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, Length, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ArtifactsService } from './artifacts.service';
 import { MemoryService } from './memory.service';
 import { RetrievalService } from './retrieval.service';
@@ -45,12 +46,24 @@ export class DecideMemoryDto {
   scope_id?: string;
 }
 
+export class PurgeMemoriesDto {
+  /** Literal content fragment (3..128 chars) — wildcards are escaped, never patterns. */
+  @IsString()
+  @MinLength(3)
+  @MaxLength(128)
+  substring!: string;
+}
+
 export class SearchDto {
   @IsString()
   @MaxLength(512)
   query!: string;
 
+  // Query params arrive as strings — without @Type the global pipe (implicit
+  // conversion OFF) leaves "5" a string and @IsInt 400s every limited
+  // search. Explicit coercion is the Nest convention for query DTOs.
   @IsOptional()
+  @Type(() => Number)
   @IsInt()
   limit?: number;
 }
@@ -73,7 +86,11 @@ export class KnowledgeController {
   @Roles('owner', 'admin', 'developer')
   @UseGuards(OrgRolesGuard)
   @Idempotent()
-  async createUpload(@Param('orgId') orgId: string, @Body() dto: CreateUploadDto, @CurrentPrincipal() principal: L1Principal) {
+  async createUpload(
+    @Param('orgId') orgId: string,
+    @Body() dto: CreateUploadDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
     const result = await this.artifacts.createUploadSession({
       orgId,
       purpose: dto.purpose,
@@ -84,15 +101,30 @@ export class KnowledgeController {
       title: dto.title ?? null,
       createdBy: principal.id,
     });
-    return { session: { id: result.session.id, state: result.session.state, source_slug: result.session.sourceSlug }, upload: result.upload };
+    return {
+      session: {
+        id: result.session.id,
+        state: result.session.state,
+        source_slug: result.session.sourceSlug,
+      },
+      upload: result.upload,
+    };
   }
 
   @Post('uploads/:sessionId/complete')
   @Roles('owner', 'admin', 'developer')
   @UseGuards(OrgRolesGuard)
   @Idempotent()
-  async completeUpload(@Param('orgId') orgId: string, @Param('sessionId') sessionId: string, @CurrentPrincipal() principal: L1Principal) {
-    const session = await this.artifacts.completeUploadSession({ orgId, sessionId, actor: principal.id });
+  async completeUpload(
+    @Param('orgId') orgId: string,
+    @Param('sessionId') sessionId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    const session = await this.artifacts.completeUploadSession({
+      orgId,
+      sessionId,
+      actor: principal.id,
+    });
     return { session: { id: session.id, state: session.state } };
   }
 
@@ -110,7 +142,11 @@ export class KnowledgeController {
   @Get('documents/search')
   @Roles('owner', 'admin', 'developer', 'reader', 'billing')
   @UseGuards(OrgRolesGuard)
-  async search(@Param('orgId') orgId: string, @Query() dto: SearchDto, @CurrentPrincipal() principal: L1Principal) {
+  async search(
+    @Param('orgId') orgId: string,
+    @Query() dto: SearchDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
     const hits = await this.retrieval.searchKnowledge({
       orgId,
       query: dto.query,
@@ -146,14 +182,23 @@ export class KnowledgeController {
     if (typeof dto.source_slug !== 'string') {
       throw ApiError.validation({ source_slug: 'must be a string' });
     }
-    await this.artifacts.renameDocumentSourceSlug({ orgId, documentId, sourceSlug: dto.source_slug, actor: principal.id });
+    await this.artifacts.renameDocumentSourceSlug({
+      orgId,
+      documentId,
+      sourceSlug: dto.source_slug,
+      actor: principal.id,
+    });
     return { ok: true };
   }
 
   @Get('memories')
   @Roles('owner', 'admin', 'developer', 'reader', 'billing')
   @UseGuards(OrgRolesGuard)
-  async listMemories(@Param('orgId') orgId: string, @Query('scope_type') scopeType?: string, @Query('scope_id') scopeId?: string) {
+  async listMemories(
+    @Param('orgId') orgId: string,
+    @Query('scope_type') scopeType?: string,
+    @Query('scope_id') scopeId?: string,
+  ) {
     const items = await this.memory.list(orgId, { scopeType, scopeId });
     return { memories: items };
   }
@@ -162,7 +207,12 @@ export class KnowledgeController {
   @Roles('owner', 'admin')
   @UseGuards(OrgRolesGuard)
   @Idempotent()
-  async decideMemory(@Param('orgId') orgId: string, @Param('proposalId') proposalId: string, @Body() dto: DecideMemoryDto, @CurrentPrincipal() principal: L1Principal) {
+  async decideMemory(
+    @Param('orgId') orgId: string,
+    @Param('proposalId') proposalId: string,
+    @Body() dto: DecideMemoryDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
     const result = await this.memory.decide({
       orgId,
       proposalId,
@@ -178,8 +228,29 @@ export class KnowledgeController {
   @Roles('owner', 'admin')
   @UseGuards(OrgRolesGuard)
   @Idempotent()
-  async deleteMemory(@Param('orgId') orgId: string, @Param('memoryId') memoryId: string, @CurrentPrincipal() principal: L1Principal) {
+  async deleteMemory(
+    @Param('orgId') orgId: string,
+    @Param('memoryId') memoryId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
     await this.memory.softDelete({ orgId, memoryId, actor: principal.id });
     return { deleted: true };
+  }
+
+  /**
+   * P3 (DSR "forget my X") — content-addressed purge. Owner/admin only:
+   * substring matching is a destructive-shape operation even though it
+   * tombstones (recovery is a Phase 9 workflow, same as softDelete).
+   */
+  @Post('memories/purge')
+  @Roles('owner', 'admin')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async purgeMemories(
+    @Param('orgId') orgId: string,
+    @Body() dto: PurgeMemoriesDto,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    return this.memory.purgeByContent({ orgId, substring: dto.substring, actor: principal.id });
   }
 }

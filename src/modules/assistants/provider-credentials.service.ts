@@ -3,10 +3,18 @@ import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { ApiError } from '../../common/http/api-error';
 import { envelopeEncrypt, sha256Hex } from '../../common/infra/crypto/envelope';
 import { uuidv7 } from '../../common/ids/uuidv7';
-import { providerCredentials, providerEnablements, isModelProvider, ProviderCredential, ProviderEnablement, MODEL_PROVIDERS } from './provider-credentials.schema';
+import {
+  providerCredentials,
+  providerEnablements,
+  isModelProvider,
+  ProviderCredential,
+  ProviderEnablement,
+  MODEL_PROVIDERS,
+} from './provider-credentials.schema';
 
 /**
  * Provider credential store + org provider enablements — REL-1.2/REL-1.3
@@ -59,7 +67,9 @@ function assertSecret(secret: string): void {
 function mapCredentialUniqueViolation(err: unknown): never {
   const { code } = pgViolation(err);
   if (code === '23505') {
-    throw ApiError.conflict('a credential with this external ref already exists for this org and provider');
+    throw ApiError.conflict(
+      'a credential with this external ref already exists for this org and provider',
+    );
   }
   throw err as Error;
 }
@@ -75,6 +85,9 @@ export interface ProviderCredentialView {
   created_at: string | null;
   rotated_at: string | null;
   revoked_at: string | null;
+  /** P6: incident semantics (null reason = routine revoke). */
+  revocation_reason: string | null;
+  compromised: boolean;
 }
 
 function toView(row: ProviderCredential): ProviderCredentialView {
@@ -89,6 +102,8 @@ function toView(row: ProviderCredential): ProviderCredentialView {
     created_at: row.createdAt,
     rotated_at: row.rotatedAt,
     revoked_at: row.revokedAt,
+    revocation_reason: row.revocationReason,
+    compromised: row.compromised,
   };
 }
 
@@ -99,6 +114,7 @@ export class ProviderCredentialsService {
   constructor(
     private readonly db: DbService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(input: {
@@ -145,13 +161,23 @@ export class ProviderCredentialsService {
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
-      details: { provider: row.provider, source: row.source, external_ref: row.externalRef, fingerprint: row.secretFingerprint },
+      details: {
+        provider: row.provider,
+        source: row.source,
+        external_ref: row.externalRef,
+        fingerprint: row.secretFingerprint,
+      },
     });
     return toView(row);
   }
 
   /** Atomic in-place key swap: the sealed material is replaced, status stays active. Revoked rows never resurrect. */
-  async rotate(input: { orgId: string; credentialId: string; secret: string; actorId: string }): Promise<ProviderCredentialView> {
+  async rotate(input: {
+    orgId: string;
+    credentialId: string;
+    secret: string;
+    actorId: string;
+  }): Promise<ProviderCredentialView> {
     assertOrgId(input.orgId);
     assertSecret(input.secret);
     if (!UUID_RE.test(input.credentialId)) {
@@ -184,12 +210,18 @@ export class ProviderCredentialsService {
       .catch(mapCredentialUniqueViolation);
     if (rows.length === 0) {
       const existing = await this.db.withOrg(input.orgId, (tx) =>
-        tx.select({ id: providerCredentials.id }).from(providerCredentials).where(eq(providerCredentials.id, input.credentialId)).limit(1),
+        tx
+          .select({ id: providerCredentials.id })
+          .from(providerCredentials)
+          .where(eq(providerCredentials.id, input.credentialId))
+          .limit(1),
       );
       if (existing.length === 0) {
         throw ApiError.notFound('provider credential');
       }
-      throw ApiError.conflict('credential is revoked — create a new credential instead of rotating it');
+      throw ApiError.conflict(
+        'credential is revoked — create a new credential instead of rotating it',
+      );
     }
     const row = rows[0];
     await this.audit.add({
@@ -204,14 +236,41 @@ export class ProviderCredentialsService {
     return toView(row);
   }
 
-  /** Terminal: a revoked credential never returns to active (rotate refuses, create instead). */
-  async revoke(input: { orgId: string; credentialId: string; actorId: string }): Promise<ProviderCredentialView> {
+  /**
+   * Terminal: a revoked credential never returns to active (rotate refuses,
+   * create instead). P6 incident semantics: `compromised: true` blocks
+   * identically AND alerts owner/admin (error, email) — a leaked key is an
+   * incident, not housekeeping. `reason` is operator free text (bounded);
+   * the alert carries provider + label only, never secret-derived material
+   * beyond the display fingerprint (which the list surface already shows).
+   */
+  async revoke(input: {
+    orgId: string;
+    credentialId: string;
+    actorId: string;
+    reason?: string;
+    compromised?: boolean;
+  }): Promise<ProviderCredentialView> {
     assertOrgId(input.orgId);
     if (!UUID_RE.test(input.credentialId)) {
       throw ApiError.validation({ credential_id: 'must be a uuid' });
     }
+    const reason =
+      typeof input.reason === 'string' && input.reason.trim().length > 0
+        ? input.reason.trim().slice(0, 512)
+        : null;
+    const compromised = input.compromised === true;
     const existing = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(providerCredentials).where(and(eq(providerCredentials.id, input.credentialId), eq(providerCredentials.organizationId, input.orgId))).limit(1),
+      tx
+        .select()
+        .from(providerCredentials)
+        .where(
+          and(
+            eq(providerCredentials.id, input.credentialId),
+            eq(providerCredentials.organizationId, input.orgId),
+          ),
+        )
+        .limit(1),
     );
     if (existing.length === 0) {
       throw ApiError.notFound('provider credential');
@@ -222,27 +281,52 @@ export class ProviderCredentialsService {
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx
         .update(providerCredentials)
-        .set({ status: 'revoked', revokedAt: new Date().toISOString() })
-        .where(and(eq(providerCredentials.id, input.credentialId), eq(providerCredentials.organizationId, input.orgId)))
+        .set({
+          status: 'revoked',
+          revokedAt: new Date().toISOString(),
+          revocationReason: reason,
+          compromised,
+        })
+        .where(
+          and(
+            eq(providerCredentials.id, input.credentialId),
+            eq(providerCredentials.organizationId, input.orgId),
+          ),
+        )
         .returning(),
     );
     const row = rows[0];
     await this.audit.add({
-      action: 'provider_credential.revoked',
+      action: compromised ? 'provider_credential.compromised' : 'provider_credential.revoked',
       resourceType: 'provider_credential',
       resourceId: row.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
-      details: { provider: row.provider },
+      details: { provider: row.provider, ...(reason ? { reason } : {}), compromised },
     });
+    if (compromised) {
+      // Never throws (notification plane degrades independently).
+      await this.notifications.notifyOrgRoles(input.orgId, ['owner', 'admin'], {
+        kind: 'credential.compromised',
+        severity: 'error',
+        title: `Provider credential compromised: ${row.provider} (${row.label})`,
+        body: 'The key was revoked and all runs using it are now refused. Rotate the key at the provider, then provision a fresh credential.',
+        data: { credential_id: row.id, provider: row.provider },
+        email: true,
+      });
+    }
     return toView(row);
   }
 
   async list(orgId: string): Promise<ProviderCredentialView[]> {
     assertOrgId(orgId);
     const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(providerCredentials).where(eq(providerCredentials.organizationId, orgId)).limit(ProviderCredentialsService.LIST_CAP),
+      tx
+        .select()
+        .from(providerCredentials)
+        .where(eq(providerCredentials.organizationId, orgId))
+        .limit(ProviderCredentialsService.LIST_CAP),
     );
     return rows.map(toView);
   }
@@ -251,10 +335,17 @@ export class ProviderCredentialsService {
 
   async listEnablements(orgId: string): Promise<ProviderEnablement[]> {
     assertOrgId(orgId);
-    return this.db.withOrg(orgId, (tx) => tx.select().from(providerEnablements).where(eq(providerEnablements.organizationId, orgId)));
+    return this.db.withOrg(orgId, (tx) =>
+      tx.select().from(providerEnablements).where(eq(providerEnablements.organizationId, orgId)),
+    );
   }
 
-  async setEnablement(input: { orgId: string; provider: string; enabled: boolean; actorId: string }): Promise<ProviderEnablement> {
+  async setEnablement(input: {
+    orgId: string;
+    provider: string;
+    enabled: boolean;
+    actorId: string;
+  }): Promise<ProviderEnablement> {
     assertOrgId(input.orgId);
     assertProvider(input.provider);
     const rows = await this.db.withOrg(input.orgId, (tx) =>
@@ -268,7 +359,11 @@ export class ProviderCredentialsService {
         })
         .onConflictDoUpdate({
           target: [providerEnablements.organizationId, providerEnablements.provider],
-          set: { enabled: input.enabled, updatedBy: input.actorId.slice(0, 128), updatedAt: new Date().toISOString() },
+          set: {
+            enabled: input.enabled,
+            updatedBy: input.actorId.slice(0, 128),
+            updatedAt: new Date().toISOString(),
+          },
         })
         .returning(),
     );
@@ -291,19 +386,29 @@ export class ProviderCredentialsService {
    * administratively disabled (absent enablement row = enabled by default —
    * provisioning is the act that matters).
    */
-  async providerFacts(orgId: string): Promise<Map<string, { hasActiveCredential: boolean; enabled: boolean; usable: boolean }>> {
+  async providerFacts(
+    orgId: string,
+  ): Promise<Map<string, { hasActiveCredential: boolean; enabled: boolean; usable: boolean }>> {
     assertOrgId(orgId);
     const creds = await this.db.withOrg(orgId, (tx) =>
       tx
         .select({ provider: providerCredentials.provider })
         .from(providerCredentials)
-        .where(and(eq(providerCredentials.organizationId, orgId), eq(providerCredentials.status, 'active'))),
+        .where(
+          and(
+            eq(providerCredentials.organizationId, orgId),
+            eq(providerCredentials.status, 'active'),
+          ),
+        ),
     );
     const enablements = await this.listEnablements(orgId);
     const withCred = new Set(creds.map((c) => c.provider));
     const enabledMap = new Map(enablements.map((e) => [e.provider, e.enabled]));
     const providers = new Set<string>([...MODEL_PROVIDERS, ...withCred, ...enabledMap.keys()]);
-    const facts = new Map<string, { hasActiveCredential: boolean; enabled: boolean; usable: boolean }>();
+    const facts = new Map<
+      string,
+      { hasActiveCredential: boolean; enabled: boolean; usable: boolean }
+    >();
     for (const provider of providers) {
       const hasActiveCredential = withCred.has(provider);
       const enabled = enabledMap.get(provider) ?? true;

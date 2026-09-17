@@ -16,9 +16,18 @@ interface UpsertToolDto {
   effect_class?: unknown;
   approval_requirement?: unknown;
   annotations?: unknown;
+  /** P4: execution_environment + allowed_egress_domains (validated service-side). */
+  execution_environment?: unknown;
+  allowed_egress_domains?: unknown;
+  http_binding?: unknown;
 }
 
-function asString(value: unknown, field: string, max: number, required: boolean): string | undefined {
+function asString(
+  value: unknown,
+  field: string,
+  max: number,
+  required: boolean,
+): string | undefined {
   if (value === undefined || value === null) {
     if (required) {
       throw ApiError.validation({ [field]: 'is required' });
@@ -48,14 +57,31 @@ export class ToolCatalogController {
   ) {
     const effectClass = asString(dto.effect_class, 'effect_class', 16, true) ?? '';
     if (!(TOOL_EFFECT_CLASSES as readonly string[]).includes(effectClass)) {
-      throw ApiError.validation({ effect_class: `must be one of ${TOOL_EFFECT_CLASSES.join(', ')}` });
+      throw ApiError.validation({
+        effect_class: `must be one of ${TOOL_EFFECT_CLASSES.join(', ')}`,
+      });
     }
     const approval = asString(dto.approval_requirement, 'approval_requirement', 16, true) ?? '';
     if (!(TOOL_APPROVAL_REQUIREMENTS as readonly string[]).includes(approval)) {
-      throw ApiError.validation({ approval_requirement: `must be one of ${TOOL_APPROVAL_REQUIREMENTS.join(', ')}` });
+      throw ApiError.validation({
+        approval_requirement: `must be one of ${TOOL_APPROVAL_REQUIREMENTS.join(', ')}`,
+      });
     }
     if (typeof dto.input_schema !== 'object' || dto.input_schema === null) {
       throw ApiError.validation({ input_schema: 'must be a JSON Schema object' });
+    }
+    // P4: perimeter fields are optional here (absent = service defaults);
+    // deep validation lives in normalizeToolPerimeter (service).
+    const executionEnvironment =
+      dto.execution_environment === undefined || dto.execution_environment === null
+        ? undefined
+        : asString(dto.execution_environment, 'execution_environment', 24, true);
+    let allowedEgressDomains: string[] | undefined;
+    if (dto.allowed_egress_domains !== undefined && dto.allowed_egress_domains !== null) {
+      if (!Array.isArray(dto.allowed_egress_domains)) {
+        throw ApiError.validation({ allowed_egress_domains: 'must be an array of hostnames' });
+      }
+      allowedEgressDomains = dto.allowed_egress_domains.map((d) => String(d));
     }
     const input: UpsertToolInput = {
       orgId,
@@ -71,6 +97,8 @@ export class ToolCatalogController {
         typeof dto.annotations === 'object' && dto.annotations !== null
           ? (dto.annotations as UpsertToolInput['annotations'])
           : undefined,
+      executionEnvironment,
+      allowedEgressDomains,
       actor: principal.id,
     };
     const row = await this.catalog.upsert(input);
@@ -101,7 +129,14 @@ export class ToolCatalogController {
   @Idempotent()
   async fromTemplate(
     @Param('orgId') orgId: string,
-    @Body() dto: { template_id?: unknown; url?: unknown; credential?: unknown; rate_limit_per_run?: unknown },
+    @Body()
+    dto: {
+      template_id?: unknown;
+      url?: unknown;
+      credential?: unknown;
+      rate_limit_per_run?: unknown;
+      allowed_egress_domains?: unknown;
+    },
     @CurrentPrincipal() principal: L1Principal,
   ) {
     if (typeof dto.template_id !== 'string') {
@@ -114,6 +149,16 @@ export class ToolCatalogController {
     if (typeof dto.url !== 'string' || !/^https:\/\//.test(dto.url)) {
       throw ApiError.validation({ url: 'must be an https URL' });
     }
+    // P4: template tools always bind an https endpoint → external_gateway
+    // with egress defaulting to the binding host (recorded on the row).
+    // Callers may widen with an explicit list that still covers the host.
+    let templateEgress: string[] | undefined;
+    if (dto.allowed_egress_domains !== undefined && dto.allowed_egress_domains !== null) {
+      if (!Array.isArray(dto.allowed_egress_domains)) {
+        throw ApiError.validation({ allowed_egress_domains: 'must be an array of hostnames' });
+      }
+      templateEgress = dto.allowed_egress_domains.map((d) => String(d));
+    }
     const row = await this.catalog.upsert({
       orgId,
       name: template.name,
@@ -122,8 +167,16 @@ export class ToolCatalogController {
       effectClass: template.effectClass,
       approvalRequirement: template.approvalRequirement,
       httpBinding: { url: dto.url },
-      credential: typeof dto.credential === 'string' && dto.credential.length > 0 ? dto.credential : undefined,
-      rateLimitPerRun: typeof dto.rate_limit_per_run === 'number' && Number.isFinite(dto.rate_limit_per_run) ? Math.floor(dto.rate_limit_per_run) : undefined,
+      credential:
+        typeof dto.credential === 'string' && dto.credential.length > 0
+          ? dto.credential
+          : undefined,
+      rateLimitPerRun:
+        typeof dto.rate_limit_per_run === 'number' && Number.isFinite(dto.rate_limit_per_run)
+          ? Math.floor(dto.rate_limit_per_run)
+          : undefined,
+      executionEnvironment: 'external_gateway',
+      allowedEgressDomains: templateEgress,
       actor: principal.id,
     });
     return { tool: row };
@@ -153,7 +206,12 @@ export class ToolCatalogController {
     if (typeof dto.enabled !== 'boolean') {
       throw ApiError.validation({ enabled: 'must be a boolean' });
     }
-    const row = await this.catalog.setEnabled({ orgId, name: name.toLowerCase(), enabled: dto.enabled, actor: principal.id });
+    const row = await this.catalog.setEnabled({
+      orgId,
+      name: name.toLowerCase(),
+      enabled: dto.enabled,
+      actor: principal.id,
+    });
     return { tool: row };
   }
 }

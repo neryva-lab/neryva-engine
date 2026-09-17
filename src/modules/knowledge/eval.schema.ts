@@ -1,4 +1,15 @@
-import { index, integer, jsonb, numeric, pgTable, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  numeric,
+  pgTable,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from 'drizzle-orm/pg-core';
 import { assistantVersions } from '../assistants/schema';
 
 /**
@@ -13,7 +24,9 @@ export const evalDatasets = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     description: varchar('description', { length: 2048 }),
     createdBy: varchar('created_by', { length: 128 }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [uniqueIndex('uq_eval_datasets_org_name').on(t.organizationId, t.name)],
 );
@@ -30,7 +43,9 @@ export const evalCases = pgTable(
     expected: jsonb('expected').notNull(),
     rubric: jsonb('rubric'),
     sequence: integer('sequence').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [index('ix_eval_cases_dataset').on(t.organizationId, t.datasetId, t.sequence)],
 );
@@ -52,7 +67,9 @@ export const evalRuns = pgTable(
     results: jsonb('results'),
     score: numeric('score', { precision: 5, scale: 4 }),
     startedBy: varchar('started_by', { length: 128 }).notNull(),
-    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
     /**
      * TPL-7.4 — EvaluationRun provenance: template slug@version + definition
@@ -66,6 +83,12 @@ export const evalRuns = pgTable(
     decision: varchar('decision', { length: 16 }),
     /** Release policy version the decision was computed under (null when ad-hoc). */
     releasePolicyVersion: integer('release_policy_version'),
+    /**
+     * P5 (drift shadow evals): TRUE = observation only. Shadow rows NEVER
+     * gate releases (publish gate + provenance verdict exclude them) and
+     * never satisfy required-checks. FALSE for all pre-P5 rows.
+     */
+    isShadow: boolean('is_shadow').notNull().default(false),
   },
   (t) => [index('ix_eval_runs_org_dataset').on(t.organizationId, t.datasetId, t.startedAt)],
 );
@@ -93,7 +116,9 @@ export const runJudgments = pgTable(
     verdict: jsonb('verdict'),
     /** completed | failed */
     state: varchar('state', { length: 16 }).notNull().default('completed'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_run_judgments_run').on(t.runId),
@@ -128,8 +153,12 @@ export const evalCaseExecutions = pgTable(
     score: numeric('score', { precision: 5, scale: 4 }),
     responseExcerpt: varchar('response_excerpt', { length: 512 }),
     failureReason: varchar('failure_reason', { length: 512 }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_eval_case_executions_case_attempt').on(t.evalRunId, t.caseId, t.attempt),

@@ -1,4 +1,15 @@
-import { index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import {
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from 'drizzle-orm/pg-core';
 
 /**
  * Assistants — the stable identity for an organization-branded assistant.
@@ -22,10 +33,24 @@ export const assistants = pgTable(
     disabledAt: timestamp('disabled_at', { withTimezone: true, mode: 'string' }),
     disabledBy: varchar('disabled_by', { length: 128 }),
     disabledReason: varchar('disabled_reason', { length: 512 }),
+    /**
+     * P5 (degraded lifecycle): publish-with-bypass starts a 7-day clock.
+     * NULL = not degraded. A healthy publish clears all three. Past-TTL
+     * rows auto-suspend through the disable path (reversible, audited).
+     */
+    degradedUntil: timestamp('degraded_until', { withTimezone: true, mode: 'string' }),
+    degradedReason: varchar('degraded_reason', { length: 512 }),
+    degradedAlertedAt: timestamp('degraded_alerted_at', { withTimezone: true, mode: 'string' }),
     /** Retention class per engine_data_and_lifecycle.md:40 — Phase 9 wires the policy. */
-    retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    retentionClass: varchar('retention_class', { length: 32 })
+      .notNull()
+      .default('business-history'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_assistants_org_name').on(t.organizationId, t.name),
@@ -70,15 +95,30 @@ export const assistantVersions = pgTable(
     modelParams: jsonb('model_params'),
     /** FL-1.2: pinned RunBudgets authority (tokens/cost/wall-clock/tool+model caps). */
     budgetPolicy: jsonb('budget_policy'),
+    /** G4: maker-authored brand voice (≤ 2000 chars) — composed into the served prompt at assembly, never silent. */
+    brand: text('brand'),
     /** When set, this version restores payload from that version's id. */
     rollbackOf: uuid('rollback_of'),
+    /**
+     * P6 (lineage): the version this version was directly derived from —
+     * the active version at draft creation (create/import), the restored
+     * version (rollback), null for first versions. Plain uuid, no FK
+     * (mirrors rollback_of — discarded drafts must not strand children).
+     */
+    parentVersionId: uuid('parent_version_id'),
     /** Stable digest of the canonical JSON (sorted keys) for duplicate detection + export parity. */
     hash: varchar('hash', { length: 64 }).notNull(),
     publishedAt: timestamp('published_at', { withTimezone: true, mode: 'string' }),
     publishedBy: varchar('published_by', { length: 128 }),
-    retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    retentionClass: varchar('retention_class', { length: 32 })
+      .notNull()
+      .default('business-history'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_assistant_versions_assistant_version').on(t.assistantId, t.version),
@@ -119,6 +159,8 @@ export const policySnapshots = pgTable(
     modelParams: jsonb('model_params'),
     /** FL-1.2: mirrors assistant_versions.budget_policy — snapshot is the run-time pin. */
     budgetPolicy: jsonb('budget_policy'),
+    /** G4: mirrors assistant_versions.brand — the assembly composes it into the served prompt. */
+    brand: text('brand'),
     /** Canonical hash of the policy set — equals the source version's `hash`. */
     hash: varchar('hash', { length: 64 }).notNull(),
     /**
@@ -136,7 +178,9 @@ export const policySnapshots = pgTable(
     templateRef: jsonb('template_ref'),
     /** TPL-5.5 — canonical hash of the resolved set (bindings+pins+refs+policies). */
     manifestHash: varchar('manifest_hash', { length: 64 }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_policy_snapshots_version').on(t.assistantVersionId),
@@ -185,12 +229,21 @@ export const assistantRollouts = pgTable(
     channel: varchar('channel', { length: 32 }).notNull().default('default'),
     versions: jsonb('versions').notNull(),
     createdBy: varchar('created_by', { length: 128 }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     index('ix_rollouts_org_assistant').on(t.organizationId, t.assistantId),
-    index('ix_rollouts_org_assistant_env').on(t.organizationId, t.assistantId, t.environment, t.channel),
+    index('ix_rollouts_org_assistant_env').on(
+      t.organizationId,
+      t.assistantId,
+      t.environment,
+      t.channel,
+    ),
   ],
 );
 
@@ -219,14 +272,23 @@ export const runManifests = pgTable(
     policySnapshotId: uuid('policy_snapshot_id').notNull(),
     manifest: jsonb('manifest').notNull(),
     manifestHash: varchar('manifest_hash', { length: 64 }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [index('ix_run_manifests_org_version').on(t.organizationId, t.assistantVersionId)],
 );
 
 export type RunManifest = typeof runManifests.$inferSelect;
 
-export const ASSISTANT_STATUSES = ['DRAFT', 'VALIDATING', 'VALID', 'PUBLISHED', 'RETIRED', 'ROLLED_BACK'] as const;
+export const ASSISTANT_STATUSES = [
+  'DRAFT',
+  'VALIDATING',
+  'VALID',
+  'PUBLISHED',
+  'RETIRED',
+  'ROLLED_BACK',
+] as const;
 export type AssistantStatus = (typeof ASSISTANT_STATUSES)[number];
 
 export const ASSISTANT_SCHEMA_VERSION = 2;
@@ -263,8 +325,12 @@ export const assistantTemplates = pgTable(
     /** sha256 of the canonical definition/ bytes — tamper evidence for the sync job. */
     hash: varchar('hash', { length: 64 }).notNull(),
     minEngineSchema: integer('min_engine_schema').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     primaryKey({ name: 'pk_assistant_templates_slug_version', columns: [t.slug, t.version] }),
@@ -297,10 +363,18 @@ export const assistantInstalls = pgTable(
       .notNull()
       .references(() => assistants.id, { onDelete: 'cascade' }),
     installedBy: varchar('installed_by', { length: 128 }),
-    retentionClass: varchar('retention_class', { length: 32 }).notNull().default('business-history'),
-    installedAt: timestamp('installed_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    retentionClass: varchar('retention_class', { length: 32 })
+      .notNull()
+      .default('business-history'),
+    installedAt: timestamp('installed_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [
     uniqueIndex('uq_assistant_installs_assistant').on(t.assistantId),
@@ -310,7 +384,13 @@ export const assistantInstalls = pgTable(
 
 export type AssistantInstall = typeof assistantInstalls.$inferSelect;
 
-export const CONTROL_BLOCK_TARGETS = ['assistant', 'version', 'tool', 'template', 'capability'] as const;
+export const CONTROL_BLOCK_TARGETS = [
+  'assistant',
+  'version',
+  'tool',
+  'template',
+  'capability',
+] as const;
 export type ControlBlockTarget = (typeof CONTROL_BLOCK_TARGETS)[number];
 
 /**
@@ -339,7 +419,9 @@ export const controlBlocks = pgTable(
     reason: varchar('reason', { length: 512 }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
     createdBy: varchar('created_by', { length: 128 }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [index('ix_control_blocks_org_target').on(t.organizationId, t.targetType, t.targetName)],
 );
@@ -356,6 +438,7 @@ export interface AssistantVersionExport {
   instructions?: string | null;
   model_params?: unknown;
   budget_policy?: unknown;
+  brand?: string | null;
   model_policy: unknown;
   context_policy: unknown;
   tool_policy: unknown;

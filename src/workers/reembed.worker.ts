@@ -93,7 +93,14 @@ export class ReEmbedWorker implements OnModuleInit, OnModuleDestroy {
     );
 
     for (const doc of pending) {
-      await this.reembedDocument(orgId, doc.id, effective);
+      // P0: per-document isolation — a parity failure (or any transient) on
+      // one document must not starve its siblings until the next tick. The
+      // document stays pending (pointer unflipped) and converges on retry.
+      try {
+        await this.reembedDocument(orgId, doc.id, effective);
+      } catch (err) {
+        ReEmbedWorker.logger.warn(`re-embed of document ${doc.id} deferred: ${(err as Error).message}`);
+      }
     }
   }
 
@@ -133,6 +140,26 @@ export class ReEmbedWorker implements OnModuleInit, OnModuleDestroy {
             embedding: vec,
           })
           .onConflictDoNothing();
+      }
+      // P0 (GAP-1) — chunk-count parity BEFORE the pointer flip: every chunk
+      // of the document must carry a target-model row, or the flip would mark
+      // a partially-indexed document complete (and the publish coverage gate
+      // would refuse on it forever until the next tick). Mismatch throws
+      // retryable — the document stays pending and converges next tick
+      // (uq_embeddings_chunk makes the re-inserts idempotent).
+      const parity = await tx.execute(sql`
+        select count(c.id)::int as total,
+               count(e.id)::int as embedded
+        from chunks c
+        join document_versions dv on dv.id = c.document_version_id
+        left join embeddings e on e.chunk_id = c.id and e.model = ${targetModel}
+        where dv.document_id = ${documentId}::uuid
+      `);
+      const parityRow = (parity.rows as Array<{ total: number; embedded: number }>)[0];
+      const total = Number(parityRow?.total ?? 0);
+      const embedded = Number(parityRow?.embedded ?? 0);
+      if (embedded !== total) {
+        throw new Error(`re-embed parity failed for document ${documentId} on ${targetModel} (${embedded}/${total} chunks) — retrying next tick`);
       }
       // Pointer flip + old-model cleanup — one TX with the inserts above.
       await tx

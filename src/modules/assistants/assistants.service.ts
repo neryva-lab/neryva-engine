@@ -17,10 +17,20 @@ import {
   AssistantVersionExport,
   POLICY_SNAPSHOT_SCHEMA_VERSION,
 } from './schema';
-import { validateAssistantPayload, assertPublishable, assistantPayloadSchema, rejectUnknownPayloadKeys, AssistantPayload } from './validation';
+import {
+  validateAssistantPayload,
+  assertPublishable,
+  assistantPayloadSchema,
+  rejectUnknownPayloadKeys,
+  AssistantPayload,
+} from './validation';
 import { evaluatePublishGate, throwGateRefusal } from './release-gate';
 import { TemplatesService } from './templates.service';
-import { ManifestResolutionService, unresolvedPinSlugs } from './manifest-resolution.service';
+import {
+  ManifestResolutionService,
+  undercoveredPinSlugs,
+  unresolvedPinSlugs,
+} from './manifest-resolution.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
 import { documents } from '../knowledge/schema';
@@ -81,11 +91,19 @@ export class AssistantsService {
     createdBy: string;
     template?: { slug: string; version?: string };
     definition?: Record<string, unknown>;
-  }): Promise<{ assistant: Assistant; version_id: string | null; template: string | null; hash: string | null }> {
+  }): Promise<{
+    assistant: Assistant;
+    version_id: string | null;
+    template: string | null;
+    hash: string | null;
+  }> {
     assertOrgId(input.orgId);
     assertName(input.name);
     if (input.template && input.definition) {
-      throw ApiError.validation({ template: 'template and definition are mutually exclusive — install copies from exactly one source' });
+      throw ApiError.validation({
+        template:
+          'template and definition are mutually exclusive — install copies from exactly one source',
+      });
     }
     if (input.template) {
       const installed = await this.templates.install({
@@ -138,6 +156,7 @@ export class AssistantsService {
               instructions: validated.normalized.instructions ?? null,
               modelParams: validated.normalized.model_params ?? null,
               budgetPolicy: validated.normalized.budget_policy ?? null,
+              brand: validated.normalized.brand ?? null,
               hash,
             })
             .returning({ id: assistantVersions.id });
@@ -223,7 +242,11 @@ export class AssistantsService {
    * for FK integrity — conversations reference assistants.id). Refuses when
    * conversations exist; the caller should archive those first.
    */
-  async remove(input: { orgId: string; assistantId: string; actorId: string }): Promise<{ ok: true }> {
+  async remove(input: {
+    orgId: string;
+    assistantId: string;
+    actorId: string;
+  }): Promise<{ ok: true }> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     // Attempt delete — the FK from conversations.assistant_id will reject
@@ -260,7 +283,13 @@ export class AssistantsService {
    * assistant (in-flight runs fail closed at their next tool authorization);
    * cleared resumes it. Both transitions audited. Idempotent.
    */
-  async setDisabled(input: { orgId: string; assistantId: string; disabled: boolean; reason?: string; actorId: string }): Promise<Assistant> {
+  async setDisabled(input: {
+    orgId: string;
+    assistantId: string;
+    disabled: boolean;
+    reason?: string;
+    actorId: string;
+  }): Promise<Assistant> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     const rows = await this.db.withOrg(input.orgId, (tx) =>
@@ -274,7 +303,12 @@ export class AssistantsService {
                 disabledReason: (input.reason ?? 'operator kill switch').slice(0, 512),
                 updatedAt: new Date().toISOString(),
               }
-            : { disabledAt: null, disabledBy: null, disabledReason: null, updatedAt: new Date().toISOString() },
+            : {
+                disabledAt: null,
+                disabledBy: null,
+                disabledReason: null,
+                updatedAt: new Date().toISOString(),
+              },
         )
         .where(eq(assistants.id, input.assistantId))
         .returning(),
@@ -303,7 +337,10 @@ export class AssistantsService {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     const assistant = await this.requireAssistant(input.orgId, input.assistantId);
-    void assistant;
+
+    // P6 (lineage): a new draft forks the ACTIVE version (the state being
+    // edited). First draft on a versionless assistant parents null.
+    const parentVersionId = assistant.activeVersionId ?? null;
 
     // Strict chain, identical to definition-create and draft-update: unknown
     // keys refuse (never silently stripped), then shape validation. A draft
@@ -343,6 +380,8 @@ export class AssistantsService {
             instructions: validated.normalized.instructions ?? null,
             modelParams: validated.normalized.model_params ?? null,
             budgetPolicy: validated.normalized.budget_policy ?? null,
+            brand: validated.normalized.brand ?? null,
+            parentVersionId,
             hash,
           })
           .returning(),
@@ -393,6 +432,18 @@ export class AssistantsService {
       throw ApiError.validation({ assistant: validated.issues });
     }
     const hash = hashPayload(validated.normalized);
+    // P6: rebase lineage on every edit — a draft saved while v3 is active
+    // derives from v3's state, not from whatever was active when the draft
+    // row was first created (one PK read; negligible beside the update).
+    // Same-hash idempotent saves rebase harmlessly (same value rewritten).
+    const forkRows = await this.db.withOrg(input.orgId, (tx) =>
+      tx
+        .select({ activeVersionId: assistants.activeVersionId })
+        .from(assistants)
+        .where(eq(assistants.id, input.assistantId))
+        .limit(1),
+    );
+    const rebasedParent = forkRows[0]?.activeVersionId ?? null;
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx
         .update(assistantVersions)
@@ -405,6 +456,8 @@ export class AssistantsService {
           instructions: validated.normalized.instructions ?? null,
           modelParams: validated.normalized.model_params ?? null,
           budgetPolicy: validated.normalized.budget_policy ?? null,
+          brand: validated.normalized.brand ?? null,
+          parentVersionId: rebasedParent,
           hash,
           updatedAt: new Date().toISOString(),
         })
@@ -426,7 +479,11 @@ export class AssistantsService {
         actorType: 'account',
         actorId: input.actorId,
         tenantId: input.orgId,
-        details: { assistant_id: input.assistantId, from: input.expectedHash.slice(0, 16), to: hash.slice(0, 16) },
+        details: {
+          assistant_id: input.assistantId,
+          from: input.expectedHash.slice(0, 16),
+          to: hash.slice(0, 16),
+        },
       });
       return rows[0];
     }
@@ -445,7 +502,12 @@ export class AssistantsService {
    * (snapshots/manifests exist for published versions only), so removal is
    * a single-row delete.
    */
-  async discardDraft(input: { orgId: string; assistantId: string; versionId: string; actorId: string }): Promise<void> {
+  async discardDraft(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    actorId: string;
+  }): Promise<void> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     assertUuid(input.versionId);
@@ -454,9 +516,14 @@ export class AssistantsService {
       throw ApiError.notFound('assistant version');
     }
     if (current.status !== 'DRAFT') {
-      throw ApiError.conflict(`only DRAFT versions can be discarded (status is ${current.status})`, { status: current.status });
+      throw ApiError.conflict(
+        `only DRAFT versions can be discarded (status is ${current.status})`,
+        { status: current.status },
+      );
     }
-    await this.db.withOrg(input.orgId, (tx) => tx.delete(assistantVersions).where(eq(assistantVersions.id, input.versionId)));
+    await this.db.withOrg(input.orgId, (tx) =>
+      tx.delete(assistantVersions).where(eq(assistantVersions.id, input.versionId)),
+    );
     await this.audit.add({
       action: 'assistant.version_draft_discarded',
       resourceType: 'assistant_version',
@@ -475,9 +542,18 @@ export class AssistantsService {
    * mapped). Computed read-only from committed rows — no new state, no
    * worker. No active version = nothing serving = not degraded.
    */
-  async getKnowledgeHealth(orgId: string, assistantId: string): Promise<{
+  async getKnowledgeHealth(
+    orgId: string,
+    assistantId: string,
+  ): Promise<{
     degraded: boolean;
-    pins: Array<{ source_slug: string; resolved: boolean; document_id: string | null; state: string | null }>;
+    pins: Array<{
+      source_slug: string;
+      resolved: boolean;
+      document_id: string | null;
+      state: string | null;
+      embedding_complete: boolean | null;
+    }>;
   }> {
     assertOrgId(orgId);
     assertUuid(assistantId);
@@ -487,30 +563,108 @@ export class AssistantsService {
       return { degraded: false, pins: [] };
     }
     const snap = await this.getSnapshotForVersion(orgId, assistantId, activeVersionId);
-    const pins = (snap?.knowledgePins ?? []) as Array<{ source_slug?: unknown; resolved?: unknown; document_id?: unknown }>;
+    const pins = (snap?.knowledgePins ?? []) as Array<{
+      source_slug?: unknown;
+      resolved?: unknown;
+      document_id?: unknown;
+      document_version_id?: unknown;
+      embedding_model?: unknown;
+      embedding_coverage?: { complete?: unknown } | null;
+    }>;
     if (!Array.isArray(pins) || pins.length === 0) {
       return { degraded: false, pins: [] };
     }
-    const ids = pins.filter((p) => p?.resolved === true && typeof p?.document_id === 'string').map((p) => p.document_id as string);
+    const ids = pins
+      .filter((p) => p?.resolved === true && typeof p?.document_id === 'string')
+      .map((p) => p.document_id as string);
     const states = new Map<string, string>();
     if (ids.length > 0) {
       const rows = await this.db.withOrg(orgId, (tx) =>
-        tx.select({ id: documents.id, state: documents.state }).from(documents).where(inArray(documents.id, ids)),
+        tx
+          .select({ id: documents.id, state: documents.state })
+          .from(documents)
+          .where(inArray(documents.id, ids)),
       );
       for (const r of rows) {
         states.set(r.id, r.state);
+      }
+    }
+    // P0 (GAP-1): live embedding coverage for resolved pins, computed against
+    // the PINNED version (not latest — the snapshot is the pinning authority).
+    // Pins without a model (legacy snapshots) report null: unknown, not broken.
+    const coverable = pins.filter(
+      (p) =>
+        p?.resolved === true &&
+        typeof p?.document_version_id === 'string' &&
+        typeof p?.embedding_model === 'string',
+    );
+    const coverage = new Map<string, boolean | null>();
+    if (coverable.length > 0) {
+      // Per-(version, model) pairs: a version carrying stale rows of ANOTHER
+      // model (pre-sweep migration residue) must not inflate its own count.
+      // The VALUES join binds each pinned version to exactly its pin's model.
+      const pairs = coverable.map((p) => ({
+        versionId: p.document_version_id as string,
+        model: p.embedding_model as string,
+      }));
+      const rows = await this.db.withOrg(orgId, (tx) =>
+        tx.execute(sql`
+          select c.document_version_id as version_id,
+                 count(c.id)::int as total,
+                 count(e.id)::int as embedded
+          from chunks c
+          join (values ${sql.join(
+            pairs.map((pair) => sql`(${pair.versionId}::uuid, ${pair.model})`),
+            sql`, `,
+          )}) as want(version_id, model) on want.version_id = c.document_version_id
+          left join embeddings e on e.chunk_id = c.id and e.model = want.model
+          where c.organization_id = ${orgId}::uuid
+          group by c.document_version_id
+        `),
+      );
+      const byVersion = new Map<string, { total: number; embedded: number }>();
+      for (const r of rows.rows as Array<{ version_id: string; total: number; embedded: number }>) {
+        byVersion.set(r.version_id, { total: Number(r.total), embedded: Number(r.embedded) });
+      }
+      for (const p of coverable) {
+        const stat = byVersion.get(p.document_version_id as string);
+        if (stat !== undefined) {
+          coverage.set(p.document_version_id as string, stat.embedded === stat.total);
+          continue;
+        }
+        // No chunk rows: vacuous coverage (complete) when the document row
+        // still exists — same rule as resolveEmbeddingCoverage. A vanished
+        // document reports null (unknown); the state check already degrades it.
+        const docExists = typeof p?.document_id === 'string' && states.has(p.document_id as string);
+        coverage.set(p.document_version_id as string, docExists ? true : null);
       }
     }
     const view = pins.map((p) => {
       const slug = typeof p?.source_slug === 'string' ? (p.source_slug as string) : '';
       const resolved = p?.resolved === true && typeof p?.document_id === 'string';
       const state = resolved ? (states.get(p.document_id as string) ?? 'deleted') : null;
-      return { source_slug: slug, resolved, document_id: resolved ? (p.document_id as string) : null, state };
+      const complete =
+        resolved && typeof p?.document_version_id === 'string'
+          ? (coverage.get(p.document_version_id as string) ?? null)
+          : null;
+      return {
+        source_slug: slug,
+        resolved,
+        document_id: resolved ? (p.document_id as string) : null,
+        state,
+        embedding_complete: complete,
+      };
     });
-    return { degraded: view.some((v) => !v.resolved || v.state !== 'ready'), pins: view };
+    return {
+      degraded: view.some(
+        (v) => !v.resolved || v.state !== 'ready' || v.embedding_complete === false,
+      ),
+      pins: view,
+    };
   }
 
-  async getVersion(orgId: string, versionId: string): Promise<AssistantVersion | null> {    assertOrgId(orgId);
+  async getVersion(orgId: string, versionId: string): Promise<AssistantVersion | null> {
+    assertOrgId(orgId);
     assertUuid(versionId);
     const rows = await this.db.withOrg(orgId, (tx) =>
       tx.select().from(assistantVersions).where(eq(assistantVersions.id, versionId)).limit(1),
@@ -536,7 +690,13 @@ export class AssistantsService {
    * Computes `nextVersion = max(version where status IN (PUBLISHED,RETIRED,ROLLED_BACK)) + 1`,
    * inserts a new PUBLISHED row, and moves `assistants.active_version_id` atomically.
    */
-  async publish(input: { orgId: string; assistantId: string; versionId: string; publishedBy: string; acknowledgeDegradedKnowledge?: boolean }): Promise<AssistantVersion> {
+  async publish(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    publishedBy: string;
+    acknowledgeDegradedKnowledge?: boolean;
+  }): Promise<AssistantVersion> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     assertUuid(input.versionId);
@@ -548,19 +708,21 @@ export class AssistantsService {
     if (!['DRAFT', 'VALID', 'VALIDATING'].includes(draft.status)) {
       throw ApiError.validation({ status: `version status ${draft.status} cannot be published` });
     }
-    // Re-validate the FULL draft row — instructions/model_params/budget live
-    // on the version row, not just the policy columns. (A policies-only
-    // rebuild silently drops the prompt and can never satisfy
+    // Re-validate the FULL draft row — instructions/model_params/budget/
+    // brand live on the version row, not just the policy columns. (A
+    // policies-only rebuild silently drops the prompt and can never satisfy
     // assertPublishable — that path is why every publish must start here.)
     const payload: AssistantPayload = {
       model_policy: draft.modelPolicy as AssistantPayload['model_policy'],
       context_policy: draft.contextPolicy as AssistantPayload['context_policy'],
       tool_policy: draft.toolPolicy as AssistantPayload['tool_policy'],
-      knowledge_policy: (draft.knowledgePolicy ?? undefined) as AssistantPayload['knowledge_policy'],
+      knowledge_policy: (draft.knowledgePolicy ??
+        undefined) as AssistantPayload['knowledge_policy'],
       guardrail_policy: draft.guardrailPolicy as AssistantPayload['guardrail_policy'],
       instructions: (draft.instructions ?? undefined) as AssistantPayload['instructions'],
       model_params: (draft.modelParams ?? undefined) as AssistantPayload['model_params'],
       budget_policy: (draft.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
+      brand: (draft.brand ?? undefined) as AssistantPayload['brand'],
     };
     const validated = validateAssistantPayload(payload);
     if (!validated.ok) {
@@ -571,19 +733,31 @@ export class AssistantsService {
     await this.assertToolPins(input.orgId, validated.normalized);
 
     const published = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`,
+      );
 
       const latest = await tx
         .select({ version: assistantVersions.version })
         .from(assistantVersions)
-        .where(and(eq(assistantVersions.assistantId, input.assistantId), eq(assistantVersions.status, 'PUBLISHED')))
+        .where(
+          and(
+            eq(assistantVersions.assistantId, input.assistantId),
+            eq(assistantVersions.status, 'PUBLISHED'),
+          ),
+        )
         .orderBy(desc(assistantVersions.version))
         .limit(1);
       // Also consider non-PUBLISHED but already versioned rows (RETIRED, etc.)
       const maxAll = await tx
         .select({ version: assistantVersions.version })
         .from(assistantVersions)
-        .where(and(eq(assistantVersions.assistantId, input.assistantId), sql`${assistantVersions.version} > 0`))
+        .where(
+          and(
+            eq(assistantVersions.assistantId, input.assistantId),
+            sql`${assistantVersions.version} > 0`,
+          ),
+        )
         .orderBy(desc(assistantVersions.version))
         .limit(1);
       const nextVersion = Math.max(latest[0]?.version ?? 0, maxAll[0]?.version ?? 0) + 1;
@@ -596,6 +770,8 @@ export class AssistantsService {
         normalized: validated.normalized,
         publishedBy: input.publishedBy,
         rollbackOf: null,
+        // P6: the published row inherits the draft's fork point.
+        parentVersionId: draft.parentVersionId ?? null,
         acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
       });
     });
@@ -607,14 +783,30 @@ export class AssistantsService {
       actorType: 'account',
       actorId: input.publishedBy,
       tenantId: input.orgId,
-      details: { assistant_id: input.assistantId, version: published.version, hash: published.hash.slice(0, 16) },
+      details: {
+        assistant_id: input.assistantId,
+        version: published.version,
+        hash: published.hash.slice(0, 16),
+      },
     });
-    await this.auditDegradedBypass(input.orgId, published.id, input.publishedBy, input.acknowledgeDegradedKnowledge === true);
-    AssistantsService.logger.log(`assistant ${input.assistantId} published v${published.version} for org ${input.orgId}`);
+    await this.auditDegradedBypass(
+      input.orgId,
+      published.id,
+      input.publishedBy,
+      input.acknowledgeDegradedKnowledge === true,
+    );
+    AssistantsService.logger.log(
+      `assistant ${input.assistantId} published v${published.version} for org ${input.orgId}`,
+    );
     return published;
   }
 
-  async retire(input: { orgId: string; assistantId: string; versionId: string; retiredBy: string }): Promise<AssistantVersion> {
+  async retire(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    retiredBy: string;
+  }): Promise<AssistantVersion> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     assertUuid(input.versionId);
@@ -629,7 +821,9 @@ export class AssistantsService {
     // concurrent publish cannot re-activate the version mid-retire, and a
     // concurrent rollback cannot point `active_version_id` at the retiring row.
     const row = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`,
+      );
       const active = await tx
         .select({ activeVersionId: assistants.activeVersionId })
         .from(assistants)
@@ -639,10 +833,13 @@ export class AssistantsService {
         // The active pointer must never reference a RETIRED version — runs
         // started after retire would pin a version the org has withdrawn.
         // Withdraw by publishing/rolling back to a successor first.
-        throw ApiError.conflict('cannot retire the active version — publish or roll back to a successor first', {
-          assistant_id: input.assistantId,
-          version_id: version.id,
-        });
+        throw ApiError.conflict(
+          'cannot retire the active version — publish or roll back to a successor first',
+          {
+            assistant_id: input.assistantId,
+            version_id: version.id,
+          },
+        );
       }
       const rows = await tx
         .update(assistantVersions)
@@ -681,17 +878,19 @@ export class AssistantsService {
       throw ApiError.validation({ rollback: 'cannot rollback to a DRAFT' });
     }
     // Rollback = NEW PUBLISHED version restoring target's payload (full row —
-    // same always-throw trap as publish: instructions/model_params/budget
-    // live on the version row and must round-trip, or rollback 500s).
+    // same always-throw trap as publish: instructions/model_params/budget/
+    // brand live on the version row and must round-trip, or rollback 500s).
     const payload: AssistantPayload = {
       model_policy: target.modelPolicy as AssistantPayload['model_policy'],
       context_policy: target.contextPolicy as AssistantPayload['context_policy'],
       tool_policy: target.toolPolicy as AssistantPayload['tool_policy'],
-      knowledge_policy: (target.knowledgePolicy ?? undefined) as AssistantPayload['knowledge_policy'],
+      knowledge_policy: (target.knowledgePolicy ??
+        undefined) as AssistantPayload['knowledge_policy'],
       guardrail_policy: target.guardrailPolicy as AssistantPayload['guardrail_policy'],
       instructions: (target.instructions ?? undefined) as AssistantPayload['instructions'],
       model_params: (target.modelParams ?? undefined) as AssistantPayload['model_params'],
       budget_policy: (target.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
+      brand: (target.brand ?? undefined) as AssistantPayload['brand'],
     };
     const validated = validateAssistantPayload(payload);
     if (!validated.ok) {
@@ -701,11 +900,18 @@ export class AssistantsService {
     assertPublishable(validated.normalized);
     await this.assertToolPins(input.orgId, validated.normalized);
     const published = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`,
+      );
       const maxAll = await tx
         .select({ version: assistantVersions.version })
         .from(assistantVersions)
-        .where(and(eq(assistantVersions.assistantId, input.assistantId), sql`${assistantVersions.version} > 0`))
+        .where(
+          and(
+            eq(assistantVersions.assistantId, input.assistantId),
+            sql`${assistantVersions.version} > 0`,
+          ),
+        )
         .orderBy(desc(assistantVersions.version))
         .limit(1);
       const nextVersion = (maxAll[0]?.version ?? 0) + 1;
@@ -717,6 +923,8 @@ export class AssistantsService {
         normalized: validated.normalized,
         publishedBy: input.publishedBy,
         rollbackOf: target.id,
+        // P6: rollback-as-new derives from the restored version.
+        parentVersionId: target.id,
         acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
       });
     });
@@ -727,9 +935,18 @@ export class AssistantsService {
       actorType: 'account',
       actorId: input.publishedBy,
       tenantId: input.orgId,
-      details: { assistant_id: input.assistantId, to_version: target.version, new_version: published.version },
+      details: {
+        assistant_id: input.assistantId,
+        to_version: target.version,
+        new_version: published.version,
+      },
     });
-    await this.auditDegradedBypass(input.orgId, published.id, input.publishedBy, input.acknowledgeDegradedKnowledge === true);
+    await this.auditDegradedBypass(
+      input.orgId,
+      published.id,
+      input.publishedBy,
+      input.acknowledgeDegradedKnowledge === true,
+    );
     return published;
   }
 
@@ -744,7 +961,11 @@ export class AssistantsService {
     return rows[0] ?? null;
   }
 
-  async getSnapshotForVersion(orgId: string, assistantId: string, versionId: string): Promise<PolicySnapshot | null> {
+  async getSnapshotForVersion(
+    orgId: string,
+    assistantId: string,
+    versionId: string,
+  ): Promise<PolicySnapshot | null> {
     assertOrgId(orgId);
     assertUuid(assistantId);
     assertUuid(versionId);
@@ -752,12 +973,18 @@ export class AssistantsService {
       const version = await tx
         .select({ id: assistantVersions.id, assistantId: assistantVersions.assistantId })
         .from(assistantVersions)
-        .where(and(eq(assistantVersions.id, versionId), eq(assistantVersions.assistantId, assistantId)))
+        .where(
+          and(eq(assistantVersions.id, versionId), eq(assistantVersions.assistantId, assistantId)),
+        )
         .limit(1);
       if (version.length === 0) {
         return null;
       }
-      const rows = await tx.select().from(policySnapshots).where(eq(policySnapshots.assistantVersionId, versionId)).limit(1);
+      const rows = await tx
+        .select()
+        .from(policySnapshots)
+        .where(eq(policySnapshots.assistantVersionId, versionId))
+        .limit(1);
       return rows[0] ?? null;
     });
   }
@@ -789,12 +1016,19 @@ export class AssistantsService {
       const resolved = await this.resolveTemplateDataset(input.orgId, input.assistantId);
       if (!resolved) {
         throw ApiError.validation({
-          dataset_id: 'no template dataset for this assistant — install from a template or pass dataset_id explicitly',
+          dataset_id:
+            'no template dataset for this assistant — install from a template or pass dataset_id explicitly',
         });
       }
       datasetId = resolved;
     }
-    return this.evals.startRun({
+    // R-2 (team_setup_ledger.md §3) — formal evaluation of DRAFT content
+    // (EVALUATE → PUBLISH): drafts carry no publish artifact, so synthesize
+    // the snapshot first — the same resolved set test runs execute. startRun
+    // admits DRAFT + PUBLISHED; the executor pins the version and the
+    // conversation plane requires the snapshot (no snapshot → no run).
+    await this.ensureVersionSnapshot(input.orgId, input.assistantId, input.versionId);
+    const run = await this.evals.startRun({
       orgId: input.orgId,
       datasetId,
       assistantVersionId: input.versionId,
@@ -802,12 +1036,31 @@ export class AssistantsService {
       actor: input.actor,
       ...(input.environment ? { environment: input.environment } : {}),
     });
+    const runId = (run as { id?: unknown } | null)?.id;
+    await this.audit.add({
+      action: 'assistant.eval_started',
+      resourceType: 'assistant_version',
+      resourceId: input.versionId,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: {
+        assistant_id: input.assistantId,
+        dataset_id: datasetId,
+        ...(typeof runId === 'string' ? { eval_run_id: runId } : {}),
+      },
+    });
+    return run;
   }
 
   /** Template-seeded dataset id for an assistant (`template:<slug>@<version>`), if installed. */
   private async resolveTemplateDataset(orgId: string, assistantId: string): Promise<string | null> {
     const name = await this.db.withOrg(orgId, async (tx) => {
-      const installs = await tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1);
+      const installs = await tx
+        .select()
+        .from(assistantInstalls)
+        .where(eq(assistantInstalls.assistantId, assistantId))
+        .limit(1);
       const install = installs[0];
       if (!install || install.organizationId !== orgId) {
         return null;
@@ -818,7 +1071,11 @@ export class AssistantsService {
       return null;
     }
     const datasets = await this.db.withOrg(orgId, (tx) =>
-      tx.select({ id: evalDatasets.id }).from(evalDatasets).where(and(eq(evalDatasets.organizationId, orgId), eq(evalDatasets.name, name))).limit(1),
+      tx
+        .select({ id: evalDatasets.id })
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.organizationId, orgId), eq(evalDatasets.name, name)))
+        .limit(1),
     );
     return datasets[0]?.id ?? null;
   }
@@ -839,6 +1096,8 @@ export class AssistantsService {
     manifest_hash: string | null;
     update_available: 'major' | 'minor' | 'none';
     last_evaluation: { decision: string; score: string | null; finished_at: string | null } | null;
+    /** P6: content lineage (null for first versions). */
+    parent_version_id: string | null;
   }> {
     assertOrgId(orgId);
     assertUuid(assistantId);
@@ -852,14 +1111,29 @@ export class AssistantsService {
     let update_available: 'major' | 'minor' | 'none' = 'none';
     if (template) {
       const updates = await this.templates.checkUpdates(orgId);
-      const entry = updates.find((u) => u.slug === template.slug && u.installed_version === template.version);
+      const entry = updates.find(
+        (u) => u.slug === template.slug && u.installed_version === template.version,
+      );
       update_available = entry?.update_available ?? 'none';
     }
     const runs = await this.db.withOrg(orgId, (tx) =>
       tx
-        .select({ decision: evalRuns.decision, score: evalRuns.score, finishedAt: evalRuns.finishedAt })
+        .select({
+          decision: evalRuns.decision,
+          score: evalRuns.score,
+          finishedAt: evalRuns.finishedAt,
+        })
         .from(evalRuns)
-        .where(and(eq(evalRuns.organizationId, orgId), eq(evalRuns.assistantVersionId, versionId), eq(evalRuns.state, 'completed')))
+        .where(
+          and(
+            eq(evalRuns.organizationId, orgId),
+            eq(evalRuns.assistantVersionId, versionId),
+            eq(evalRuns.state, 'completed'),
+            // P5: the version verdict is the FORMAL decision — shadow
+            // observations surface via drift alerts, never here.
+            eq(evalRuns.isShadow, false),
+          ),
+        )
         .orderBy(desc(evalRuns.finishedAt))
         .limit(1),
     );
@@ -871,6 +1145,7 @@ export class AssistantsService {
       last_evaluation: last?.decision
         ? { decision: last.decision, score: last.score, finished_at: last.finishedAt }
         : null,
+      parent_version_id: version.parentVersionId ?? null,
     };
   }
 
@@ -880,7 +1155,11 @@ export class AssistantsService {
    * Export a version as a canonical envelope. Deterministic: identical payload
    * always serializes to the identical JSON string (sorted keys, schema_version included).
    */
-  async exportVersion(orgId: string, assistantId: string, versionId: string): Promise<AssistantVersionExport> {
+  async exportVersion(
+    orgId: string,
+    assistantId: string,
+    versionId: string,
+  ): Promise<AssistantVersionExport> {
     assertOrgId(orgId);
     assertUuid(assistantId);
     assertUuid(versionId);
@@ -893,6 +1172,7 @@ export class AssistantsService {
       instructions: version.instructions,
       model_params: version.modelParams,
       budget_policy: version.budgetPolicy,
+      brand: version.brand,
       model_policy: version.modelPolicy,
       context_policy: version.contextPolicy,
       tool_policy: version.toolPolicy,
@@ -916,7 +1196,12 @@ export class AssistantsService {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
     const exported = input.exported;
-    if (!exported || typeof exported !== 'object' || typeof exported.hash !== 'string' || typeof exported.schema_version !== 'number') {
+    if (
+      !exported ||
+      typeof exported !== 'object' ||
+      typeof exported.hash !== 'string' ||
+      typeof exported.schema_version !== 'number'
+    ) {
       throw ApiError.validation({ exported: 'must be an assistant version export envelope' });
     }
     // The hash covers the FULL normalized payload — the exact shape the
@@ -924,7 +1209,16 @@ export class AssistantsService {
     // Parse-normalize first so defaulted fields match; a legacy lossy
     // envelope (no instructions/model_params) then fails the hash check
     // instead of silently importing a v2 assistant without its prompt.
-    const parsed = assistantPayloadSchema.safeParse(exported);
+    //
+    // G4/G5: the envelope carries NULL for unset optionals (instructions,
+    // brand, knowledge_policy…) while the schema takes ABSENT — strip
+    // top-level nulls so a faithful export re-normalizes identically (the
+    // hash still guards every real byte; null-strip changes nothing else).
+    const { hash: _envelopeHash, schema_version: _envelopeSchema, ...envelopeBody } = exported;
+    const compacted = Object.fromEntries(
+      Object.entries(envelopeBody).filter(([, value]) => value !== null),
+    );
+    const parsed = assistantPayloadSchema.safeParse(compacted);
     if (!parsed.success) {
       throw ApiError.validation({
         exported: `payload failed schema validation: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
@@ -932,7 +1226,9 @@ export class AssistantsService {
     }
     const recomputed = hashPayload(parsed.data);
     if (recomputed !== exported.hash) {
-      throw ApiError.validation({ hash: 'export envelope hash mismatch — payload is not canonical' });
+      throw ApiError.validation({
+        hash: 'export envelope hash mismatch — payload is not canonical',
+      });
     }
     return this.createVersion({
       orgId: input.orgId,
@@ -950,11 +1246,17 @@ export class AssistantsService {
    * only. Invalid refs must be rejected BEFORE `PUBLISHED` (Phase 3 exit gate).
    */
   private async rejectUnknownModels(orgId: string, payload: AssistantPayload): Promise<void> {
-    const loadCatalog = async (): Promise<{ models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }> } | null> => {
+    const loadCatalog = async (): Promise<{
+      models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }>;
+    } | null> => {
       const latest = await this.configPublish.latest(orgId, 'model_catalog', null);
-      return (latest?.payload ?? null) as { models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }> } | null;
+      return (latest?.payload ?? null) as {
+        models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }>;
+      } | null;
     };
-    let catalog: { models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }> } | null = null;
+    let catalog: {
+      models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }>;
+    } | null = null;
     try {
       catalog = await loadCatalog();
     } catch {
@@ -966,7 +1268,9 @@ export class AssistantsService {
     if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) {
       return;
     }
-    const enabled = new Set(catalog.models.filter((m) => m.enabled).map((m) => `${m.provider}/${m.model}`));
+    const enabled = new Set(
+      catalog.models.filter((m) => m.enabled).map((m) => `${m.provider}/${m.model}`),
+    );
     const unknown = payload.model_policy.allowed_models.filter((ref) => !enabled.has(ref));
     if (unknown.length > 0) {
       throw ApiError.validation({
@@ -980,8 +1284,9 @@ export class AssistantsService {
     // with `eu` or `global` serve eu. `default`/`us` remain permissive.
     // Second region `eu` is now addressable — see residency.ts policy.
     const residencyConfig = await this.configPublish.latest(orgId, 'knowledge_config', null);
-    const rawResidency =
-      String((residencyConfig?.payload as { residency?: string } | undefined)?.residency ?? 'default');
+    const rawResidency = String(
+      (residencyConfig?.payload as { residency?: string } | undefined)?.residency ?? 'default',
+    );
     let residency: Residency;
     try {
       residency = normalizeResidency(rawResidency);
@@ -1047,19 +1352,112 @@ export class AssistantsService {
   }
 
   /**
+   * R-2 (team_setup_ledger.md §3) — snapshot synthesis shared by every
+   * pre-publish execution path (test runs AND formal evaluation). Snapshots
+   * are publish artifacts, so a version without one (any DRAFT, any legacy
+   * row) gets the same resolved set synthesized from its row: pinning then
+   * has something to point at. Idempotent per version (1:1 snapshots) — a
+   * second call is a no-op. The caller's transaction (message accept, eval
+   * dispatch) runs separately: the snapshot must COMMIT first.
+   *
+   * Frozen-content semantics: the snapshot captures the row ONCE. A later
+   * draft edit does not rebuild it (history must not shift under a running
+   * eval); the publish gate is content-hash keyed, so an edited draft
+   * simply needs a fresh evaluation — the UI says exactly that.
+   */
+  private async ensureVersionSnapshot(
+    orgId: string,
+    assistantId: string,
+    versionId: string,
+  ): Promise<void> {
+    assertOrgId(orgId);
+    assertUuid(assistantId);
+    assertUuid(versionId);
+    await this.db.withOrg(orgId, async (tx) => {
+      const versionRows = await tx
+        .select()
+        .from(assistantVersions)
+        .where(
+          and(eq(assistantVersions.id, versionId), eq(assistantVersions.organizationId, orgId)),
+        )
+        .limit(1);
+      const version = versionRows[0];
+      if (!version || version.assistantId !== assistantId) {
+        throw ApiError.notFound('assistant version');
+      }
+      const existing = await tx
+        .select({ id: policySnapshots.id })
+        .from(policySnapshots)
+        .where(eq(policySnapshots.assistantVersionId, versionId))
+        .limit(1);
+      if (existing.length > 0) {
+        return;
+      }
+      const payload: AssistantPayload = {
+        model_policy: version.modelPolicy as AssistantPayload['model_policy'],
+        context_policy: version.contextPolicy as AssistantPayload['context_policy'],
+        tool_policy: version.toolPolicy as AssistantPayload['tool_policy'],
+        knowledge_policy: (version.knowledgePolicy ??
+          undefined) as AssistantPayload['knowledge_policy'],
+        guardrail_policy: version.guardrailPolicy as AssistantPayload['guardrail_policy'],
+        instructions: (version.instructions ?? undefined) as AssistantPayload['instructions'],
+        model_params: (version.modelParams ?? undefined) as AssistantPayload['model_params'],
+        budget_policy: (version.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
+        brand: (version.brand ?? undefined) as AssistantPayload['brand'],
+      };
+      const validated = validateAssistantPayload(payload);
+      if (!validated.ok) {
+        throw ApiError.validation({ assistant: validated.issues });
+      }
+      const manifest = await this.manifests.resolveForPublish(
+        tx,
+        orgId,
+        assistantId,
+        validated.normalized,
+      );
+      await tx.insert(policySnapshots).values({
+        organizationId: orgId,
+        assistantVersionId: versionId,
+        snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
+        modelPolicy: version.modelPolicy,
+        contextPolicy: version.contextPolicy,
+        toolPolicy: version.toolPolicy,
+        guardrailPolicy: version.guardrailPolicy,
+        knowledgePolicy: version.knowledgePolicy ?? null,
+        instructions: version.instructions ?? null,
+        modelParams: version.modelParams ?? null,
+        budgetPolicy: version.budgetPolicy ?? null,
+        brand: version.brand ?? null,
+        hash: version.hash,
+        toolBindings: manifest.toolBindings,
+        knowledgePins: manifest.knowledgePins,
+        modelRef: manifest.modelRef,
+        templateRef: manifest.templateRef,
+        manifestHash: manifest.manifestHash,
+      });
+    });
+  }
+
+  /**
    * REL-2.4 — pre-publish test conversation: execute a version (DRAFT
    * included) through the real conversation plane without publishing it.
    * The run is run_kind='test': no quota reservation, no billable usage
    * entry, invisible to end users and rollups. A draft version gets its
-   * policy snapshot materialized HERE (snapshots are publish artifacts —
-   * the test path synthesizes the same resolved set from the draft row so
-   * pinning has something to point at).
+   * policy snapshot materialized via ensureVersionSnapshot (snapshots are
+   * publish artifacts — the test path synthesizes the same resolved set
+   * from the draft row so pinning has something to point at).
    *
    * Deliberately NOT one transaction: the snapshot must commit before
    * acceptMessage (a separate transaction) can pin it. A failure after the
    * snapshot leaves an orphan test conversation — harmless by construction.
    */
-  async startTestRun(input: { orgId: string; assistantId: string; versionId: string; text: string; actor: string }): Promise<{
+  async startTestRun(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    text: string;
+    actor: string;
+  }): Promise<{
     conversation_id: string;
     message_id: string;
     run_id: string | null;
@@ -1072,54 +1470,11 @@ export class AssistantsService {
       throw ApiError.validation({ text: 'must be 1..8192 chars' });
     }
 
-    await this.db.withOrg(input.orgId, async (tx) => {
-      const versionRows = await tx
-        .select()
-        .from(assistantVersions)
-        .where(and(eq(assistantVersions.id, input.versionId), eq(assistantVersions.organizationId, input.orgId)))
-        .limit(1);
-      const version = versionRows[0];
-      if (!version || version.assistantId !== input.assistantId) {
-        throw ApiError.notFound('assistant version');
-      }
-      const existing = await tx.select({ id: policySnapshots.id }).from(policySnapshots).where(eq(policySnapshots.assistantVersionId, input.versionId)).limit(1);
-      if (existing.length === 0) {
-        const payload: AssistantPayload = {
-          model_policy: version.modelPolicy as AssistantPayload['model_policy'],
-          context_policy: version.contextPolicy as AssistantPayload['context_policy'],
-          tool_policy: version.toolPolicy as AssistantPayload['tool_policy'],
-          knowledge_policy: (version.knowledgePolicy ?? undefined) as AssistantPayload['knowledge_policy'],
-          guardrail_policy: version.guardrailPolicy as AssistantPayload['guardrail_policy'],
-          instructions: (version.instructions ?? undefined) as AssistantPayload['instructions'],
-          model_params: (version.modelParams ?? undefined) as AssistantPayload['model_params'],
-          budget_policy: (version.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
-        };
-        const validated = validateAssistantPayload(payload);
-        if (!validated.ok) {
-          throw ApiError.validation({ assistant: validated.issues });
-        }
-        const manifest = await this.manifests.resolveForPublish(tx, input.orgId, input.assistantId, validated.normalized);
-        await tx.insert(policySnapshots).values({
-          organizationId: input.orgId,
-          assistantVersionId: input.versionId,
-          snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
-          modelPolicy: version.modelPolicy,
-          contextPolicy: version.contextPolicy,
-          toolPolicy: version.toolPolicy,
-          guardrailPolicy: version.guardrailPolicy,
-          knowledgePolicy: version.knowledgePolicy ?? null,
-          instructions: version.instructions ?? null,
-          modelParams: version.modelParams ?? null,
-          budgetPolicy: version.budgetPolicy ?? null,
-          hash: version.hash,
-          toolBindings: manifest.toolBindings,
-          knowledgePins: manifest.knowledgePins,
-          modelRef: manifest.modelRef,
-          templateRef: manifest.templateRef,
-          manifestHash: manifest.manifestHash,
-        });
-      }
-    });
+    // Snapshot synthesis for pre-publish execution (shared with formal
+    // evaluation — see ensureVersionSnapshot). Deliberately NOT one
+    // transaction with the message accept below: the snapshot must commit
+    // before acceptMessage (a separate transaction) can pin it.
+    await this.ensureVersionSnapshot(input.orgId, input.assistantId, input.versionId);
 
     const conversation = await this.conversations.createConversation({
       orgId: input.orgId,
@@ -1144,7 +1499,11 @@ export class AssistantsService {
       tenantId: input.orgId,
       details: { conversation_id: conversation.id, run_id: accepted.run_id },
     });
-    return { conversation_id: conversation.id, message_id: accepted.message_id, run_id: accepted.run_id };
+    return {
+      conversation_id: conversation.id,
+      message_id: accepted.message_id,
+      run_id: accepted.run_id,
+    };
   }
 
   /**
@@ -1166,14 +1525,29 @@ export class AssistantsService {
    * acknowledged slugs only when the bypass flag was actually set. Silent
    * when unneeded so the audit stream stays signal-dense.
    */
-  private async auditDegradedBypass(orgId: string, versionId: string, actorId: string, acknowledged: boolean): Promise<void> {
+  private async auditDegradedBypass(
+    orgId: string,
+    versionId: string,
+    actorId: string,
+    acknowledged: boolean,
+  ): Promise<void> {
     if (!acknowledged) {
       return;
     }
     const snapRows = await this.db.withOrg(orgId, (tx) =>
-      tx.select({ knowledgePins: policySnapshots.knowledgePins }).from(policySnapshots).where(eq(policySnapshots.assistantVersionId, versionId)).limit(1),
+      tx
+        .select({ knowledgePins: policySnapshots.knowledgePins })
+        .from(policySnapshots)
+        .where(eq(policySnapshots.assistantVersionId, versionId))
+        .limit(1),
     );
-    const slugs = unresolvedPinSlugs({ knowledgePins: (snapRows[0]?.knowledgePins ?? []) as never });
+    const pins = { knowledgePins: (snapRows[0]?.knowledgePins ?? []) as never };
+    const slugs = unresolvedPinSlugs(pins);
+    // P0: the bypass may have covered indexing gaps rather than (or as well
+    // as) unresolved slugs — record both so the audit names what was waived.
+    const undercovered = undercoveredPinSlugs(pins).map(
+      (p) => `${p.slug} (${p.embedded}/${p.total} on ${p.model})`,
+    );
     await this.audit.add({
       action: 'assistant.publish_degraded_acknowledged',
       resourceType: 'assistant_version',
@@ -1181,7 +1555,7 @@ export class AssistantsService {
       actorType: 'account',
       actorId,
       tenantId: orgId,
-      details: { unresolved_slugs: slugs },
+      details: { unresolved_slugs: slugs, undercovered_pins: undercovered },
     });
   }
 
@@ -1195,25 +1569,52 @@ export class AssistantsService {
       normalized: AssistantPayload;
       publishedBy: string;
       rollbackOf: string | null;
+      /** P6: content lineage (draft fork point, or restored version). */
+      parentVersionId: string | null;
       acknowledgeDegradedKnowledge: boolean;
     },
   ): Promise<AssistantVersion> {
     const hash = hashPayload(input.normalized);
-    await this.rejectNoOpPublish(tx, input.assistantId, hash);
+    // P4: manifest resolves BEFORE the no-op guard — the guard compares
+    // RESOLVED SETS, not content. Identical content over a drifted catalog
+    // (perimeter, pins, model refs) is a legitimate re-publish (re-pin),
+    // not a no-op. Eval gates below stay content-hash keyed (decisions judge
+    // content, and a bad payload must not re-enter under a fresh manifest).
+    const manifest = await this.manifests.resolveForPublish(
+      tx,
+      input.orgId,
+      input.assistantId,
+      input.normalized,
+    );
+    await this.rejectNoOpPublish(tx, input.assistantId, hash, manifest.manifestHash);
     await this.rejectBlockedContent(tx, input.orgId, input.assistantId, hash);
     // REL-3.2 (D1 adopted): a template release_policy that declares required
     // checks makes a fresh PASS evaluation a publish precondition — the
     // BLOCK gate alone was vacuous while nothing executed (GAP-04).
     await this.rejectUnmetRequiredChecks(tx, input.orgId, input.assistantId, hash);
-    const manifest = await this.manifests.resolveForPublish(tx, input.orgId, input.assistantId, input.normalized);
     // Degraded-knowledge gate: unresolved pins mean the agent would ship
     // without context the maker assumes it has (retrieval fails closed).
     // Refuse with the slugs — unless explicitly acknowledged (audited at the
     // call site from the committed snapshot).
+    // P0 (GAP-1): undercovered pins join the same gate. A READY document
+    // whose pinned version is not fully embedded for the active model scores
+    // NOTHING at retrieval — shipping it is the same class of silent context
+    // loss as an unresolved slug. Same flag acknowledges both; the message
+    // names which slugs and how many chunks are still indexing.
     const degraded = unresolvedPinSlugs(manifest);
-    if (degraded.length > 0 && !input.acknowledgeDegradedKnowledge) {
+    const undercovered = undercoveredPinSlugs(manifest);
+    if ((degraded.length > 0 || undercovered.length > 0) && !input.acknowledgeDegradedKnowledge) {
+      const parts: string[] = [];
+      if (degraded.length > 0) {
+        parts.push(`unresolved knowledge sources cannot publish: ${degraded.join(', ')}`);
+      }
+      for (const pin of undercovered) {
+        parts.push(
+          `${pin.slug}: vectors indexing for model ${pin.model} (${pin.embedded}/${pin.total} chunks)`,
+        );
+      }
       throw ApiError.validation({
-        knowledge_pins: `unresolved knowledge sources cannot publish: ${degraded.join(', ')} — ingest and map the documents, or acknowledge degraded knowledge explicitly`,
+        knowledge_pins: `${parts.join('; ')} — ingest and map the documents (or wait for indexing), or acknowledge degraded knowledge explicitly`,
       });
     }
     const rows = await tx
@@ -1232,7 +1633,9 @@ export class AssistantsService {
         instructions: input.normalized.instructions ?? null,
         modelParams: input.normalized.model_params ?? null,
         budgetPolicy: input.normalized.budget_policy ?? null,
+        brand: input.normalized.brand ?? null,
         rollbackOf: input.rollbackOf,
+        parentVersionId: input.parentVersionId,
         hash,
         publishedAt: new Date().toISOString(),
         publishedBy: input.publishedBy,
@@ -1255,6 +1658,7 @@ export class AssistantsService {
       instructions: input.normalized.instructions ?? null,
       modelParams: input.normalized.model_params ?? null,
       budgetPolicy: input.normalized.budget_policy ?? null,
+      brand: input.normalized.brand ?? null,
       hash,
       toolBindings: manifest.toolBindings,
       knowledgePins: manifest.knowledgePins,
@@ -1263,9 +1667,127 @@ export class AssistantsService {
       manifestHash: manifest.manifestHash,
     });
 
-    await tx.update(assistants).set({ activeVersionId: inserted.id, updatedAt: new Date().toISOString() }).where(eq(assistants.id, input.assistantId));
+    // P5 (degraded lifecycle): a publish that WAIVED degraded pins starts a
+    // 7-day clock instead of a silent waiver; a healthy publish clears it.
+    // Reaching here with degraded/undercovered non-empty implies the bypass
+    // flag (the gate above threw otherwise).
+    const waived = degraded.length > 0 || undercovered.length > 0;
+    if (waived) {
+      const waivedSlugs = [
+        ...degraded.map((s) => `unresolved:${s}`),
+        ...undercovered.map((p) => `${p.slug}:${p.embedded}/${p.total}`),
+      ];
+      await tx
+        .update(assistants)
+        .set({
+          activeVersionId: inserted.id,
+          degradedUntil: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+          degradedReason: waivedSlugs.join('; ').slice(0, 512),
+          degradedAlertedAt: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(assistants.id, input.assistantId));
+    } else {
+      await tx
+        .update(assistants)
+        .set({
+          activeVersionId: inserted.id,
+          degradedUntil: null,
+          degradedReason: null,
+          degradedAlertedAt: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(assistants.id, input.assistantId));
+    }
 
     return inserted;
+  }
+
+  /**
+   * P5 (degraded lifecycle) — sweep overdue + due-soon degraded assistants.
+   * Overdue (degraded_until past, still enabled): auto-suspend through the
+   * disable path (reversible, audited as assistant.disabled with the TTL
+   * reason — the degraded columns stay as the banner's explanation). Due
+   * soon (inside 24h, never alerted, still enabled): mark alerted and report
+   * for owner notification (the WORKER notifies; this method only marks, so
+   * alerting and state stay in one audited transaction each). Already
+   * disabled rows are left alone (an operator decision outranks the clock).
+   * `orgId` scopes the sweep (test seam; production omits it).
+   */
+  async sweepDegradedAssistants(input: { orgId?: string } = {}): Promise<{
+    suspended: Array<{ orgId: string; assistantId: string; name: string }>;
+    dueSoon: Array<{ orgId: string; assistantId: string; name: string }>;
+  }> {
+    const suspended: Array<{ orgId: string; assistantId: string; name: string }> = [];
+    const dueSoon: Array<{ orgId: string; assistantId: string; name: string }> = [];
+    const orgFilter = (alias: string) =>
+      input.orgId === undefined
+        ? sql``
+        : sql`and ${sql.raw(alias)}.organization_id = ${input.orgId}::uuid`;
+    const overdue = await this.db.withBypass(async (tx) => {
+      const rows = await tx.execute(sql`
+        select id, organization_id, name from assistants
+        where degraded_until is not null
+          and degraded_until < now()
+          and disabled_at is null
+          ${orgFilter('assistants')}
+        limit 100
+        for update skip locked
+      `);
+      return rows.rows as Array<{ id: string; organization_id: string; name: string }>;
+    });
+    for (const row of overdue) {
+      try {
+        await this.setDisabled({
+          orgId: row.organization_id,
+          assistantId: row.id,
+          disabled: true,
+          reason:
+            'degraded knowledge unresolved past the 7-day waiver — fix the pins and re-enable',
+          actorId: 'system:degraded-sweep',
+        });
+        suspended.push({ orgId: row.organization_id, assistantId: row.id, name: row.name });
+      } catch {
+        // Per-candidate isolation (a concurrent disable/rename just skips).
+      }
+    }
+    const soon = await this.db.withBypass(async (tx) => {
+      const rows = await tx.execute(sql`
+        select id, organization_id, name from assistants
+        where degraded_until is not null
+          and degraded_until >= now()
+          and degraded_until < now() + interval '24 hours'
+          and degraded_alerted_at is null
+          and disabled_at is null
+          ${orgFilter('assistants')}
+        limit 100
+        for update skip locked
+      `);
+      return rows.rows as Array<{ id: string; organization_id: string; name: string }>;
+    });
+    for (const row of soon) {
+      try {
+        await this.db.withBypass(async (tx) => {
+          await tx.execute(sql`
+            update assistants set degraded_alerted_at = now()
+            where id = ${row.id}::uuid and degraded_alerted_at is null
+          `);
+        });
+        await this.audit.add({
+          action: 'assistant.degraded_warning',
+          resourceType: 'assistant',
+          resourceId: row.id,
+          actorType: 'service',
+          actorId: 'system:degraded-sweep',
+          tenantId: row.organization_id,
+          details: {},
+        });
+        dueSoon.push({ orgId: row.organization_id, assistantId: row.id, name: row.name });
+      } catch {
+        // Per-candidate isolation.
+      }
+    }
+    return { suspended, dueSoon };
   }
 
   /**
@@ -1278,7 +1800,12 @@ export class AssistantsService {
    * leniency is moot at publish time: a canary promotes a version that
    * already had to PASS here.
    */
-  private async rejectUnmetRequiredChecks(tx: NodePgDatabase, orgId: string, assistantId: string, hash: string): Promise<void> {
+  private async rejectUnmetRequiredChecks(
+    tx: NodePgDatabase,
+    orgId: string,
+    assistantId: string,
+    hash: string,
+  ): Promise<void> {
     // Rule lives in release-gate.ts (REL-3.3 matrix) — this stays a thin
     // throw-wrapper so the publish path and the tested evaluator cannot drift.
     // Throwing on either refusal is behavior-preserving here: the BLOCK gate
@@ -1299,7 +1826,12 @@ export class AssistantsService {
    * "Latest wins" is deliberate: a re-evaluation that passes clears an earlier
    * BLOCK — publishability tracks the current verdict, not history.
    */
-  private async rejectBlockedContent(tx: NodePgDatabase, orgId: string, assistantId: string, hash: string): Promise<void> {
+  private async rejectBlockedContent(
+    tx: NodePgDatabase,
+    orgId: string,
+    assistantId: string,
+    hash: string,
+  ): Promise<void> {
     // Same evaluator as the required-checks gate (REL-3.3): in publish
     // sequence this runs first, so a BLOCK refusal surfaces here with the
     // BLOCK message before the required-checks rule is ever consulted.
@@ -1310,20 +1842,56 @@ export class AssistantsService {
   }
 
   /**
-   * Publish/rollback whose payload equals the assistant's CURRENT ACTIVE
-   * version hash is a no-op — rejected as a conflict. Restoring a payload
-   * that exists on a non-active PUBLISHED row is legitimate (that is what
-   * rollback is for), so only the active pointer is compared.
+   * Publish/rollback that would change NOTHING is a no-op — rejected as a
+   * conflict. Compared on content hash AND resolved-set hash jointly:
+   * - same content + same manifest → true no-op (the concurrent-publish
+   *   race lands here deterministically);
+   * - same content + drifted manifest (perimeter widened, pins re-resolved,
+   *   model refs moved) → legitimate re-publish that re-pins the world
+   *   (refusing it would strand operators with no path to re-pin);
+   * - different content → legitimate publish even when the resolved set is
+   *   untouched (the manifest hash covers pins/bindings/refs, NOT the
+   *   prompt or params — prompt-only iteration must always publish).
+   * Restoring a payload that exists on a non-active PUBLISHED row is
+   * legitimate (that is what rollback is for), so only the active pointer
+   * is compared. Legacy snapshots without a manifest hash fall back to the
+   * content comparison (their historical behavior, unchanged).
    */
-  private async rejectNoOpPublish(tx: NodePgDatabase, assistantId: string, hash: string): Promise<void> {
-    const rows = await tx
-      .select({ activeHash: assistantVersions.hash })
-      .from(assistants)
-      .leftJoin(assistantVersions, eq(assistantVersions.id, assistants.activeVersionId))
-      .where(eq(assistants.id, assistantId))
-      .limit(1);
-    if (rows[0]?.activeHash === hash) {
-      throw ApiError.conflict('assistant active version already carries this payload', { assistant_id: assistantId });
+  private async rejectNoOpPublish(
+    tx: NodePgDatabase,
+    assistantId: string,
+    hash: string,
+    manifestHash: string | null,
+  ): Promise<void> {
+    const rows = await tx.execute(sql`
+      select av.hash as active_hash, ps.manifest_hash as active_manifest_hash
+      from assistants a
+      left join assistant_versions av on av.id = a.active_version_id
+      left join policy_snapshots ps on ps.assistant_version_id = av.id
+      where a.id = ${assistantId}::uuid
+      limit 1
+    `);
+    const row = (
+      rows.rows as Array<{ active_hash: string | null; active_manifest_hash: string | null }>
+    )[0];
+    if (!row || row.active_hash === null) {
+      return;
+    }
+    if (row.active_hash !== hash) {
+      return;
+    }
+    if (row.active_manifest_hash === null || manifestHash === null) {
+      throw ApiError.conflict('assistant active version already carries this payload', {
+        assistant_id: assistantId,
+      });
+    }
+    if (row.active_manifest_hash === manifestHash) {
+      throw ApiError.conflict(
+        'assistant active version already carries this payload and resolved set',
+        {
+          assistant_id: assistantId,
+        },
+      );
     }
   }
 
@@ -1367,10 +1935,16 @@ function mapAssistantUniqueViolation(err: unknown, name: string): unknown {
     return err;
   }
   if (pg.constraint === 'uq_assistants_org_name') {
-    return ApiError.conflict('assistant name already taken in this organization — supply a distinct name', { name });
+    return ApiError.conflict(
+      'assistant name already taken in this organization — supply a distinct name',
+      { name },
+    );
   }
   if (pg.constraint === 'uq_assistant_versions_assistant_version') {
-    return ApiError.conflict('a draft version already exists for this assistant — publish or delete it before drafting another', { reason: 'draft_exists' });
+    return ApiError.conflict(
+      'a draft version already exists for this assistant — publish or delete it before drafting another',
+      { reason: 'draft_exists' },
+    );
   }
   return err;
 }
@@ -1402,7 +1976,9 @@ export function draftWriteMissError(input: {
     return ApiError.notFound('assistant version');
   }
   if (input.status !== 'DRAFT') {
-    return ApiError.conflict(`only DRAFT versions are editable (status is ${input.status})`, { status: input.status });
+    return ApiError.conflict(`only DRAFT versions are editable (status is ${input.status})`, {
+      status: input.status,
+    });
   }
   return ApiError.precondition({ expected: input.expectedHash, current: input.currentHash });
 }

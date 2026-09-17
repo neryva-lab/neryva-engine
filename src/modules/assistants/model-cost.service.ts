@@ -27,6 +27,8 @@ export class ModelCostService {
     model: string;
     costMicrosPer1kInput: number;
     costMicrosPer1kOutput: number;
+    /** P2: optional cached-input rate (omit/null clears it back to legacy posture). */
+    costMicrosPer1kCachedInput?: number | null;
     effectiveFrom?: string | null;
     actorId: string;
   }): Promise<ModelCostEntry> {
@@ -44,6 +46,19 @@ export class ModelCostService {
     if (!Number.isInteger(input.costMicrosPer1kOutput) || input.costMicrosPer1kOutput < 0) {
       throw ApiError.validation({ cost_micros_per_1k_output: 'must be a non-negative integer' });
     }
+    if (
+      input.costMicrosPer1kCachedInput !== undefined &&
+      input.costMicrosPer1kCachedInput !== null
+    ) {
+      if (
+        !Number.isInteger(input.costMicrosPer1kCachedInput) ||
+        input.costMicrosPer1kCachedInput < 0
+      ) {
+        throw ApiError.validation({
+          cost_micros_per_1k_cached_input: 'must be a non-negative integer when present',
+        });
+      }
+    }
     let effectiveFrom = new Date().toISOString();
     if (input.effectiveFrom) {
       const parsed = new Date(input.effectiveFrom);
@@ -52,6 +67,7 @@ export class ModelCostService {
       }
       effectiveFrom = parsed.toISOString();
     }
+    const cachedRate = input.costMicrosPer1kCachedInput ?? null;
     const rows = await this.db.root
       .insert(modelCostEntries)
       .values({
@@ -60,6 +76,7 @@ export class ModelCostService {
         model,
         costMicrosPer1kInput: input.costMicrosPer1kInput,
         costMicrosPer1kOutput: input.costMicrosPer1kOutput,
+        costMicrosPer1kCachedInput: cachedRate,
         effectiveFrom,
         createdBy: input.actorId.slice(0, 128),
       })
@@ -68,6 +85,7 @@ export class ModelCostService {
         set: {
           costMicrosPer1kInput: input.costMicrosPer1kInput,
           costMicrosPer1kOutput: input.costMicrosPer1kOutput,
+          costMicrosPer1kCachedInput: cachedRate,
           retiredAt: null,
         },
       })
@@ -87,9 +105,56 @@ export class ModelCostService {
 
   async listPoints(provider?: string): Promise<ModelCostEntry[]> {
     if (provider !== undefined) {
-      return this.db.root.select().from(modelCostEntries).where(eq(modelCostEntries.provider, provider)).limit(ModelCostService.LIST_CAP);
+      return this.db.root
+        .select()
+        .from(modelCostEntries)
+        .where(eq(modelCostEntries.provider, provider))
+        .limit(ModelCostService.LIST_CAP);
     }
     return this.db.root.select().from(modelCostEntries).limit(ModelCostService.LIST_CAP);
+  }
+
+  /**
+   * G6 (customer-setup-review.md) — console price visibility: latest
+   * EFFECTIVE, UNRETIRED point per provider/model. Effective = effectiveFrom
+   * at or before now (future-dated points are not prices yet); retired points
+   * never price. Empty = unpriced (the console labels, never zero-implies).
+   */
+  async listActivePoints(): Promise<
+    Array<{
+      provider: string;
+      model: string;
+      costMicrosPer1kInput: number;
+      costMicrosPer1kOutput: number;
+      costMicrosPer1kCachedInput: number | null;
+      currency: string;
+      effectiveFrom: string | null;
+    }>
+  > {
+    const rows = await this.db.root
+      .select()
+      .from(modelCostEntries)
+      .where(
+        and(isNull(modelCostEntries.retiredAt), lte(modelCostEntries.effectiveFrom, sql`now()`)),
+      )
+      .orderBy(desc(modelCostEntries.effectiveFrom))
+      .limit(ModelCostService.LIST_CAP);
+    const latest = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      const key = `${row.provider}/${row.model}`;
+      if (!latest.has(key)) {
+        latest.set(key, row);
+      }
+    }
+    return [...latest.values()].map((row) => ({
+      provider: row.provider,
+      model: row.model,
+      costMicrosPer1kInput: row.costMicrosPer1kInput,
+      costMicrosPer1kOutput: row.costMicrosPer1kOutput,
+      costMicrosPer1kCachedInput: row.costMicrosPer1kCachedInput,
+      currency: row.currency,
+      effectiveFrom: row.effectiveFrom,
+    }));
   }
 
   async retirePoint(input: { entryId: string; actorId: string }): Promise<ModelCostEntry> {
@@ -122,14 +187,35 @@ export class ModelCostService {
    * the ledger entry commit together. Null when the model is unpriced (the
    * entry stays cost-null; reconciliation fills it — never invented here).
    */
-  static async latestForRunPricing(tx: NodePgDatabase, provider: string, model: string): Promise<{ inputMicros: number; outputMicros: number } | null> {
+  static async latestForRunPricing(
+    tx: NodePgDatabase,
+    provider: string,
+    model: string,
+  ): Promise<{ inputMicros: number; outputMicros: number; cachedMicros: number | null } | null> {
     const rows = await tx
-      .select({ i: modelCostEntries.costMicrosPer1kInput, o: modelCostEntries.costMicrosPer1kOutput })
+      .select({
+        i: modelCostEntries.costMicrosPer1kInput,
+        o: modelCostEntries.costMicrosPer1kOutput,
+        c: modelCostEntries.costMicrosPer1kCachedInput,
+      })
       .from(modelCostEntries)
-      .where(and(eq(modelCostEntries.provider, provider), eq(modelCostEntries.model, model), lte(modelCostEntries.effectiveFrom, sql`now()`), isNull(modelCostEntries.retiredAt)))
+      .where(
+        and(
+          eq(modelCostEntries.provider, provider),
+          eq(modelCostEntries.model, model),
+          lte(modelCostEntries.effectiveFrom, sql`now()`),
+          isNull(modelCostEntries.retiredAt),
+        ),
+      )
       .orderBy(desc(modelCostEntries.effectiveFrom))
       .limit(1);
     const row = rows[0];
-    return row ? { inputMicros: Number(row.i), outputMicros: Number(row.o) } : null;
+    return row
+      ? {
+          inputMicros: Number(row.i),
+          outputMicros: Number(row.o),
+          cachedMicros: row.c === null ? null : Number(row.c),
+        }
+      : null;
   }
 }

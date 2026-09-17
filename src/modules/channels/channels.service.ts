@@ -334,21 +334,39 @@ export class ChannelsService {
 
   // ── Ingest-side resolution (public webhook path; narrow bypass) ──────────
 
-  /** Resolve an account by id for the signature-verified webhook path. */
+  /**
+   * Resolve an account by id for the signature-verified webhook path.
+   * Same FORCE-RLS root-read class as getByPublicKey (G1 live-verification
+   * fix): the webhook signature already authenticated the call, and the read
+   * filters by exact id — bypass vehicle with per-call justification, not a
+   * tenant scan.
+   */
   async getByIdForIngest(accountId: string): Promise<ChannelAccount | null> {
     if (!isUuid(accountId)) {
       return null;
     }
-    const rows = await this.db.root.select().from(channelAccounts).where(eq(channelAccounts.id, accountId)).limit(1);
+    const rows = await this.db.withBypass((tx) => tx.select().from(channelAccounts).where(eq(channelAccounts.id, accountId)).limit(1));
     return rows[0] ?? null;
   }
 
-  /** Resolve a widget account by its public key. */
+  /**
+   * Resolve a widget account by its public key.
+   *
+   * G1 live-verification fix: this ran on `db.root`, but channel_accounts
+   * carries FORCE ROW LEVEL SECURITY with a tenant-or-bypass policy and root
+   * sets NEITHER — every public widget lookup returned null, so the entire
+   * public widget plane (session/messages/embed) 404d for every account.
+   * The bypass is correct here, not a hole: the caller is anonymous by
+   * design, the public key IS the unguessable capability (`nk_live_` + 128
+   * bits), and the read filters by it exactly (single row, no enumeration).
+   */
   async getByPublicKey(publicKey: string): Promise<ChannelAccount | null> {
     if (typeof publicKey !== 'string' || publicKey.length < 10 || publicKey.length > 64) {
       return null;
     }
-    const rows = await this.db.root.select().from(channelAccounts).where(eq(channelAccounts.publicKey, publicKey)).limit(1);
+    const rows = await this.db.withBypass((tx) =>
+      tx.select().from(channelAccounts).where(eq(channelAccounts.publicKey, publicKey)).limit(1),
+    );
     return rows[0] ?? null;
   }
 

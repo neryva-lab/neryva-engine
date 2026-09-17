@@ -29,6 +29,18 @@ export interface PreferencesInput {
   log_retention_days?: number;
   auto_rollback?: boolean;
   canary_percentage?: number;
+  /**
+   * P3 (ai-native-review.md memory governance): semantic-memory PII posture.
+   * off = current behavior (store verbatim); redact = store redacted +
+   * audit the match count (never content); block = refuse PII-bearing
+   * memories with 422. Absent = off (no behavior change for existing orgs).
+   */
+  memory_pii_scrubbing?: 'off' | 'redact' | 'block';
+  /**
+   * P3: default TTL (seconds) for new memory items lacking an explicit
+   * expiry. Bounded 1h–10y. Absent = immortal unless set per item.
+   */
+  memory_ttl_default_seconds?: number;
 }
 
 const LOGO_MAX_CHARS = 2_000_000; // data URL, ~1.4MB binary after base64
@@ -68,11 +80,16 @@ export class OrgSettingsService {
     if (!brief) {
       throw new NotFoundException('organization');
     }
-    const tenant = await this.db.root.execute<{ region: string | null; retention_days: number | null }>(sql`
+    const tenant = await this.db.root.execute<{
+      region: string | null;
+      retention_days: number | null;
+    }>(sql`
       select region, retention_days from tenants where id = ${orgId} limit 1
     `);
     const settings = await this.ensureRow(orgId);
-    const defaultProject = settings.defaultProjectId ? await this.projectsService.get(orgId, settings.defaultProjectId).catch(() => null) : null;
+    const defaultProject = settings.defaultProjectId
+      ? await this.projectsService.get(orgId, settings.defaultProjectId).catch(() => null)
+      : null;
     return {
       org: {
         id: brief.id,
@@ -130,7 +147,10 @@ export class OrgSettingsService {
     }
 
     if (input.region !== undefined || input.retentionDays !== undefined) {
-      const current = await this.db.root.execute<{ region: string | null; retention_days: number | null }>(sql`
+      const current = await this.db.root.execute<{
+        region: string | null;
+        retention_days: number | null;
+      }>(sql`
         select region, retention_days from tenants where id = ${input.orgId} limit 1
       `);
       const tenantUpdate: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -147,7 +167,9 @@ export class OrgSettingsService {
       if (input.retentionDays !== undefined) {
         const days = Math.floor(input.retentionDays);
         if (days < RETENTION_BOUNDS.min || days > RETENTION_BOUNDS.max) {
-          throw ApiError.validation({ retention_days: `must be ${RETENTION_BOUNDS.min}–${RETENTION_BOUNDS.max} days` });
+          throw ApiError.validation({
+            retention_days: `must be ${RETENTION_BOUNDS.min}–${RETENTION_BOUNDS.max} days`,
+          });
         }
         tenantUpdate.retentionDays = days;
         if (days !== current.rows[0]?.retention_days) {
@@ -183,11 +205,19 @@ export class OrgSettingsService {
           tx
             .select({ id: projects.id, name: projects.name })
             .from(projects)
-            .where(and(eq(projects.id, input.defaultProjectId!), eq(projects.orgId, input.orgId), isNull(projects.archivedAt)))
+            .where(
+              and(
+                eq(projects.id, input.defaultProjectId!),
+                eq(projects.orgId, input.orgId),
+                isNull(projects.archivedAt),
+              ),
+            )
             .limit(1),
         );
         if (!project[0]) {
-          throw ApiError.validation({ default_project_id: 'must be an active project in this organization' });
+          throw ApiError.validation({
+            default_project_id: 'must be an active project in this organization',
+          });
         }
         settingsUpdate.defaultProjectId = input.defaultProjectId;
         changes.default_project_id = input.defaultProjectId;
@@ -196,7 +226,10 @@ export class OrgSettingsService {
 
     if (input.branding !== undefined) {
       const current = await this.ensureRow(input.orgId);
-      const branding = { ...((current.branding ?? {}) as Record<string, unknown>), ...this.validateBranding(input.branding) };
+      const branding = {
+        ...((current.branding ?? {}) as Record<string, unknown>),
+        ...this.validateBranding(input.branding),
+      };
       // Explicit null clears a key (the validator omits cleared keys — drop them here).
       for (const key of ['logo_dataurl', 'brand_color'] as const) {
         if (input.branding[key] === null || input.branding[key] === '') {
@@ -209,7 +242,10 @@ export class OrgSettingsService {
 
     if (input.preferences !== undefined) {
       const current = await this.ensureRow(input.orgId);
-      const preferences = { ...((current.preferences ?? {}) as Record<string, unknown>), ...this.validatePreferences(input.preferences) };
+      const preferences = {
+        ...((current.preferences ?? {}) as Record<string, unknown>),
+        ...this.validatePreferences(input.preferences),
+      };
       settingsUpdate.preferences = preferences;
       changes.preferences_keys = Object.keys(preferences);
     }
@@ -234,7 +270,10 @@ export class OrgSettingsService {
         tenantId: input.orgId,
         details: changes,
       });
-      await this.events.emit(EngineEvents.OrgSettingsUpdated, { orgId: input.orgId, keys: Object.keys(changes) });
+      await this.events.emit(EngineEvents.OrgSettingsUpdated, {
+        orgId: input.orgId,
+        keys: Object.keys(changes),
+      });
     }
   }
 
@@ -250,15 +289,23 @@ export class OrgSettingsService {
     if (rows[0]) {
       return rows[0];
     }
-    const existing = await this.db.withOrg(orgId, (tx) => tx.select().from(orgSettings).where(eq(orgSettings.orgId, orgId)).limit(1));
+    const existing = await this.db.withOrg(orgId, (tx) =>
+      tx.select().from(orgSettings).where(eq(orgSettings.orgId, orgId)).limit(1),
+    );
     return existing[0];
   }
 
   private validateBranding(input: BrandingInput): Record<string, string> {
     const branding: Record<string, string> = {};
-    if (input.logo_dataurl !== undefined && input.logo_dataurl !== null && input.logo_dataurl !== '') {
+    if (
+      input.logo_dataurl !== undefined &&
+      input.logo_dataurl !== null &&
+      input.logo_dataurl !== ''
+    ) {
       if (!/^data:image\/(png|jpe?g|webp|svg\+xml);base64,/i.test(input.logo_dataurl)) {
-        throw ApiError.validation({ 'branding.logo_dataurl': 'must be a data URL for png/jpeg/webp/svg image' });
+        throw ApiError.validation({
+          'branding.logo_dataurl': 'must be a data URL for png/jpeg/webp/svg image',
+        });
       }
       if (input.logo_dataurl.length > LOGO_MAX_CHARS) {
         throw ApiError.validation({ 'branding.logo_dataurl': 'logo exceeds the 2MB limit' });
@@ -278,7 +325,9 @@ export class OrgSettingsService {
     const preferences: Record<string, unknown> = {};
     if (input.default_runtime !== undefined) {
       if (!ALLOWED_RUNTIMES.includes(input.default_runtime)) {
-        throw ApiError.validation({ 'preferences.default_runtime': `must be one of ${ALLOWED_RUNTIMES.join(', ')}` });
+        throw ApiError.validation({
+          'preferences.default_runtime': `must be one of ${ALLOWED_RUNTIMES.join(', ')}`,
+        });
       }
       preferences.default_runtime = input.default_runtime;
     }
@@ -287,7 +336,9 @@ export class OrgSettingsService {
       if (value !== undefined) {
         const days = Math.floor(value);
         if (days < RETENTION_BOUNDS.min || days > RETENTION_BOUNDS.max) {
-          throw ApiError.validation({ [`preferences.${key}`]: `must be ${RETENTION_BOUNDS.min}–${RETENTION_BOUNDS.max} days` });
+          throw ApiError.validation({
+            [`preferences.${key}`]: `must be ${RETENTION_BOUNDS.min}–${RETENTION_BOUNDS.max} days`,
+          });
         }
         preferences[key] = days;
       }
@@ -301,6 +352,27 @@ export class OrgSettingsService {
         throw ApiError.validation({ 'preferences.canary_percentage': 'must be 0–100' });
       }
       preferences.canary_percentage = pct;
+    }
+    if (input.memory_pii_scrubbing !== undefined) {
+      if (
+        input.memory_pii_scrubbing !== 'off' &&
+        input.memory_pii_scrubbing !== 'redact' &&
+        input.memory_pii_scrubbing !== 'block'
+      ) {
+        throw ApiError.validation({
+          'preferences.memory_pii_scrubbing': 'must be off, redact, or block',
+        });
+      }
+      preferences.memory_pii_scrubbing = input.memory_pii_scrubbing;
+    }
+    if (input.memory_ttl_default_seconds !== undefined) {
+      const seconds = Math.floor(input.memory_ttl_default_seconds);
+      if (!Number.isFinite(seconds) || seconds < 3600 || seconds > 315_360_000) {
+        throw ApiError.validation({
+          'preferences.memory_ttl_default_seconds': 'must be 3600–315360000 seconds (1h–10y)',
+        });
+      }
+      preferences.memory_ttl_default_seconds = seconds;
     }
     return preferences;
   }

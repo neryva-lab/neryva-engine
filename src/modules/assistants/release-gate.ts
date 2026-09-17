@@ -25,11 +25,14 @@ export interface GateRefusal {
 }
 
 /** BLOCK rule (TPL-6.1): the latest completed decision must not be BLOCK. */
-export function decideBlockedContent(latestDecision: string | null | undefined): GateRefusal | null {
+export function decideBlockedContent(
+  latestDecision: string | null | undefined,
+): GateRefusal | null {
   if (latestDecision === 'BLOCK') {
     return {
       gate: 'blocked_content',
-      message: 'the latest evaluation of this content decided BLOCK — resolve the critical failures and re-evaluate before publishing',
+      message:
+        'the latest evaluation of this content decided BLOCK — resolve the critical failures and re-evaluate before publishing',
       details: {},
     };
   }
@@ -42,7 +45,10 @@ export function decideBlockedContent(latestDecision: string | null | undefined):
  * WARN, BLOCK, and absent all refuse. No declared checks keeps the legacy
  * posture (this rule passes; the BLOCK rule still applies).
  */
-export function decideRequiredChecks(required: string[], latestDecision: string | null): GateRefusal | null {
+export function decideRequiredChecks(
+  required: string[],
+  latestDecision: string | null,
+): GateRefusal | null {
   if (required.length === 0) {
     return null;
   }
@@ -75,7 +81,8 @@ export async function evaluatePublishGate(
     where i.assistant_id = ${assistantId}::uuid
     limit 1
   `);
-  const policyRaw = (policyRows.rows[0] as { release_policy?: unknown } | undefined)?.release_policy;
+  const policyRaw = (policyRows.rows[0] as { release_policy?: unknown } | undefined)
+    ?.release_policy;
   const policy: { required?: unknown } | null =
     typeof policyRaw === 'string'
       ? (() => {
@@ -85,8 +92,10 @@ export async function evaluatePublishGate(
             return null;
           }
         })()
-      : (policyRaw as { required?: unknown } | undefined) ?? null;
-  const required = Array.isArray(policy?.required) ? (policy?.required as unknown[]).filter((c): c is string => typeof c === 'string') : [];
+      : ((policyRaw as { required?: unknown } | undefined) ?? null);
+  const required = Array.isArray(policy?.required)
+    ? (policy?.required as unknown[]).filter((c): c is string => typeof c === 'string')
+    : [];
 
   const decisionRows = await tx.execute(sql`
     select er.decision
@@ -97,6 +106,9 @@ export async function evaluatePublishGate(
       and av.hash = ${hash}
       and er.state = 'completed'
       and er.decision is not null
+      -- P5: shadow evals OBSERVE drift; they never gate releases. A shadow
+      -- BLOCK must not block shipping (nor satisfy required-checks).
+      and er.is_shadow = false
     order by er.finished_at desc nulls last, er.started_at desc
     limit 1
   `);

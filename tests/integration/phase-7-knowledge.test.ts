@@ -50,10 +50,14 @@ describeIfDb('knowledge memory + retrieval guards (requires DATABASE_URL)', () =
     db = new DbService();
     const audit = new AuditService(db);
     const embedding = new EmbeddingService();
-    memory = new MemoryService(db, audit, embedding);
+    // P0: services resolve the org's configured embedding model via the
+    // config surface — the null stub reproduces an org with nothing
+    // published (legacy posture: service default everywhere).
+    const nullConfig = { latest: async () => null } as never;
+    memory = new MemoryService(db, audit, embedding, nullConfig);
     // RerankerService + QueryRewriteService are zero-arg: env-unset defaults
     // are noop/identity, so no external endpoints are touched.
-    retrieval = new RetrievalService(db, embedding, new RerankerService(), new QueryRewriteService());
+    retrieval = new RetrievalService(db, embedding, new RerankerService(), new QueryRewriteService(), nullConfig);
   });
 
   afterAll(async () => {

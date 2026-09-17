@@ -143,9 +143,10 @@ export class EvalExecutorConsumer implements OutboxConsumer {
         dispatched += 1;
       } catch (err) {
         if (err instanceof ApiError && err.retryability === 'no-retry') {
-          // The case can never run (draft pin refused, validation, policy):
-          // record it as failed so the eval can COMPLETE honestly instead of
-          // hanging, then keep going. Transient failures rethrow → outbox retry.
+          // The case can never run (retired pin, validation, policy — R-2
+          // admits DRAFT + PUBLISHED pins, both snapshot-gated): record it as
+          // failed so the eval can COMPLETE honestly instead of hanging, then
+          // keep going. Transient failures rethrow → outbox retry.
           await this.markExecutionFailed(execution.id, event.organizationId, `accept failed: ${(err as Error).message}`.slice(0, 512));
           dispatched += 1;
           continue;

@@ -1,0 +1,138 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="s6" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.04"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+    <filter id="s6p" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.08"/>
+      <feDropShadow dx="0" dy="16" stdDeviation="28" flood-color="#000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F5F5F7"/>
+  <rect width="1440" height="56" fill="#FFF" opacity="0.92"/><path d="M0 56 H1440" stroke="#E5E5EA"/>
+  <path d="M28 28 L22 34 L28 40" fill="none" stroke="#6E6E73" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="38" y="39" font-size="13" fill="#6E6E73">Fleet</text>
+  <text x="88" y="39" font-size="15" font-weight="600" fill="#1D1D1F">Billing Support</text>
+  <rect x="204" y="24" width="52" height="21" rx="10.5" fill="#F5F5F7" stroke="#E5E5EA"/>
+  <text x="230" y="38" font-size="11" text-anchor="middle" fill="#6E6E73">Draft</text>
+  <circle cx="1206" cy="34" r="4" fill="#34C759"/><text x="1218" y="38" font-size="11" fill="#A1A1A6">All changes saved</text>
+  <text x="1416" y="38" font-size="13" text-anchor="end" fill="#0071E3">Engine Room</text>
+
+  <!-- left rail -->
+  <rect y="56" width="248" height="776" fill="#FFF"/><path d="M248 56 V832" stroke="#E5E5EA"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">BUILD</text>
+  <rect x="8" y="456" width="232" height="38" rx="10" fill="#F5F5F7"/>
+  <g font-size="13" font-weight="500" fill="#1D1D1F">
+    <path d="M24 191 l4 4 l8 -9" fill="none" stroke="#34C759" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="48" y="196">Purpose</text>
+    <path d="M24 229 l4 4 l8 -9" fill="none" stroke="#34C759" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="48" y="234">Brain</text>
+    <path d="M24 267 l4 4 l8 -9" fill="none" stroke="#34C759" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="48" y="272">Knowledge</text>
+    <path d="M24 305 l4 4 l8 -9" fill="none" stroke="#34C759" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="48" y="310">Tools</text>
+    <circle cx="28" cy="343" r="5" fill="#C7C7CC"/><text x="48" y="348" fill="#6E6E73">Guardrails</text>
+    <circle cx="28" cy="381" r="5" fill="#C7C7CC"/><text x="48" y="386" fill="#6E6E73">Memory</text>
+    <path d="M24 419 l4 4 l8 -9" fill="none" stroke="#34C759" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="48" y="424">Try</text>
+    <circle cx="28" cy="457" r="5" fill="#FF9F0A"/><text x="48" y="462" font-weight="600">Evaluation</text>
+    <circle cx="28" cy="495" r="5" fill="#FF9F0A"/><text x="48" y="500" font-weight="600">Ship</text>
+  </g>
+  <g font-size="11" fill="#A1A1A6" text-anchor="end">
+    <text x="228" y="348">default</text><text x="228" y="386">default</text>
+    <text x="228" y="462" fill="#B25E00">not run</text><text x="228" y="500" fill="#B25E00">1 needs you</text>
+  </g>
+
+  <!-- ===== readiness card ===== -->
+  <g filter="url(#s6)"><rect x="344" y="104" width="640" height="640" rx="20" fill="#FFF" stroke="#E5E5EA"/></g>
+  <text x="384" y="152" font-size="22" font-weight="600" letter-spacing="-0.3" fill="#1D1D1F">Ready to go live?</text>
+  <text x="384" y="178" font-size="14" fill="#6E6E73">5 ready · 1 needs you · 2 skipped</text>
+
+  <text x="384" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">REQUIRED BY THE ENGINE</text>
+
+  <!-- rows -->
+  <g font-size="14" fill="#1D1D1F">
+    <circle cx="392" cy="248" r="5" fill="#34C759"/>
+    <text x="412" y="245" font-weight="600">Instructions</text><text x="412" y="264" font-size="11" fill="#6E6E73">Role, task and 4 rules · 1,284 chars</text>
+    <path d="M384 282 H944" stroke="#F0F0F3"/>
+
+    <circle cx="392" cy="312" r="5" fill="#34C759"/>
+    <text x="412" y="309" font-weight="600">Model</text><text x="412" y="328" font-size="11" fill="#6E6E73">Claude Sonnet 4.5 · Anthropic · fallback on</text>
+    <path d="M384 346 H944" stroke="#F0F0F3"/>
+
+    <circle cx="392" cy="376" r="5" fill="#34C759"/>
+    <text x="412" y="373" font-weight="600">Tools</text><text x="412" y="392" font-size="11" fill="#6E6E73">account_lookup · pinned, schema hash matches</text>
+    <path d="M384 410 H944" stroke="#F0F0F3"/>
+
+    <circle cx="392" cy="440" r="5" fill="#FF9F0A"/><circle cx="392" cy="440" r="9" fill="none" stroke="#FF9F0A" stroke-opacity="0.22" stroke-width="4"/>
+    <text x="412" y="437" font-weight="600">Knowledge pins</text>
+    <text x="412" y="456" font-size="11" fill="#B25E00">faq-2026.pdf is 62% embedded for the current model</text>
+    <path d="M384 474 H944" stroke="#F0F0F3"/>
+
+    <circle cx="392" cy="504" r="5" fill="#34C759"/>
+    <text x="412" y="501" font-weight="600">No blocking control blocks</text>
+    <text x="412" y="520" font-size="11" fill="#6E6E73">No platform or org blocks on this agent, model or tools</text>
+    <path d="M384 538 H944" stroke="#F0F0F3"/>
+
+    <circle cx="392" cy="568" r="5" fill="#34C759"/>
+    <text x="412" y="565" font-weight="600">Evaluation</text>
+    <text x="412" y="584" font-size="11" fill="#6E6E73">PASS on this content hash · 24 of 24 cases</text>
+  </g>
+
+  <text x="384" y="628" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">OPTIONAL — SKIPPED, NOT BLOCKING</text>
+  <g font-size="14" fill="#6E6E73">
+    <circle cx="392" cy="660" r="5" fill="#C7C7CC"/>
+    <text x="412" y="657">Guardrails</text><text x="412" y="676" font-size="11" fill="#A1A1A6">Platform defaults · input default, output brand-safe</text>
+    <circle cx="392" cy="706" r="5" fill="#C7C7CC"/>
+    <text x="412" y="703">Memory</text><text x="412" y="722" font-size="11" fill="#A1A1A6">Conversation scope · history limit 30 · summary on</text>
+  </g>
+
+  <!-- popover anchored to the amber row -->
+  <g filter="url(#s6p)"><rect x="620" y="392" width="352" height="150" rx="14" fill="#FFF" stroke="#E5E5EA"/></g>
+  <path d="M636 392 l9 -9 l9 9 z" fill="#FFF" stroke="#E5E5EA"/>
+  <path d="M637 392 h17" stroke="#FFF" stroke-width="2"/>
+  <text x="644" y="422" font-size="14" font-weight="600" fill="#1D1D1F">One source isn’t fully embedded</text>
+  <text x="644" y="444" font-size="12" fill="#6E6E73">faq-2026.pdf will not be retrievable until the</text>
+  <text x="644" y="462" font-size="12" fill="#6E6E73">worker finishes. Publishing now records an</text>
+  <text x="644" y="480" font-size="12" fill="#6E6E73">acknowledged-degraded entry in the audit log.</text>
+  <rect x="644" y="496" width="152" height="34" rx="10" fill="#FFF" stroke="#E5E5EA"/>
+  <text x="720" y="518" font-size="13" font-weight="600" text-anchor="middle" fill="#1D1D1F">Wait for indexing</text>
+  <rect x="806" y="496" width="146" height="34" rx="10" fill="#F5F5F7"/>
+  <text x="879" y="518" font-size="13" font-weight="600" text-anchor="middle" fill="#6E6E73">Acknowledge</text>
+
+  <text x="344" y="784" font-size="11" fill="#A1A1A6">This list is rendered from the engine’s required-checks read. Nothing here is guessed, and nothing is hardcoded.</text>
+
+  <!-- right rail: publish summary -->
+  <rect x="1080" y="56" width="360" height="776" fill="#FFF"/><path d="M1080 56 V832" stroke="#E5E5EA"/>
+  <text x="1104" y="94" font-size="17" font-weight="600" fill="#1D1D1F">Publish</text>
+  <text x="1104" y="114" font-size="12" fill="#6E6E73">Draft → version 1</text>
+  <g filter="url(#s6)"><rect x="1104" y="136" width="312" height="120" rx="14" fill="#FAFAFC" stroke="#E5E5EA"/></g>
+  <g font-size="12" fill="#6E6E73">
+    <text x="1124" y="164">Content hash</text><text x="1396" y="164" text-anchor="end" fill="#1D1D1F" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">a41f…c92e</text>
+    <text x="1124" y="188">Schema version</text><text x="1396" y="188" text-anchor="end" fill="#1D1D1F">2</text>
+    <text x="1124" y="212">Snapshot</text><text x="1396" y="212" text-anchor="end" fill="#1D1D1F">created on publish</text>
+    <text x="1124" y="236">Rollout</text><text x="1396" y="236" text-anchor="end" fill="#1D1D1F">100% at publish</text>
+  </g>
+  <rect x="1104" y="276" width="312" height="72" rx="12" fill="#FFF8EE" stroke="#FF9F0A" stroke-opacity="0.28"/>
+  <text x="1124" y="304" font-size="12" font-weight="600" fill="#8A4B00">1 required item needs you</text>
+  <text x="1124" y="324" font-size="11" fill="#8A4B00">Resolve knowledge coverage or acknowledge</text>
+  <text x="1124" y="340" font-size="11" fill="#8A4B00">degraded knowledge to continue.</text>
+  <text x="1104" y="382" font-size="12" fill="#0071E3">Jump to first issue</text>
+
+  <text x="1104" y="430" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">WHAT HAPPENS ON PUBLISH</text>
+  <g font-size="12" fill="#6E6E73">
+    <text x="1104" y="456">· Version 1 is inserted, never mutated later</text>
+    <text x="1104" y="478">· A policy snapshot pins tools, knowledge,</text>
+    <text x="1116" y="496">model refs and manifest hash</text>
+    <text x="1104" y="518">· The active pointer moves atomically</text>
+    <text x="1104" y="540">· In-flight runs stay pinned to their version</text>
+    <text x="1104" y="562">· Rollback and retire stay on the agent page</text>
+  </g>
+
+  <!-- bottom bar -->
+  <rect y="832" width="1440" height="68" fill="#FFF"/><path d="M0 832 H1440" stroke="#E5E5EA"/>
+  <text x="24" y="866" font-size="12" fill="#6E6E73">Tapping the button with an open issue scrolls to it.</text>
+  <text x="24" y="884" font-size="11" fill="#A1A1A6">It is never a dead click.</text>
+  <rect x="1136" y="846" width="136" height="40" rx="12" fill="#FFF" stroke="#E5E5EA" filter="url(#s6)"/>
+  <text x="1204" y="871" font-size="14" font-weight="600" text-anchor="middle" fill="#1D1D1F">← Adjust</text>
+  <rect x="1288" y="846" width="128" height="40" rx="12" fill="#C7C7CC"/>
+  <text x="1352" y="871" font-size="14" font-weight="600" text-anchor="middle" fill="#FFF">Give it life</text>
+</svg>

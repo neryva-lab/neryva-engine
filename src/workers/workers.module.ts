@@ -17,6 +17,10 @@ import { NotificationsModule } from '../modules/notifications/notifications.modu
 import { EvalExecutorConsumer } from './eval-executor.consumer';
 import { EvalScoringConsumer } from './eval-scoring.consumer';
 import { HumanLoopNotifyConsumer } from './human-loop-notify.consumer';
+import { RunWatchdogWorker } from './run-watchdog.worker';
+import { ModelDriftWorker } from './model-drift.worker';
+import { DegradedSweepWorker } from './degraded-sweep.worker';
+import { AssistantsModule } from '../modules/assistants/assistants.module';
 
 /**
  * Worker module — Phase 6.6 worker families live here (bounded concurrency,
@@ -40,8 +44,29 @@ import { HumanLoopNotifyConsumer } from './human-loop-notify.consumer';
     ...(ModuleFlags.knowledge ? [KnowledgeModule] : []),
     // Human-loop notifications (REL-5.2): approval/escalation fan-out.
     ...(ModuleFlags.notifications ? [NotificationsModule] : []),
+    // P5: drift + degraded sweeps need EvalService (knowledge), the
+    // AssistantsService suspend path, and the notification fan-out. Same
+    // flag-gating as the rest: with assistants off these workers' module
+    // deps are absent and Nest refuses to boot them (matching the existing
+    // HumanLoopNotify/Notifications posture — flags on in the monolith).
+    ...(ModuleFlags.assistants ? [AssistantsModule] : []),
   ],
-  providers: [RunDispatchConsumer, TemplateProvisioningConsumer, RunCancelConsumer, AnalyticsRollupConsumer, MemoryProposerConsumer, LlmJudgeConsumer, EvalExecutorConsumer, EvalScoringConsumer, HumanLoopNotifyConsumer, OutboxDispatcherWorker, AcceptedRunSweepWorker],
+  providers: [
+    RunDispatchConsumer,
+    TemplateProvisioningConsumer,
+    RunCancelConsumer,
+    AnalyticsRollupConsumer,
+    MemoryProposerConsumer,
+    LlmJudgeConsumer,
+    EvalExecutorConsumer,
+    EvalScoringConsumer,
+    HumanLoopNotifyConsumer,
+    OutboxDispatcherWorker,
+    AcceptedRunSweepWorker,
+    RunWatchdogWorker,
+    ModelDriftWorker,
+    DegradedSweepWorker,
+  ],
   exports: [OutboxDispatcherWorker],
 })
 export class WorkersModule {}

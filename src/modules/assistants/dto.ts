@@ -1,4 +1,16 @@
-import { IsArray, IsBoolean, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, Length, MaxLength, ValidateNested } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsInt,
+  IsNotEmpty,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsString,
+  Length,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class TemplateRefDto {
@@ -55,8 +67,11 @@ export class ModelPolicyDto {
 }
 
 export class ContextPolicyDto {
+  // NOTE: this was @IsString() — every valid engine payload carries a NUMBER
+  // (zod int 1..100 in validation.ts), so the pipe 400d all version writes
+  // with a history_limit. The DTO admits the shape; ranges stay service-side.
   @IsOptional()
-  @IsString()
+  @IsInt()
   history_limit?: number;
 
   @IsOptional()
@@ -84,6 +99,11 @@ export class ToolDescriptorDto {
   @IsOptional()
   @IsString()
   approval?: string;
+
+  /** P4: live | shadow (deep-validated service-side; the DTO admits presence). */
+  @IsOptional()
+  @IsString()
+  execution_mode?: string;
 }
 
 export class ToolPolicyDto {
@@ -106,6 +126,11 @@ export class GuardrailPolicyDto {
   @IsOptional()
   @IsBoolean()
   pii_redaction?: boolean;
+
+  /** P3: blocking | logging (deep-validated service-side; the DTO admits presence). */
+  @IsOptional()
+  @IsString()
+  execution_mode?: string;
 }
 
 export class CreateVersionDto {
@@ -127,6 +152,34 @@ export class CreateVersionDto {
   @ValidateNested()
   @Type(() => GuardrailPolicyDto)
   guardrail_policy!: GuardrailPolicyDto;
+
+  /**
+   * R-1 (team_setup_ledger.md §3) — the service consumes the FULL
+   * AssistantPayload (instructions / model_params / budget_policy live on the
+   * version row and publish rebuilds from it), but this DTO previously
+   * declared only the five policy keys, so the global forbidNonWhitelisted
+   * pipe 400d any version write carrying the prompt, params, or budgets.
+   * These three are optional free-form (deep shape + secret + unknown-key
+   * validation happens in the service via validateAssistantPayload /
+   * rejectUnknownPayloadKeys — the DTO only admits their presence).
+   */
+  @IsOptional()
+  @IsString()
+  instructions?: string;
+
+  @IsOptional()
+  @IsObject()
+  model_params?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsObject()
+  budget_policy?: Record<string, unknown>;
+
+  /** G4: first-class brand voice (≤2000 chars, enforced at runtime). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(2_000)
+  brand?: string;
 }
 
 export class RollbackDto {
@@ -143,10 +196,37 @@ export class RollbackDto {
   acknowledge_degraded_knowledge?: boolean;
 }
 
-/** Wire shape of an exported assistant version envelope (service verifies the hash). */
+/**
+ * Wire shape of an exported assistant version envelope (service verifies
+ * the hash against the FULL payload). G5 (customer-setup-review.md):
+ * exportVersion emits instructions/model_params/budget_policy and
+ * importVersion parses with the full assistantPayloadSchema — but this DTO
+ * previously declared only schema_version + the policy keys, so the global
+ * forbidNonWhitelisted pipe 400d every real envelope before the service saw
+ * it. Same fix class as CreateVersionDto R-1.
+ */
 export class ImportVersionDto {
   @IsNumber()
   schema_version!: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32_768)
+  instructions?: string;
+
+  @IsOptional()
+  @IsObject()
+  model_params?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsObject()
+  budget_policy?: Record<string, unknown>;
+
+  /** G4: first-class brand voice (≤2000 chars, enforced at runtime). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(2_000)
+  brand?: string;
 
   @IsObject()
   model_policy!: Record<string, unknown>;

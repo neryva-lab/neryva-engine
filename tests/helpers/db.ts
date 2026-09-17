@@ -174,13 +174,17 @@ export async function cleanupOrg(pool: Pool, orgIds: string[]): Promise<void> {
       await client.query(`delete from escalations where organization_id = $1::uuid`, [org]);
       await client.query(`delete from runs where organization_id = $1::uuid`, [org]);
       await client.query(`delete from messages where organization_id = $1::uuid`, [org]);
-      await client.query(`delete from conversation_participants where organization_id = $1::uuid`, [org]);
+      await client.query(`delete from conversation_participants where organization_id = $1::uuid`, [
+        org,
+      ]);
       await client.query(`delete from conversations where organization_id = $1::uuid`, [org]);
       await client.query(`delete from policy_snapshots where organization_id = $1::uuid`, [org]);
       await client.query(`delete from assistant_versions where organization_id = $1::uuid`, [org]);
       await client.query(`delete from assistants where organization_id = $1::uuid`, [org]);
       await client.query(`delete from memory_items where organization_id = $1::uuid`, [org]);
-      await client.query(`delete from usage_ledger_entries where organization_id = $1::uuid`, [org]);
+      await client.query(`delete from usage_ledger_entries where organization_id = $1::uuid`, [
+        org,
+      ]);
       await client.query(`delete from quota_reservations where organization_id = $1::uuid`, [org]);
       await client.query(`delete from retention_policies where organization_id = $1::uuid`, [org]);
       await client.query(`delete from export_requests where organization_id = $1::uuid`, [org]);
@@ -201,7 +205,12 @@ export async function cleanupOrg(pool: Pool, orgIds: string[]): Promise<void> {
  * transaction. SET LOCAL is transaction-scoped by definition, so the previous
  * autocommit form (`select set_config(..., true)` as its own implicit
  * transaction) lost the tenant context before the probe query ran. */
-export async function probeAsTenant(pool: Pool, tenant: string | null, statement: string, params: unknown[] = []): Promise<{ rows: unknown[][]; rowCount: number | null }> {
+export async function probeAsTenant(
+  pool: Pool,
+  tenant: string | null,
+  statement: string,
+  params: unknown[] = [],
+): Promise<{ rows: unknown[][]; rowCount: number | null }> {
   const client = await pool.connect();
   await client.query('begin');
   try {
@@ -230,7 +239,10 @@ export async function probeAsTenant(pool: Pool, tenant: string | null, statement
  * each statement in its own implicit transaction and lost SET LOCAL between
  * them — writes then failed WITH CHECK under least-privilege roles.
  */
-export async function withBypassRaw<T>(pool: Pool, fn: (client: import('pg').PoolClient) => Promise<T>): Promise<T> {
+export async function withBypassRaw<T>(
+  pool: Pool,
+  fn: (client: import('pg').PoolClient) => Promise<T>,
+): Promise<T> {
   const client = await pool.connect();
   await client.query('begin');
   try {
@@ -262,10 +274,18 @@ export async function withBypassRaw<T>(pool: Pool, fn: (client: import('pg').Poo
  *   goes through safeLatestConfig's try/catch. latest() → null is exactly
  *   the state of an org with nothing published, so plain-payload flows behave
  *   identically to no-catalog production.
- * - templates / evals / conversations (AssistantsService deps 4/6/7): only
- *   touched by template-install inputs, startTestRun, and the version-detail
- *   enricher — none exercised by these suites. Passing undefined for an
- *   untouched collaborator is load-bearing documentation, not a mock.
+ * - templates (dep 4): template-INSTALL inputs stay untouched (no install
+ *   method on the stub — exercising install explodes loudly, as it should).
+ *   The two template-SIGNAL reads (resolveInstallTemplate, checkUpdates)
+ *   are stubbed because provenance reads them on every version view;
+ *   suites asserting update_available signals need the real service.
+ * - conversations (dep 7): only touched by startTestRun and the
+ *   version-detail enricher — none exercised by these suites. Passing
+ *   undefined for an untouched collaborator is load-bearing documentation,
+ *   not a mock.
+ * - evals (dep 6): WIRED REAL since R-2 (draft evaluation) — evaluateVersion
+ *   calls EvalService.startRun (db + outbox only; retrieval/ports untouched
+ *   by that path, so retrieval stays undefined like templates above).
  */
 export function stubConfigPublish(): never {
   return { latest: async () => null } as never;
@@ -275,20 +295,33 @@ export async function buildAssistantsService(
   db: import('../../src/common/infra/db/db.service').DbService,
 ): Promise<import('../../src/modules/assistants/assistants.service').AssistantsService> {
   const { AuditService } = await import('../../src/common/audit/audit.service');
-  const { ManifestResolutionService } = await import('../../src/modules/assistants/manifest-resolution.service');
+  const { ManifestResolutionService } =
+    await import('../../src/modules/assistants/manifest-resolution.service');
+  const { EvalService } = await import('../../src/modules/knowledge/eval.service');
   const { AssistantsService } = await import('../../src/modules/assistants/assistants.service');
+  const audit = new AuditService(db);
   const configPublish = stubConfigPublish();
   const manifests = new ManifestResolutionService(
     db,
     configPublish as never as import('../../src/modules/config-publish/config-publish.service').ConfigPublishService,
   );
+  const evals = new EvalService(
+    db,
+    audit,
+    undefined as never,
+    configPublish as never as import('../../src/modules/config-publish/config-publish.service').ConfigPublishService,
+  );
+  const templatesStub = {
+    resolveInstallTemplate: async () => null,
+    checkUpdates: async () => [],
+  } as never;
   return new AssistantsService(
     db,
-    new AuditService(db),
+    audit,
     configPublish as never as import('../../src/modules/config-publish/config-publish.service').ConfigPublishService,
-    undefined as never,
+    templatesStub,
     manifests,
-    undefined as never,
+    evals,
     undefined as never,
   );
 }
@@ -297,9 +330,12 @@ export async function buildConversationsService(
   db: import('../../src/common/infra/db/db.service').DbService,
 ): Promise<import('../../src/modules/conversations/conversations.service').ConversationsService> {
   const { AuditService } = await import('../../src/common/audit/audit.service');
-  const { RetentionPurgeService } = await import('../../src/modules/lifecycle/retention-purge.service');
-  const { EscalationsService } = await import('../../src/modules/conversations/escalations.service');
-  const { ConversationsService } = await import('../../src/modules/conversations/conversations.service');
+  const { RetentionPurgeService } =
+    await import('../../src/modules/lifecycle/retention-purge.service');
+  const { EscalationsService } =
+    await import('../../src/modules/conversations/escalations.service');
+  const { ConversationsService } =
+    await import('../../src/modules/conversations/conversations.service');
   const audit = new AuditService(db);
   // Storage seam stubbed (phase-9 precedent): purge object deletes are not
   // under test here; the seam shape is what matters, not the bytes.

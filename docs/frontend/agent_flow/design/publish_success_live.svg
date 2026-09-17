@@ -1,0 +1,60 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="s7" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.04"/>
+      <feDropShadow dx="0" dy="18" stdDeviation="36" flood-color="#000" flood-opacity="0.10"/>
+    </filter>
+    <filter id="s7b" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.04"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#DCE9FF"/><stop offset="1" stop-color="#F4F8FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F5F5F7"/>
+
+  <!-- the launched card, at rest -->
+  <g filter="url(#s7)"><rect x="540" y="176" width="360" height="228" rx="20" fill="#FFF" stroke="#E5E5EA"/></g>
+  <rect x="541" y="177" width="358" height="96" rx="19" fill="url(#tile)"/>
+  <g stroke="#0071E3" stroke-opacity="0.35" stroke-width="1.5" fill="none">
+    <rect x="694" y="204" width="52" height="42" rx="12"/>
+    <path d="M706 216 h28 M706 226 h28 M706 236 h18"/>
+  </g>
+  <text x="576" y="308" font-size="20" font-weight="600" letter-spacing="-0.3" fill="#1D1D1F">Billing Support</text>
+  <text x="576" y="332" font-size="13" fill="#6E6E73">Version 1 · published just now</text>
+  <rect x="576" y="348" width="62" height="24" rx="12" fill="#EAF9EF" stroke="#34C759" stroke-opacity="0.3"/>
+  <circle cx="592" cy="360" r="4" fill="#34C759"/>
+  <text x="620" y="364" font-size="11" text-anchor="middle" fill="#1E7A3C">Live</text>
+  <rect x="648" y="348" width="132" height="24" rx="12" fill="#F5F5F7" stroke="#E5E5EA"/>
+  <text x="714" y="364" font-size="11" text-anchor="middle" fill="#6E6E73">hash a41f…c92e</text>
+
+  <!-- headline -->
+  <text x="720" y="476" text-anchor="middle" font-size="34" font-weight="600" letter-spacing="-0.6" fill="#1D1D1F">It’s alive.</text>
+  <text x="720" y="510" text-anchor="middle" font-size="15" fill="#6E6E73">Billing Support v1 is published and pinned. Runs now use version 1.</text>
+
+  <!-- three exits -->
+  <g filter="url(#s7b)">
+    <rect x="356" y="556" width="232" height="56" rx="14" fill="#0071E3"/>
+    <rect x="604" y="556" width="232" height="56" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+    <rect x="852" y="556" width="232" height="56" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+  </g>
+  <g font-size="14" font-weight="600" text-anchor="middle">
+    <text x="472" y="582" fill="#FFF">Connect a channel</text>
+    <text x="472" y="600" fill="#FFFFFF" opacity="0.72" font-size="11" font-weight="400">returns to this agent</text>
+    <text x="720" y="582" fill="#1D1D1F">Watch it work</text>
+    <text x="720" y="600" fill="#6E6E73" font-size="11" font-weight="400">runs, cost, traces</text>
+    <text x="968" y="582" fill="#1D1D1F">Build another</text>
+    <text x="968" y="600" fill="#6E6E73" font-size="11" font-weight="400">back to the empty studio</text>
+  </g>
+
+  <text x="720" y="668" text-anchor="middle" font-size="13" fill="#0071E3">Back to fleet</text>
+
+  <!-- quiet provenance footer -->
+  <g font-size="11" fill="#A1A1A6" text-anchor="middle">
+    <text x="720" y="748">Installed from customer-support@1.2.0 · evaluation PASS on this hash · no degraded knowledge</text>
+    <text x="720" y="768">Rollout, release controls and blocks live on the agent page under Operate.</text>
+  </g>
+</svg>

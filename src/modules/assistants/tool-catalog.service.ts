@@ -32,11 +32,16 @@ export interface UpsertToolInput {
   annotations?: ToolAnnotations | undefined;
   actor: string;
   /** FL-2.10: customer endpoint binding. */
-  httpBinding?: { url: string; method?: string; timeout_ms?: number; header_name?: string } | undefined;
+  httpBinding?:
+    { url: string; method?: string; timeout_ms?: number; header_name?: string } | undefined;
   /** FL-2.10: plaintext credential — sealed (enc:v1:) at rest. */
   credential?: string | undefined;
   /** FL-2.10: max executions per run. */
   rateLimitPerRun?: number | undefined;
+  /** P4: where the tool may execute (default external_gateway). */
+  executionEnvironment?: string | undefined;
+  /** P4: declared egress allowlist (defaults to the binding host for http tools). */
+  allowedEgressDomains?: string[] | undefined;
 }
 
 const NAME_PATTERN = /^[a-z][a-z0-9_]{1,63}$/;
@@ -67,6 +72,96 @@ function assertInputSchemaShape(schema: unknown): void {
   if (depth !== 0) {
     throw ApiError.validation({ input_schema: 'malformed JSON structure' });
   }
+}
+
+/**
+ * P4 (execution perimeter) — normalization + fail-closed rules. Pure over
+ * the upsert input (unit-tested); throws ApiError.validation on violation.
+ * Rules:
+ * - environment ∈ in_process | sandboxed_microvm | external_gateway
+ *   (absent = external_gateway, the pre-P4 posture);
+ * - in_process ⟹ NO http_binding AND NO egress list (pure compute over
+ *   arguments — an in-process tool that calls out is a perimeter hole);
+ * - http_binding present ⟹ environment ≠ in_process, and the egress list
+ *   (explicit, or defaulted to [binding host]) MUST cover the binding host;
+ * - egress entries are bare hostnames (≤253 chars, ≤32 entries, no
+ *   scheme/path/port — the proxy matches hosts, not URLs).
+ * Deliberately NOT part of the schema hash (computeHash): the hash is
+ * schema identity (template pins must not churn on perimeter tightening);
+ * the perimeter pins separately in publish-time bindings and is enforced
+ * at authorize (drift-deny).
+ */
+export function normalizeToolPerimeter(input: {
+  executionEnvironment?: string | undefined;
+  httpBinding?: { url: string } | undefined;
+  allowedEgressDomains?: string[] | undefined;
+}): { executionEnvironment: string; allowedEgressDomains: string[] | null } {
+  const HOST_RE =
+    /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
+  const env = input.executionEnvironment ?? 'external_gateway';
+  if (env !== 'in_process' && env !== 'sandboxed_microvm' && env !== 'external_gateway') {
+    throw ApiError.validation({
+      execution_environment: 'must be in_process, sandboxed_microvm, or external_gateway',
+    });
+  }
+  let bindingHost: string | null = null;
+  if (input.httpBinding) {
+    let host = '';
+    try {
+      const parsed = new URL(input.httpBinding.url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('non-http(s)');
+      }
+      host = parsed.hostname.toLowerCase();
+    } catch {
+      throw ApiError.validation({ http_binding: 'url must be a valid http(s) URL' });
+    }
+    if (!HOST_RE.test(host)) {
+      throw ApiError.validation({ http_binding: 'url host is not a valid hostname' });
+    }
+    bindingHost = host;
+  }
+  if (env === 'in_process') {
+    if (input.httpBinding) {
+      throw ApiError.validation({
+        execution_environment:
+          'in_process tools must not carry an http_binding (no egress from the process)',
+      });
+    }
+    if (input.allowedEgressDomains !== undefined && input.allowedEgressDomains !== null) {
+      throw ApiError.validation({
+        execution_environment: 'in_process tools must not declare allowed_egress_domains',
+      });
+    }
+    return { executionEnvironment: env, allowedEgressDomains: null };
+  }
+  let egress = input.allowedEgressDomains ?? null;
+  if (egress !== null) {
+    if (!Array.isArray(egress) || egress.length === 0 || egress.length > 32) {
+      throw ApiError.validation({ allowed_egress_domains: 'must be 1..32 hostnames when present' });
+    }
+    egress = egress.map((d) => String(d).trim().toLowerCase());
+    for (const domain of egress) {
+      if (!HOST_RE.test(domain) || domain.includes('/') || domain.includes(':')) {
+        throw ApiError.validation({
+          allowed_egress_domains: `not a bare hostname: ${domain.slice(0, 64)}`,
+        });
+      }
+    }
+    egress = [...new Set(egress)];
+  }
+  if (bindingHost !== null) {
+    // Fail-closed default: no explicit list = exactly the binding host (the
+    // narrowest true statement — recorded on the row, never silent).
+    if (egress === null) {
+      egress = [bindingHost];
+    } else if (!egress.includes(bindingHost)) {
+      throw ApiError.validation({
+        allowed_egress_domains: `must cover the tool's own binding host (${bindingHost})`,
+      });
+    }
+  }
+  return { executionEnvironment: env, allowedEgressDomains: egress };
 }
 
 /** Effect class → default advisory annotations when the caller omits them. */
@@ -101,7 +196,8 @@ export const BUILT_IN_TOOLS: ReadonlyMap<
     {
       effectClass: 'READ_ONLY' as const,
       approvalRequirement: 'NONE' as const,
-      description: 'Search the public web for current information. Returns ranked results with titles, URLs and snippets.',
+      description:
+        'Search the public web for current information. Returns ranked results with titles, URLs and snippets.',
       inputSchema: {
         type: 'object',
         properties: { query: { type: 'string', description: 'Search query', maxLength: 512 } },
@@ -120,7 +216,11 @@ export const BUILT_IN_TOOLS: ReadonlyMap<
       inputSchema: {
         type: 'object',
         properties: {
-          reason: { type: 'string', description: 'Short reason for the escalation', maxLength: 128 },
+          reason: {
+            type: 'string',
+            description: 'Short reason for the escalation',
+            maxLength: 128,
+          },
         },
         additionalProperties: false,
       },
@@ -134,11 +234,16 @@ export const BUILT_IN_TOOLS: ReadonlyMap<
       // GENERATED_MEDIA and travels the outbound media path).
       effectClass: 'READ_ONLY' as const,
       approvalRequirement: 'NONE' as const,
-      description: 'Generate an image from a text prompt. Returns a downloadable image attachment for the user.',
+      description:
+        'Generate an image from a text prompt. Returns a downloadable image attachment for the user.',
       inputSchema: {
         type: 'object',
         properties: {
-          prompt: { type: 'string', description: 'Image description (what to render)', maxLength: 1000 },
+          prompt: {
+            type: 'string',
+            description: 'Image description (what to render)',
+            maxLength: 1000,
+          },
         },
         required: ['prompt'],
         additionalProperties: false,
@@ -155,7 +260,8 @@ export const BUILT_IN_TOOLS: ReadonlyMap<
     {
       effectClass: 'READ_ONLY' as const,
       approvalRequirement: 'NONE' as const,
-      description: 'Search the organization knowledge corpus (ACL-filtered before scoring). Returns cited chunks.',
+      description:
+        'Search the organization knowledge corpus (ACL-filtered before scoring). Returns cited chunks.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -171,7 +277,8 @@ export const BUILT_IN_TOOLS: ReadonlyMap<
     {
       effectClass: 'READ_ONLY' as const,
       approvalRequirement: 'NONE' as const,
-      description: 'Search approved long-term memory items in scope. Returns provenance-tagged memories.',
+      description:
+        'Search approved long-term memory items in scope. Returns provenance-tagged memories.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -209,7 +316,10 @@ export const TOOL_TEMPLATES: readonly ToolTemplate[] = [
     approvalRequirement: 'REQUIRED',
     inputSchema: {
       type: 'object',
-      properties: { channel: { type: 'string', maxLength: 80 }, text: { type: 'string', maxLength: 3000 } },
+      properties: {
+        channel: { type: 'string', maxLength: 80 },
+        text: { type: 'string', maxLength: 3000 },
+      },
       required: ['channel', 'text'],
       additionalProperties: false,
     },
@@ -239,7 +349,11 @@ export const TOOL_TEMPLATES: readonly ToolTemplate[] = [
     approvalRequirement: 'REQUIRED',
     inputSchema: {
       type: 'object',
-      properties: { subject: { type: 'string', maxLength: 256 }, comment: { type: 'string', maxLength: 8000 }, priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] } },
+      properties: {
+        subject: { type: 'string', maxLength: 256 },
+        comment: { type: 'string', maxLength: 8000 },
+        priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+      },
       required: ['subject', 'comment'],
       additionalProperties: false,
     },
@@ -252,7 +366,11 @@ export const TOOL_TEMPLATES: readonly ToolTemplate[] = [
     approvalRequirement: 'REQUIRED',
     inputSchema: {
       type: 'object',
-      properties: { email: { type: 'string', maxLength: 200 }, firstname: { type: 'string', maxLength: 100 }, lastname: { type: 'string', maxLength: 100 } },
+      properties: {
+        email: { type: 'string', maxLength: 200 },
+        firstname: { type: 'string', maxLength: 100 },
+        lastname: { type: 'string', maxLength: 100 },
+      },
       required: ['email'],
       additionalProperties: false,
     },
@@ -265,7 +383,13 @@ export const TOOL_TEMPLATES: readonly ToolTemplate[] = [
     approvalRequirement: 'NONE',
     inputSchema: {
       type: 'object',
-      properties: { path: { type: 'string', maxLength: 512, description: 'Path/query appended to the bound base URL' } },
+      properties: {
+        path: {
+          type: 'string',
+          maxLength: 512,
+          description: 'Path/query appended to the bound base URL',
+        },
+      },
       required: [],
       additionalProperties: false,
     },
@@ -311,6 +435,9 @@ export class ToolCatalogService {
       throw ApiError.validation({ name: 'must match ^[a-z][a-z0-9_]{1,63}$' });
     }
     assertInputSchemaShape(input.inputSchema);
+    // P4: perimeter normalization BEFORE the hash (the hash stays schema
+    // identity — see normalizeToolPerimeter for the rationale).
+    const perimeter = normalizeToolPerimeter(input);
     const version = input.version ?? '1.0.0';
     const annotations = input.annotations ?? defaultAnnotations(input.effectClass);
     const hash = ToolCatalogService.computeHash({
@@ -337,6 +464,8 @@ export class ToolCatalogService {
           approvalRequirement: input.approvalRequirement,
           annotations,
           hash,
+          executionEnvironment: perimeter.executionEnvironment,
+          allowedEgressDomains: perimeter.allowedEgressDomains,
           ...(input.httpBinding
             ? {
                 httpBinding: {
@@ -348,7 +477,9 @@ export class ToolCatalogService {
               }
             : {}),
           ...(input.credential ? { credentialSealed: envelopeEncrypt(input.credential) } : {}),
-          ...(input.rateLimitPerRun !== undefined ? { rateLimitPerRun: Math.max(1, input.rateLimitPerRun) } : {}),
+          ...(input.rateLimitPerRun !== undefined
+            ? { rateLimitPerRun: Math.max(1, input.rateLimitPerRun) }
+            : {}),
           createdBy: input.actor,
         })
         .onConflictDoUpdate({
@@ -363,6 +494,8 @@ export class ToolCatalogService {
             annotations,
             hash,
             enabled: true,
+            executionEnvironment: perimeter.executionEnvironment,
+            allowedEgressDomains: perimeter.allowedEgressDomains,
             ...(input.httpBinding
               ? {
                   httpBinding: {
@@ -374,7 +507,9 @@ export class ToolCatalogService {
                 }
               : {}),
             ...(input.credential ? { credentialSealed: envelopeEncrypt(input.credential) } : {}),
-            ...(input.rateLimitPerRun !== undefined ? { rateLimitPerRun: Math.max(1, input.rateLimitPerRun) } : {}),
+            ...(input.rateLimitPerRun !== undefined
+              ? { rateLimitPerRun: Math.max(1, input.rateLimitPerRun) }
+              : {}),
             updatedAt: new Date().toISOString(),
           },
         })
@@ -389,7 +524,13 @@ export class ToolCatalogService {
       actorType: 'account',
       actorId: input.actor,
       tenantId: input.orgId,
-      details: { name: row.name, version: row.version, effect_class: row.effectClass },
+      details: {
+        name: row.name,
+        version: row.version,
+        effect_class: row.effectClass,
+        execution_environment: row.executionEnvironment,
+        egress_domains: row.allowedEgressDomains ?? [],
+      },
     });
     return row;
   }
@@ -418,7 +559,12 @@ export class ToolCatalogService {
     return rows[0] ?? null;
   }
 
-  async setEnabled(input: { orgId: string; name: string; enabled: boolean; actor: string }): Promise<ToolCatalogEntry> {
+  async setEnabled(input: {
+    orgId: string;
+    name: string;
+    enabled: boolean;
+    actor: string;
+  }): Promise<ToolCatalogEntry> {
     assertOrgId(input.orgId);
     const row = await this.db.withOrg(input.orgId, async (tx) => {
       const rows = await tx

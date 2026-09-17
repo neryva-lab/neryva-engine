@@ -41,10 +41,18 @@ export class ProviderCredentialsController {
     @Body() dto: { provider?: unknown; label?: unknown; secret?: unknown; external_ref?: unknown },
     @CurrentPrincipal() principal: L1Principal,
   ): Promise<{ credential: ProviderCredentialView }> {
-    if (typeof dto.provider !== 'string' || typeof dto.label !== 'string' || typeof dto.secret !== 'string') {
+    if (
+      typeof dto.provider !== 'string' ||
+      typeof dto.label !== 'string' ||
+      typeof dto.secret !== 'string'
+    ) {
       throw ApiError.validation({ input: 'provider, label, secret are required' });
     }
-    if (dto.external_ref !== undefined && dto.external_ref !== null && typeof dto.external_ref !== 'string') {
+    if (
+      dto.external_ref !== undefined &&
+      dto.external_ref !== null &&
+      typeof dto.external_ref !== 'string'
+    ) {
       throw ApiError.validation({ external_ref: 'must be a string or null' });
     }
     return {
@@ -77,7 +85,14 @@ export class ProviderCredentialsController {
     if (typeof dto.secret !== 'string') {
       throw ApiError.validation({ secret: 'is required' });
     }
-    return { credential: await this.credentials.rotate({ orgId, credentialId, secret: dto.secret, actorId: principal.id }) };
+    return {
+      credential: await this.credentials.rotate({
+        orgId,
+        credentialId,
+        secret: dto.secret,
+        actorId: principal.id,
+      }),
+    };
   }
 
   @Post(':credentialId/revoke')
@@ -87,9 +102,20 @@ export class ProviderCredentialsController {
   async revoke(
     @Param('orgId') orgId: string,
     @Param('credentialId') credentialId: string,
+    @Body() dto: { reason?: unknown; compromised?: unknown },
     @CurrentPrincipal() principal: L1Principal,
   ): Promise<{ credential: ProviderCredentialView }> {
-    return { credential: await this.credentials.revoke({ orgId, credentialId, actorId: principal.id }) };
+    // P6: optional incident semantics. `compromised: true` must be explicit
+    // (truthy boolean only — never inferred) because it pages the owners.
+    return {
+      credential: await this.credentials.revoke({
+        orgId,
+        credentialId,
+        actorId: principal.id,
+        reason: typeof dto.reason === 'string' ? dto.reason : undefined,
+        compromised: dto.compromised === true,
+      }),
+    };
   }
 
   @Get('providers')
@@ -112,6 +138,13 @@ export class ProviderCredentialsController {
     if (typeof dto.enabled !== 'boolean') {
       throw ApiError.validation({ enabled: 'must be a boolean' });
     }
-    return { enablement: await this.credentials.setEnablement({ orgId, provider, enabled: dto.enabled, actorId: principal.id }) };
+    return {
+      enablement: await this.credentials.setEnablement({
+        orgId,
+        provider,
+        enabled: dto.enabled,
+        actorId: principal.id,
+      }),
+    };
   }
 }

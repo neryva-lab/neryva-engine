@@ -11,6 +11,8 @@ import { issueCapability } from '../common/auth/capability-token';
 import { EventType } from '@neryva/mcp-contract';
 import { PermanentConsumerError } from '../common/infra/outbox/consumer';
 import { isRuntimeConfigured, startRunOnStudio } from '../transport/mcp/runtime-control.client';
+import { withSpan, setSpanAttributes } from '../common/observability/spans';
+import { runManifests } from '../modules/assistants/schema';
 
 /**
  * Run dispatch consumer — the first real outbox consumer (Phase 6.6 worker
@@ -57,10 +59,14 @@ export class RunDispatchConsumer implements OutboxConsumer {
     const messageId = payload.message_id;
     const assistantVersionId = payload.assistant_version_id;
     if (!runId || !conversationId || !messageId || !assistantVersionId) {
-      throw new SkipDispatchError(`run.resume_requested payload incomplete for run ${runId || '(unknown)'}`);
+      throw new SkipDispatchError(
+        `run.resume_requested payload incomplete for run ${runId || '(unknown)'}`,
+      );
     }
     if (!isRuntimeConfigured()) {
-      RunDispatchConsumer.logger.debug(`runtime not configured; resume for run ${runId} skipped (event ${event.eventId})`);
+      RunDispatchConsumer.logger.debug(
+        `runtime not configured; resume for run ${runId} skipped (event ${event.eventId})`,
+      );
       return;
     }
     const capability = issueCapability({
@@ -68,21 +74,38 @@ export class RunDispatchConsumer implements OutboxConsumer {
       conversationId,
       runId,
       assistantVersionId,
-      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe', 'escalation', 'artifact'],
+      allowedOps: [
+        'lease',
+        'context',
+        'search_knowledge',
+        'append_events',
+        'approval',
+        'memory_proposal',
+        'tool',
+        'checkpoint',
+        'commit',
+        'observe',
+        'escalation',
+        'artifact',
+      ],
       subject: 'agent-studio-runtime',
     });
     const conversationVersion = await this.currentConversationVersion(orgId, conversationId);
-    const started = await startRunOnStudio({
-      organizationId: orgId,
-      conversationId,
-      runId,
-      messageId,
-      assistantVersionId,
-      expectedConversationVersion: conversationVersion,
-      capabilityToken: capability.token,
-    });
+    const started = await this.tracedStartRun(orgId, runId, 'resume', () =>
+      startRunOnStudio({
+        organizationId: orgId,
+        conversationId,
+        runId,
+        messageId,
+        assistantVersionId,
+        expectedConversationVersion: conversationVersion,
+        capabilityToken: capability.token,
+      }),
+    );
     await this.recordResumeEvent(orgId, runId, started.workflowId);
-    RunDispatchConsumer.logger.log(`run ${runId} resume dispatched to studio (workflow ${started.workflowId})`);
+    RunDispatchConsumer.logger.log(
+      `run ${runId} resume dispatched to studio (workflow ${started.workflowId})`,
+    );
   }
 
   private async recordResumeEvent(orgId: string, runId: string, workflowId: string): Promise<void> {
@@ -118,7 +141,9 @@ export class RunDispatchConsumer implements OutboxConsumer {
     }
 
     if (!isRuntimeConfigured()) {
-      RunDispatchConsumer.logger.debug(`runtime not configured; run ${runId} stays ACCEPTED (event ${event.eventId} consumed as skipped)`);
+      RunDispatchConsumer.logger.debug(
+        `runtime not configured; run ${runId} stays ACCEPTED (event ${event.eventId} consumed as skipped)`,
+      );
       return;
     }
 
@@ -130,23 +155,81 @@ export class RunDispatchConsumer implements OutboxConsumer {
       // Full run-authority op set — a dispatch token missing an op (e.g.
       // 'context' or 'checkpoint') fails the RPC mid-run with no way for
       // Studio to re-mint (no L1 credentials on the runtime).
-      allowedOps: ['lease', 'context', 'search_knowledge', 'append_events', 'approval', 'memory_proposal', 'tool', 'checkpoint', 'commit', 'observe', 'escalation', 'artifact'],
+      allowedOps: [
+        'lease',
+        'context',
+        'search_knowledge',
+        'append_events',
+        'approval',
+        'memory_proposal',
+        'tool',
+        'checkpoint',
+        'commit',
+        'observe',
+        'escalation',
+        'artifact',
+      ],
       subject: 'agent-studio-runtime',
     });
 
     const conversationVersion = await this.currentConversationVersion(orgId, conversationId);
-    const started = await startRunOnStudio({
-      organizationId: orgId,
-      conversationId,
-      runId,
-      messageId,
-      assistantVersionId,
-      expectedConversationVersion: conversationVersion,
-      capabilityToken: capability.token,
-    });
+    const started = await this.tracedStartRun(orgId, runId, 'created', () =>
+      startRunOnStudio({
+        organizationId: orgId,
+        conversationId,
+        runId,
+        messageId,
+        assistantVersionId,
+        expectedConversationVersion: conversationVersion,
+        capabilityToken: capability.token,
+      }),
+    );
 
     await this.markDispatched(orgId, runId, started.workflowId);
-    RunDispatchConsumer.logger.log(`run ${runId} dispatched to studio (workflow ${started.workflowId}, already_started=${started.alreadyStarted})`);
+    RunDispatchConsumer.logger.log(
+      `run ${runId} dispatched to studio (workflow ${started.workflowId}, already_started=${started.alreadyStarted})`,
+    );
+  }
+
+  /**
+   * P1 (§6a) — run.dispatch span. The dispatcher runs detached from the
+   * accept trace (outbox boundary), so correlation is by ATTRIBUTE
+   * (`run_trace_id` read from the run manifest), not parentage. When the
+   * Studio contract carries a traceparent, this becomes a true child span —
+   * until then the attribute join is the honest correlation.
+   */
+  private async tracedStartRun(
+    orgId: string,
+    runId: string,
+    kind: 'created' | 'resume',
+    start: () => Promise<{ workflowId: string; alreadyStarted: boolean }>,
+  ): Promise<{ workflowId: string; alreadyStarted: boolean }> {
+    let runTraceId: string | null = null;
+    try {
+      const rows = await this.db.withOrg(orgId, (tx) =>
+        tx
+          .select({ manifest: runManifests.manifest })
+          .from(runManifests)
+          .where(eq(runManifests.runId, runId))
+          .limit(1),
+      );
+      const manifest = rows[0]?.manifest as { trace_id?: unknown } | null;
+      runTraceId = typeof manifest?.trace_id === 'string' ? manifest.trace_id : null;
+    } catch {
+      runTraceId = null;
+    }
+    return withSpan(
+      'run.dispatch',
+      { org_id: orgId, run_id: runId, run_trace_id: runTraceId, dispatch_kind: kind },
+      async (span) => {
+        const started = await start();
+        setSpanAttributes(span, {
+          workflow_id: started.workflowId,
+          already_started: started.alreadyStarted,
+        });
+        return started;
+      },
+    );
   }
 
   private async currentConversationVersion(orgId: string, conversationId: string): Promise<number> {
@@ -178,18 +261,23 @@ export class RunDispatchConsumer implements OutboxConsumer {
       assertRunTransition(run.state, 'DISPATCHED');
       const insertedEvent = await tx
         .insert(runEvents)
-        .values((() => {
-          const rowId = uuidv7();
-          return {
-            id: rowId,
-            eventId: rowId,
-            runId: run.id,
-            organizationId: orgId,
-            eventType: String(EventType.RUN_LIFECYCLE),
-            payload: { case: 'lifecycle', value: { fromState: 'ACCEPTED', toState: 'DISPATCHED', workflowId } },
-            producerIdentity: 'engine:run-dispatch',
-          };
-        })())
+        .values(
+          (() => {
+            const rowId = uuidv7();
+            return {
+              id: rowId,
+              eventId: rowId,
+              runId: run.id,
+              organizationId: orgId,
+              eventType: String(EventType.RUN_LIFECYCLE),
+              payload: {
+                case: 'lifecycle',
+                value: { fromState: 'ACCEPTED', toState: 'DISPATCHED', workflowId },
+              },
+              producerIdentity: 'engine:run-dispatch',
+            };
+          })(),
+        )
         .returning({ engineSequence: runEvents.engineSequence });
       await tx
         .update(runs)

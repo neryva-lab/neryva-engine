@@ -8,7 +8,13 @@ import { ApiError } from '../../common/http/api-error';
 import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { assistantVersions, assistantInstalls, assistantTemplates, policySnapshots } from '../assistants/schema';
+import {
+  assistants,
+  assistantVersions,
+  assistantInstalls,
+  assistantTemplates,
+  policySnapshots,
+} from '../assistants/schema';
 import { toolCatalog } from '../assistants/tool-catalog.schema';
 import { BUILT_IN_TOOLS } from '../assistants/tool-catalog.service';
 import { validateAssistantPayload } from '../assistants/validation';
@@ -101,6 +107,17 @@ export const evalResultsSchema = z.object({
   worker_provenance: z.record(z.string(), z.unknown()).optional(),
 });
 
+/**
+ * R-2 (team_setup_ledger.md §3) — evaluable version statuses. DRAFT content
+ * evaluates pre-publish (EVALUATE → PUBLISH): the entry point synthesizes the
+ * execution snapshot first and the run plane requires it, so this gate only
+ * decides which rows may START a run — RETIRED (and anything unknown) never
+ * executes. Pure so the matrix is unit-testable without a database.
+ */
+export function isEvaluableVersionStatus(status: unknown): boolean {
+  return status === 'DRAFT' || status === 'PUBLISHED';
+}
+
 @Injectable()
 export class EvalService {
   private static readonly logger = new Logger(EvalService.name);
@@ -112,7 +129,12 @@ export class EvalService {
     private readonly configPublish: ConfigPublishService,
   ) {}
 
-  async createDataset(input: { orgId: string; name: string; description?: string; actor: string }): Promise<unknown> {
+  async createDataset(input: {
+    orgId: string;
+    name: string;
+    description?: string;
+    actor: string;
+  }): Promise<unknown> {
     assertUuid(input.orgId, 'orgId');
     const id = uuidv7();
     return this.db.withOrg(input.orgId, async (tx) => {
@@ -143,10 +165,25 @@ export class EvalService {
     });
   }
 
-  async addCases(input: { orgId: string; datasetId: string; cases: unknown[]; actor: string }): Promise<{ added: number }> {
+  async addCases(input: {
+    orgId: string;
+    datasetId: string;
+    cases: unknown[];
+    actor: string;
+  }): Promise<{ added: number }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.datasetId, 'datasetId');
-    const parsed = input.cases.map((c) => evalCaseSchema.parse(c));
+    // Live-verification fix (team_setup_ledger.md F6): schema violations
+    // must refuse as typed 422s with paths — a ZodError escaping here
+    // surfaced as an opaque 500 with no fix guidance.
+    const parsed: Array<z.infer<typeof evalCaseSchema>> = [];
+    for (let index = 0; index < input.cases.length; index += 1) {
+      const result = evalCaseSchema.safeParse(input.cases[index]);
+      if (!result.success) {
+        throw ApiError.validation({ [`cases[${index}]`]: result.error.flatten() });
+      }
+      parsed.push(result.data);
+    }
     return this.db.withOrg(input.orgId, async (tx) => {
       const next = await tx.execute(sql`
         select coalesce(max(sequence), 0) + 1 as next from eval_cases where dataset_id = ${input.datasetId}::uuid
@@ -169,7 +206,9 @@ export class EvalService {
 
   async listDatasets(orgId: string): Promise<unknown[]> {
     assertUuid(orgId, 'orgId');
-    return this.db.withOrg(orgId, (tx) => tx.select().from(evalDatasets).orderBy(desc(evalDatasets.createdAt)).limit(100));
+    return this.db.withOrg(orgId, (tx) =>
+      tx.select().from(evalDatasets).orderBy(desc(evalDatasets.createdAt)).limit(100),
+    );
   }
 
   /**
@@ -185,7 +224,12 @@ export class EvalService {
    *    and end with `:candidates`), only into the sibling dataset with the
    *    suffix stripped. Reviewer/approver roles own this surface.
    */
-  async promoteCandidateCase(input: { orgId: string; datasetId: string; caseId: string; actor: string }): Promise<{ promoted_case_id: string }> {
+  async promoteCandidateCase(input: {
+    orgId: string;
+    datasetId: string;
+    caseId: string;
+    actor: string;
+  }): Promise<{ promoted_case_id: string }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.datasetId, 'datasetId');
     assertUuid(input.caseId, 'caseId');
@@ -193,7 +237,9 @@ export class EvalService {
       const source = await tx
         .select()
         .from(evalDatasets)
-        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .where(
+          and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)),
+        )
         .limit(1);
       const sourceDataset = source[0];
       if (!sourceDataset) {
@@ -201,7 +247,9 @@ export class EvalService {
       }
       const targetName = targetDatasetName(sourceDataset.name);
       if (!targetName) {
-        throw ApiError.validation({ dataset_id: 'only candidate datasets (template:<slug>@<version>:candidates) promote' });
+        throw ApiError.validation({
+          dataset_id: 'only candidate datasets (template:<slug>@<version>:candidates) promote',
+        });
       }
       const target = await tx
         .select()
@@ -214,7 +262,13 @@ export class EvalService {
       const cases = await tx
         .select()
         .from(evalCases)
-        .where(and(eq(evalCases.id, input.caseId), eq(evalCases.datasetId, input.datasetId), eq(evalCases.organizationId, input.orgId)))
+        .where(
+          and(
+            eq(evalCases.id, input.caseId),
+            eq(evalCases.datasetId, input.datasetId),
+            eq(evalCases.organizationId, input.orgId),
+          ),
+        )
         .limit(1);
       const candidate = cases[0];
       if (!candidate) {
@@ -242,14 +296,23 @@ export class EvalService {
         actorType: 'account',
         actorId: input.actor,
         tenantId: input.orgId,
-        details: { from_dataset: sourceDataset.name, candidate_case_id: input.caseId, promoted_case_id: promotedId },
+        details: {
+          from_dataset: sourceDataset.name,
+          candidate_case_id: input.caseId,
+          promoted_case_id: promotedId,
+        },
       });
       return { promoted_case_id: promotedId };
     });
   }
 
   /** TPL-8.2 — reject a candidate case (audited delete; the trace stays in run_judgments). */
-  async rejectCandidateCase(input: { orgId: string; datasetId: string; caseId: string; actor: string }): Promise<{ ok: true }> {
+  async rejectCandidateCase(input: {
+    orgId: string;
+    datasetId: string;
+    caseId: string;
+    actor: string;
+  }): Promise<{ ok: true }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.datasetId, 'datasetId');
     assertUuid(input.caseId, 'caseId');
@@ -257,17 +320,27 @@ export class EvalService {
       const source = await tx
         .select()
         .from(evalDatasets)
-        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .where(
+          and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)),
+        )
         .limit(1);
       if (source.length === 0) {
         throw ApiError.notFound('eval dataset');
       }
       if (!targetDatasetName(source[0].name)) {
-        throw ApiError.validation({ dataset_id: 'only candidate datasets (template:<slug>@<version>:candidates) reject' });
+        throw ApiError.validation({
+          dataset_id: 'only candidate datasets (template:<slug>@<version>:candidates) reject',
+        });
       }
       const deleted = await tx
         .delete(evalCases)
-        .where(and(eq(evalCases.id, input.caseId), eq(evalCases.datasetId, input.datasetId), eq(evalCases.organizationId, input.orgId)))
+        .where(
+          and(
+            eq(evalCases.id, input.caseId),
+            eq(evalCases.datasetId, input.datasetId),
+            eq(evalCases.organizationId, input.orgId),
+          ),
+        )
         .returning({ id: evalCases.id });
       if (deleted.length === 0) {
         throw ApiError.notFound('eval case');
@@ -290,7 +363,20 @@ export class EvalService {
    * count and emits `eval.run_requested` on the outbox (invariant 7) — the
    * Studio eval-worker consumes execution through its own transport.
    */
-  async startRun(input: { orgId: string; datasetId: string; assistantVersionId: string; attemptsPerCase: number; actor: string; environment?: string }): Promise<unknown> {
+  async startRun(input: {
+    orgId: string;
+    datasetId: string;
+    assistantVersionId: string;
+    attemptsPerCase: number;
+    actor: string;
+    environment?: string;
+    /**
+     * P5 (drift shadow evals): TRUE marks observation-only rows. Shadow runs
+     * never gate releases and never satisfy required-checks (enforced at
+     * read time in release-gate.ts + provenance). Formal callers omit it.
+     */
+    shadow?: boolean;
+  }): Promise<unknown> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.datasetId, 'datasetId');
     assertUuid(input.assistantVersionId, 'assistantVersionId');
@@ -300,10 +386,22 @@ export class EvalService {
       const version = await tx
         .select({ id: assistantVersions.id, status: assistantVersions.status })
         .from(assistantVersions)
-        .where(and(eq(assistantVersions.id, input.assistantVersionId), eq(assistantVersions.organizationId, input.orgId)))
+        .where(
+          and(
+            eq(assistantVersions.id, input.assistantVersionId),
+            eq(assistantVersions.organizationId, input.orgId),
+          ),
+        )
         .limit(1);
-      if (version.length === 0 || version[0].status !== 'PUBLISHED') {
-        throw ApiError.validation({ assistant_version_id: 'must be a PUBLISHED version of this org' });
+      // R-2 (team_setup_ledger.md §3) — DRAFT content evaluates pre-publish
+      // (EVALUATE → PUBLISH): the version-scoped entry point synthesizes the
+      // execution snapshot first, and the executor pins the version with a
+      // snapshot-required join — so drafts without a snapshot still cannot
+      // run. Anything else (e.g. RETIRED) refuses: only live content executes.
+      if (version.length === 0 || !isEvaluableVersionStatus(version[0].status)) {
+        throw ApiError.validation({
+          assistant_version_id: 'must be a DRAFT or PUBLISHED version of this org',
+        });
       }
       // Fail-closed dataset scope: a version may only run against its own
       // org's dataset (previously unchecked — cross-org dataset reference
@@ -311,7 +409,9 @@ export class EvalService {
       const dataset = await tx
         .select({ id: evalDatasets.id })
         .from(evalDatasets)
-        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .where(
+          and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)),
+        )
         .limit(1);
       if (dataset.length === 0) {
         throw ApiError.notFound('eval dataset');
@@ -326,6 +426,7 @@ export class EvalService {
           state: 'pending',
           attemptsPerCase: attempts,
           startedBy: input.actor,
+          isShadow: input.shadow === true,
         })
         .returning();
       await recordOutboxEvent(tx, {
@@ -340,10 +441,164 @@ export class EvalService {
           assistant_version_id: input.assistantVersionId,
           attempts_per_case: attempts,
           ...(input.environment ? { environment: input.environment } : {}),
+          // P5: the executor ignores unknown keys — shadow rides along so
+          // downstream scoring can distinguish observation from gating.
+          ...(input.shadow === true ? { shadow: true } : {}),
         },
       });
       return rows[0];
     });
+  }
+
+  /**
+   * P5 (drift shadow evals) — compare the ACTIVE version's pinned model refs
+   * against the LIVE org catalog. Pure comparison over rows the caller reads;
+   * the hash shape mirrors ManifestResolutionService.resolveModelRef exactly
+   * (canonicalHash over the whole catalog entry object) — drift means the
+   * entry object changed, byte-identically to how the pin was computed.
+   * Rules:
+   * - live entry missing → entry_removed (the model vanished from governance);
+   * - live disabled while the pin wasn't → entry_disabled;
+   * - entry object hash differs → entry_changed (config/regions/payload moved);
+   * - pin had NO entry (null) and live has one → catalog growth, NOT drift.
+   * Returns the active version id (for the shadow run pin) plus drift list.
+   * Empty drift = nothing to do (caller skips silently — steady state).
+   */
+  async detectModelDrift(
+    orgId: string,
+    assistantId: string,
+  ): Promise<{ versionId: string | null; drifted: Array<{ alias: string; reason: string }> }> {
+    assertUuid(orgId, 'orgId');
+    const assistantRows = await this.db.withOrg(orgId, (tx) =>
+      tx
+        .select({ id: assistants.id, activeVersionId: assistants.activeVersionId })
+        .from(assistants)
+        .where(eq(assistants.id, assistantId))
+        .limit(1),
+    );
+    // Tenant-scoped read (withOrg RLS): a foreign-org id yields no row.
+    const assistant = assistantRows[0];
+    if (!assistant) {
+      throw ApiError.notFound('assistant');
+    }
+    if (!assistant.activeVersionId) {
+      return { versionId: null, drifted: [] };
+    }
+    const snapRows = await this.db.withOrg(orgId, (tx) =>
+      tx
+        .select({ modelRef: policySnapshots.modelRef })
+        .from(policySnapshots)
+        .where(eq(policySnapshots.assistantVersionId, assistant.activeVersionId as string))
+        .limit(1),
+    );
+    const models =
+      ((snapRows[0]?.modelRef ?? {}) as { models?: Array<Record<string, unknown>> }).models ?? [];
+    if (!Array.isArray(models) || models.length === 0) {
+      return { versionId: assistant.activeVersionId, drifted: [] };
+    }
+    let liveEntries: Array<Record<string, unknown>> | null = null;
+    try {
+      const latest = await this.configPublish.latest(orgId, 'model_catalog', null);
+      const payload = (latest?.payload ?? null) as {
+        models?: Array<Record<string, unknown>>;
+      } | null;
+      liveEntries = Array.isArray(payload?.models)
+        ? (payload.models as Array<Record<string, unknown>>)
+        : null;
+    } catch {
+      liveEntries = null;
+    }
+    if (!liveEntries) {
+      // No live catalog to compare against (never published / surface down)
+      // — unknown, not drift. Fail OPEN to silence, never to false alerts.
+      return { versionId: assistant.activeVersionId, drifted: [] };
+    }
+    const drifted: Array<{ alias: string; reason: string }> = [];
+    for (const ref of models) {
+      const provider = typeof ref.provider === 'string' ? ref.provider : '';
+      const model = typeof ref.model === 'string' ? ref.model : '';
+      const alias = `${provider}/${model}`;
+      const live =
+        liveEntries.find((m) => `${String(m.provider)}/${String(m.model)}` === alias) ?? null;
+      if (!live) {
+        drifted.push({ alias, reason: 'entry_removed' });
+        continue;
+      }
+      if (live.enabled === false && ref.catalog_enabled !== false) {
+        drifted.push({ alias, reason: 'entry_disabled' });
+        continue;
+      }
+      if (ref.entry_hash != null && canonicalHash(live) !== ref.entry_hash) {
+        drifted.push({ alias, reason: 'entry_changed' });
+      }
+    }
+    return { versionId: assistant.activeVersionId, drifted };
+  }
+
+  /**
+   * P5 — start a drift-observation run, deduped to one shadow eval per
+   * version per 24h (drift doesn't change hourly; evals cost provider money).
+   * Discriminated result (never throws for the expected two non-starts):
+   * - started: the shadow run (observation only);
+   * - deduped: a shadow from the last 24h already covers it;
+   * - no_dataset: drift is real but nothing exists to measure it against
+   *   (caller alerts WITHOUT an eval — still worth knowing).
+   */
+  async startShadowEval(input: {
+    orgId: string;
+    assistantId: string;
+    versionId: string;
+    drifted: Array<{ alias: string }>;
+  }): Promise<{ status: 'started' | 'deduped' | 'no_dataset'; run?: unknown }> {
+    assertUuid(input.orgId, 'orgId');
+    const recent = await this.db.withOrg(input.orgId, (tx) =>
+      tx.execute(
+        sql`select 1 from eval_runs where organization_id = ${input.orgId}::uuid and assistant_version_id = ${input.versionId}::uuid and is_shadow = true and started_at > now() - interval '24 hours' limit 1`,
+      ),
+    );
+    if (recent.rows.length > 0) {
+      return { status: 'deduped' };
+    }
+    const datasetId = await this.resolveTemplateDataset(input.orgId, input.assistantId);
+    if (!datasetId) {
+      return { status: 'no_dataset' };
+    }
+    const run = await this.startRun({
+      orgId: input.orgId,
+      datasetId,
+      assistantVersionId: input.versionId,
+      attemptsPerCase: 1,
+      actor: 'system:model-drift',
+      shadow: true,
+    });
+    return { status: 'started', run };
+  }
+
+  /** Template-seeded dataset id (`template:<slug>@<version>`), if installed. */
+  private async resolveTemplateDataset(orgId: string, assistantId: string): Promise<string | null> {
+    const name = await this.db.withOrg(orgId, async (tx) => {
+      const installs = await tx
+        .select()
+        .from(assistantInstalls)
+        .where(eq(assistantInstalls.assistantId, assistantId))
+        .limit(1);
+      const install = installs[0];
+      if (!install || install.organizationId !== orgId) {
+        return null;
+      }
+      return `template:${install.slug}@${install.templateVersion}`;
+    });
+    if (!name) {
+      return null;
+    }
+    const datasets = await this.db.withOrg(orgId, (tx) =>
+      tx
+        .select({ id: evalDatasets.id })
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.organizationId, orgId), eq(evalDatasets.name, name)))
+        .limit(1),
+    );
+    return datasets[0]?.id ?? null;
   }
 
   async listRuns(orgId: string, datasetId?: string): Promise<unknown[]> {
@@ -358,7 +613,12 @@ export class EvalService {
   }
 
   /** Results write-back (Studio eval-worker → Engine). Idempotent per run id. */
-  async completeRun(input: { orgId: string; evalRunId: string; results: unknown; actor: string }): Promise<unknown> {
+  async completeRun(input: {
+    orgId: string;
+    evalRunId: string;
+    results: unknown;
+    actor: string;
+  }): Promise<unknown> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.evalRunId, 'evalRunId');
     const parsed = evalResultsSchema.parse(input.results);
@@ -378,12 +638,20 @@ export class EvalService {
       if (run.state !== 'pending' && run.state !== 'running') {
         throw ApiError.conflict('eval run is not in an open state');
       }
-      const versionRows = await tx.select().from(assistantVersions).where(eq(assistantVersions.id, run.assistantVersionId)).limit(1);
+      const versionRows = await tx
+        .select()
+        .from(assistantVersions)
+        .where(eq(assistantVersions.id, run.assistantVersionId))
+        .limit(1);
       const version = versionRows[0];
       if (!version) {
         throw ApiError.conflict('eval run references a missing assistant version');
       }
-      const datasetRows = await tx.select().from(evalDatasets).where(eq(evalDatasets.id, run.datasetId)).limit(1);
+      const datasetRows = await tx
+        .select()
+        .from(evalDatasets)
+        .where(eq(evalDatasets.id, run.datasetId))
+        .limit(1);
       const dataset = datasetRows[0] ?? null;
 
       // Template linkage: seeded datasets are named template:<slug>@<version>.
@@ -396,8 +664,14 @@ export class EvalService {
         regression_no_worse_than?: unknown;
       } | null;
       const requiredChecks = Array.isArray(policy?.required) ? (policy?.required as unknown[]) : [];
-      const thresholds = (policy?.thresholds ?? {}) as { task_success?: number; groundedness?: number; policy_compliance?: number };
-      const criticalList = Array.isArray(policy?.critical_failures) ? (policy?.critical_failures as string[]) : [];
+      const thresholds = (policy?.thresholds ?? {}) as {
+        task_success?: number;
+        groundedness?: number;
+        policy_compliance?: number;
+      };
+      const criticalList = Array.isArray(policy?.critical_failures)
+        ? (policy?.critical_failures as string[])
+        : [];
 
       // ── Engine-verifiable required checks (never delegated to the worker) ──
       const engineChecks = new Map<string, boolean>();
@@ -414,7 +688,10 @@ export class EvalService {
           budget_policy: version.budgetPolicy ?? undefined,
         }).ok,
       );
-      engineChecks.set('tool_authorization_pass', await this.verifyToolPinsLive(tx, input.orgId, version.toolPolicy));
+      engineChecks.set(
+        'tool_authorization_pass',
+        await this.verifyToolPinsLive(tx, input.orgId, version.toolPolicy),
+      );
       const workerChecks = new Map((parsed.checks ?? []).map((c) => [c.name, c.passed]));
 
       // ── Decision (TPL-7.3/7.4 + §4.4 model) ──
@@ -456,14 +733,25 @@ export class EvalService {
       const regressionBound =
         typeof policy?.regression_no_worse_than === 'number'
           ? policy.regression_no_worse_than
-          : (requiredChecks.find((r) => typeof r === 'object' && r !== null && 'regression_no_worse_than' in (r as Record<string, unknown>)) as
-              | { regression_no_worse_than?: unknown }
-              | undefined)?.regression_no_worse_than;
+          : (
+              requiredChecks.find(
+                (r) =>
+                  typeof r === 'object' &&
+                  r !== null &&
+                  'regression_no_worse_than' in (r as Record<string, unknown>),
+              ) as { regression_no_worse_than?: unknown } | undefined
+            )?.regression_no_worse_than;
       if (typeof regressionBound === 'number') {
         const previous = await tx
           .select({ id: assistantVersions.id })
           .from(assistantVersions)
-          .where(and(eq(assistantVersions.assistantId, version.assistantId), eq(assistantVersions.status, 'PUBLISHED'), sql`${assistantVersions.version} < ${version.version}`))
+          .where(
+            and(
+              eq(assistantVersions.assistantId, version.assistantId),
+              eq(assistantVersions.status, 'PUBLISHED'),
+              sql`${assistantVersions.version} < ${version.version}`,
+            ),
+          )
           .orderBy(desc(assistantVersions.version))
           .limit(1);
         if (previous.length > 0) {
@@ -483,7 +771,9 @@ export class EvalService {
           if (prevRuns.length > 0 && prevRuns[0].score !== null) {
             const delta = Number(prevRuns[0].score) - score;
             if (delta > regressionBound) {
-              blockReasons.push(`regression ${delta.toFixed(4)} exceeds bound ${regressionBound} (previous score ${prevRuns[0].score})`);
+              blockReasons.push(
+                `regression ${delta.toFixed(4)} exceeds bound ${regressionBound} (previous score ${prevRuns[0].score})`,
+              );
             }
           }
         }
@@ -529,10 +819,18 @@ export class EvalService {
           provenance,
           decision,
           releasePolicyVersion:
-            typeof template?.releasePolicyVersion === 'number' ? template.releasePolicyVersion : null,
+            typeof template?.releasePolicyVersion === 'number'
+              ? template.releasePolicyVersion
+              : null,
           finishedAt: new Date().toISOString(),
         })
-        .where(and(eq(evalRuns.organizationId, input.orgId), eq(evalRuns.id, input.evalRunId), sql`state in ('pending','running')`))
+        .where(
+          and(
+            eq(evalRuns.organizationId, input.orgId),
+            eq(evalRuns.id, input.evalRunId),
+            sql`state in ('pending','running')`,
+          ),
+        )
         .returning();
       if (rows.length === 0) {
         throw ApiError.conflict('eval run is not in an open state');
@@ -562,8 +860,18 @@ export class EvalService {
     tx: NodePgDatabase,
     orgId: string,
     assistantId: string,
-  ): Promise<{ slug: string; version: string; definitionHash: string | null; releasePolicy: unknown; releasePolicyVersion: number | null } | null> {
-    const installs = await tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1);
+  ): Promise<{
+    slug: string;
+    version: string;
+    definitionHash: string | null;
+    releasePolicy: unknown;
+    releasePolicyVersion: number | null;
+  } | null> {
+    const installs = await tx
+      .select()
+      .from(assistantInstalls)
+      .where(eq(assistantInstalls.assistantId, assistantId))
+      .limit(1);
     const install = installs[0];
     if (!install || install.organizationId !== orgId) {
       return null;
@@ -571,11 +879,22 @@ export class EvalService {
     const templates = await tx
       .select()
       .from(assistantTemplates)
-      .where(and(eq(assistantTemplates.slug, install.slug), eq(assistantTemplates.version, install.templateVersion)))
+      .where(
+        and(
+          eq(assistantTemplates.slug, install.slug),
+          eq(assistantTemplates.version, install.templateVersion),
+        ),
+      )
       .limit(1);
     const template = templates[0];
     if (!template) {
-      return { slug: install.slug, version: install.templateVersion, definitionHash: null, releasePolicy: null, releasePolicyVersion: null };
+      return {
+        slug: install.slug,
+        version: install.templateVersion,
+        definitionHash: null,
+        releasePolicy: null,
+        releasePolicyVersion: null,
+      };
     }
     const policy = (template.releasePolicy ?? {}) as { release_policy_version?: unknown };
     return {
@@ -583,15 +902,24 @@ export class EvalService {
       version: template.version,
       definitionHash: template.hash,
       releasePolicy: template.releasePolicy,
-      releasePolicyVersion: typeof policy.release_policy_version === 'number' ? policy.release_policy_version : null,
+      releasePolicyVersion:
+        typeof policy.release_policy_version === 'number' ? policy.release_policy_version : null,
     };
   }
 
   /** Engine-side tool pin verification (never delegated): every non-built-in
    *  version entry resolves to an ENABLED catalog row with matching hash. */
-  private async verifyToolPinsLive(tx: NodePgDatabase, orgId: string, toolPolicy: unknown): Promise<boolean> {
-    const tools = (toolPolicy as { tools?: Array<{ name?: string; schema_hash?: string }> } | null)?.tools ?? [];
-    const names = tools.map((t) => t?.name).filter((n): n is string => typeof n === 'string' && n.length > 0 && !BUILT_IN_TOOLS.has(n));
+  private async verifyToolPinsLive(
+    tx: NodePgDatabase,
+    orgId: string,
+    toolPolicy: unknown,
+  ): Promise<boolean> {
+    const tools =
+      (toolPolicy as { tools?: Array<{ name?: string; schema_hash?: string }> } | null)?.tools ??
+      [];
+    const names = tools
+      .map((t) => t?.name)
+      .filter((n): n is string => typeof n === 'string' && n.length > 0 && !BUILT_IN_TOOLS.has(n));
     if (names.length === 0) {
       return true;
     }
@@ -611,9 +939,18 @@ export class EvalService {
   }
 
   /** Dataset content hash at run time — the reproducibility anchor. */
-  private async hashDatasetCases(tx: NodePgDatabase, orgId: string, datasetId: string): Promise<string> {
+  private async hashDatasetCases(
+    tx: NodePgDatabase,
+    orgId: string,
+    datasetId: string,
+  ): Promise<string> {
     const cases = await tx
-      .select({ input: evalCases.input, expected: evalCases.expected, rubric: evalCases.rubric, sequence: evalCases.sequence })
+      .select({
+        input: evalCases.input,
+        expected: evalCases.expected,
+        rubric: evalCases.rubric,
+        sequence: evalCases.sequence,
+      })
       .from(evalCases)
       .where(and(eq(evalCases.organizationId, orgId), eq(evalCases.datasetId, datasetId)))
       .orderBy(asc(evalCases.sequence));
@@ -642,17 +979,35 @@ export class EvalService {
     },
   ): Promise<Record<string, unknown>> {
     const catalogRows = await tx
-      .select({ name: toolCatalog.name, version: toolCatalog.version, hash: toolCatalog.hash, enabled: toolCatalog.enabled })
+      .select({
+        name: toolCatalog.name,
+        version: toolCatalog.version,
+        hash: toolCatalog.hash,
+        enabled: toolCatalog.enabled,
+      })
       .from(toolCatalog)
       .where(eq(toolCatalog.organizationId, orgId));
-    const snapshotRows = await tx.select().from(policySnapshots).where(eq(policySnapshots.assistantVersionId, input.version.id)).limit(1);
+    const snapshotRows = await tx
+      .select()
+      .from(policySnapshots)
+      .where(eq(policySnapshots.assistantVersionId, input.version.id))
+      .limit(1);
     const snapshot = snapshotRows[0] ?? null;
     let modelCatalogMatch: Record<string, unknown> | null = null;
     if (input.parsed.model) {
       try {
         const latest = await this.configPublish.latest(orgId, 'model_catalog', null);
-        const models = ((latest?.payload ?? null) as { models?: Array<{ provider: string; model: string; enabled: boolean }> } | null)?.models ?? [];
-        const entry = models.find((m) => m.provider === input.parsed.model?.provider && m.model === input.parsed.model?.model) ?? null;
+        const models =
+          (
+            (latest?.payload ?? null) as {
+              models?: Array<{ provider: string; model: string; enabled: boolean }>;
+            } | null
+          )?.models ?? [];
+        const entry =
+          models.find(
+            (m) =>
+              m.provider === input.parsed.model?.provider && m.model === input.parsed.model?.model,
+          ) ?? null;
         modelCatalogMatch = {
           claimed: input.parsed.model,
           catalog_config_present: latest !== null && latest !== undefined,
@@ -660,12 +1015,29 @@ export class EvalService {
           catalog_enabled: entry?.enabled ?? null,
         };
       } catch {
-        modelCatalogMatch = { claimed: input.parsed.model, catalog_config_present: false, entry_hash: null, catalog_enabled: null };
+        modelCatalogMatch = {
+          claimed: input.parsed.model,
+          catalog_config_present: false,
+          entry_hash: null,
+          catalog_enabled: null,
+        };
       }
     }
     return {
-      template: input.template ? { slug: input.template.slug, version: input.template.version, definition_hash: input.template.definitionHash } : null,
-      dataset: input.dataset ? { id: input.dataset.id, name: input.dataset.name, content_hash: await this.hashDatasetCases(tx, orgId, input.dataset.id) } : null,
+      template: input.template
+        ? {
+            slug: input.template.slug,
+            version: input.template.version,
+            definition_hash: input.template.definitionHash,
+          }
+        : null,
+      dataset: input.dataset
+        ? {
+            id: input.dataset.id,
+            name: input.dataset.name,
+            content_hash: await this.hashDatasetCases(tx, orgId, input.dataset.id),
+          }
+        : null,
       evaluators: input.parsed.evaluators ?? null,
       model: modelCatalogMatch,
       tool_catalog_hash: canonicalHash(catalogRows.filter((r) => r.enabled)),
@@ -691,7 +1063,12 @@ export class EvalService {
    * Computed on demand (no materialization): retrieval is read-only and the
    * dataset sizes here are bounded (≤100 cases per dataset page).
    */
-  async evaluateRetrieval(input: { orgId: string; datasetId: string; k: number; actor: string }): Promise<{
+  async evaluateRetrieval(input: {
+    orgId: string;
+    datasetId: string;
+    k: number;
+    actor: string;
+  }): Promise<{
     k: number;
     scored_cases: number;
     mean_recall: number;
@@ -701,24 +1078,52 @@ export class EvalService {
     assertUuid(input.datasetId, 'datasetId');
     const k = Math.min(Math.max(1, input.k), 20);
     const cases = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(evalCases).where(and(eq(evalCases.organizationId, input.orgId), eq(evalCases.datasetId, input.datasetId))).orderBy(asc(evalCases.sequence)).limit(100),
+      tx
+        .select()
+        .from(evalCases)
+        .where(
+          and(eq(evalCases.organizationId, input.orgId), eq(evalCases.datasetId, input.datasetId)),
+        )
+        .orderBy(asc(evalCases.sequence))
+        .limit(100),
     );
-    const scored: Array<{ case_id: string; recall: number | null; retrieved_document_ids: string[] }> = [];
+    const scored: Array<{
+      case_id: string;
+      recall: number | null;
+      retrieved_document_ids: string[];
+    }> = [];
     for (const c of cases) {
       const expected = (c.expected ?? {}) as { document_ids?: unknown };
-      const expectedIds = Array.isArray(expected.document_ids) ? expected.document_ids.map(String) : [];
+      const expectedIds = Array.isArray(expected.document_ids)
+        ? expected.document_ids.map(String)
+        : [];
       const text = ((c.input ?? {}) as { text?: unknown }).text;
       if (expectedIds.length === 0 || typeof text !== 'string') {
         scored.push({ case_id: c.id, recall: null, retrieved_document_ids: [] });
         continue;
       }
-      const hits = await this.retrieval.searchKnowledge({ orgId: input.orgId, query: text, limit: k });
+      const hits = await this.retrieval.searchKnowledge({
+        orgId: input.orgId,
+        query: text,
+        limit: k,
+      });
       const retrieved = [...new Set(hits.map((h) => h.documentId))];
       const found = expectedIds.filter((id) => retrieved.includes(id)).length;
-      scored.push({ case_id: c.id, recall: found / expectedIds.length, retrieved_document_ids: retrieved.slice(0, 20) });
+      scored.push({
+        case_id: c.id,
+        recall: found / expectedIds.length,
+        retrieved_document_ids: retrieved.slice(0, 20),
+      });
     }
-    const withRecall = scored.filter((s) => s.recall !== null) as Array<{ case_id: string; recall: number; retrieved_document_ids: string[] }>;
-    const mean = withRecall.length === 0 ? 0 : withRecall.reduce((acc, s) => acc + s.recall, 0) / withRecall.length;
+    const withRecall = scored.filter((s) => s.recall !== null) as Array<{
+      case_id: string;
+      recall: number;
+      retrieved_document_ids: string[];
+    }>;
+    const mean =
+      withRecall.length === 0
+        ? 0
+        : withRecall.reduce((acc, s) => acc + s.recall, 0) / withRecall.length;
     await this.audit.add({
       action: 'eval.retrieval_evaluated',
       resourceType: 'eval_dataset',
@@ -728,7 +1133,12 @@ export class EvalService {
       tenantId: input.orgId,
       details: { k, scored_cases: withRecall.length, mean_recall: Number(mean.toFixed(4)) },
     });
-    return { k, scored_cases: withRecall.length, mean_recall: Number(mean.toFixed(4)), cases: scored };
+    return {
+      k,
+      scored_cases: withRecall.length,
+      mean_recall: Number(mean.toFixed(4)),
+      cases: scored,
+    };
   }
 }
 

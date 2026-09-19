@@ -11,18 +11,18 @@
 | C01 | Identity (name, description) | `c01-identity/` | NOT STARTED |
 | C02 | Instructions (directive composer) | `c02-instructions/` | NOT STARTED |
 | C03 | Brand voice | `c03-brand/` | NOT STARTED |
-| C04 | Brain (provider, model, fallback, params) | `c04-brain/` | NOT STARTED |
+| C04 | Model (provider, fallback, params) | `c04-brain/` | NOT STARTED |
 | C05 | Knowledge (uploads, pins, retrieval, coverage) | `c05-knowledge/` | NOT STARTED |
-| C06 | Tools (catalog attach, approvals, drift, perimeter) | `c06-tools/` | NOT STARTED |
-| C07 | Guardrails (policies, execution mode) | `c07-guardrails/` | NOT STARTED |
-| C08 | Memory (scope, history, summarization; org治理 read-only) | `c08-memory/` | NOT STARTED |
-| C09 | Budget (caps, cost preview, cache split) | `c09-budget/` | NOT STARTED |
-| C10 | Evaluation (datasets, runs, decisions, shadow, drift) | `c10-evaluation/` | NOT STARTED |
-| C11 | Templates (gallery, detail, install, updates) | `c11-templates/` | MODEL RESOLVED, design NOT STARTED |
-| C12 | Origins (clone, import) | `c12-origins/` | NOT STARTED |
-| C13 | Try (test-run, streaming, trace) | `c13-try/` | NOT STARTED |
-| C14 | Ship (readiness, publish, success) | `c14-ship/` | NOT STARTED |
-| C15 | Operate (versions, lineage, rollouts, health, audit) | `c15-operate/` | NOT STARTED |
+| C06 | Tools (catalog attach, approvals, drift, perimeter) | `c06-tools/` | SIGNED OFF 2026-09-17 |
+| C07 | Guardrails (policies, execution mode) | `c07-guardrails/` | SIGNED OFF 2026-09-18 |
+| C08 | Memory (scope, history, summarization; org-level read-only) | `c08-memory/` | SIGNED OFF 2026-09-18 |
+| C09 | Budget (caps, cost preview, cache split) | `c09-budget/` | SIGNED OFF 2026-09-18 |
+| C10 | Evaluation (datasets, runs, decisions, shadow, drift) | `c10-evaluation/` | SIGNED OFF 2026-09-18 |
+| C11 | Templates (gallery, detail, install, updates) | `c11-templates/` | SIGNED OFF 2026-09-18 |
+| C12 | Origins (clone, import) | `c12-origins/` | SIGNED OFF 2026-09-18 |
+| C13 | Test run (streaming, trace) | `c13-try/` | SIGNED OFF 2026-09-18 |
+| C14 | Publish (readiness, success) | `c14-ship/` | SIGNED OFF 2026-09-18 |
+| C15 | Operate (versions, lineage, rollouts, health, audit) | `c15-operate/` | SIGNED OFF 2026-09-18 |
 
 ## Per-component exit gate (all must hold before sign-off)
 
@@ -37,6 +37,9 @@
 - Unknown payload keys → **422** with dotted paths, never silently stripped (`validation.ts:201-211`). Secret-shaped values/keys rejected before persistence (`validation.ts:128-155`).
 - Roles: create/versions/test/evaluate/draft-edit = owner,admin,developer. Publish/rollback/retire/disable/delete/credentials-create = owner,admin. Reads = all roles incl. reader/billing where routed. Server enforces; UI explains.
 - Statuses are dot + word, never color alone. Motion follows the token sheet (`design/_system/design_tokens.svg`).
+- Every `org`-scoped confirmation promises "Recorded in Audit" — keepable only if every entity detail page links its pre-filtered Audit view. No link = no promise.
+- Codename policy: retired words (Blueprint, Mirror, Brain, Hands, Purpose-as-label, Try/Ship-as-nouns, Spark, Artifact, Studio-in-copy, Engine Room, Fleet-in-nav) live ONLY in internal identifiers. Zero user-readable occurrences.
+- Publish/rollback/retire/disable/delete = owner,admin (verified `@Roles` on the publish route; test/evaluate stay open to developers). Developer Publish buttons render explained + request path, never silent-disabled.
 
 ## Corrections log (verified 2026-09-17 — old docs and early drafts were wrong here)
 
@@ -58,5 +61,11 @@
 18. **Blocks split**: org control-blocks CRUD = owner/admin (manageable in UI); platform template-blocks = staff-written (read-only in UI). Never one write path for both.
 19. **"Rolled back" is not a version status.** Enum: DRAFT…PUBLISHED…RETIRED. Rollback births a new version.
 20. **"Pin" covers both**: knowledge slug-pins AND tool hash-pins (`assertToolPins`). Qualify (slug-pin vs hash-pin); `toolBindings` = the entries list.
+21. **Slug rules are exact**: 3–64 chars, lowercase/digits/hyphens, starts+ends alnum; collision 409 `source_slug_taken` (`source-slug.ts:17`, `artifacts.service.ts:93-97,271-274`). Rename mutates the slug (audited) → `governance`-scoped.
+22. **Test-run text bound**: 1–8192 chars, required (`assistants.controller.ts:229-231`).
+23. **Dataset bounds**: name ≤128 (unique per org), description ≤2048 (`eval.schema.ts:19-32`).
+24. **Approvals are three systems**: runtime `approvals` (filter by `state`, cap 200, extend PENDING-only, APPROVED/DENIED + idempotent replay + 1–5 approver chain) vs `memory_proposals` (own decision path) vs escalations (claim/assign/resolve). No `kind` filter exists — aggregation TBD in pass, no empty options.
+25. **Blocks**: targets exactly assistant|version|tool|template|capability; ACTIVE computed at check time (`expires_at IS NULL OR > now()`), no sweeper — UI computes Active/Expires/Expired itself (`schema.ts:387-412`, `control-blocks.service.ts:14-18`).
+26. **B2 defense (refuted review claim, kept as precedent)**: a review alleged the no-op guard runs pre-resolution on payload hash only. Code proves manifest-first ordering with joint comparison. Lesson recorded: step-numbered traces without file:line citations are not evidence.
 12. **Tool-name leading-letter rule is UNVERIFIED.** Contract requires only `^[a-z0-9_]+$` (min 2). The `^[a-z]…` variant in older docs must not be enforced until proven. Open item for C06.
 13. **Memory `user` scope is UNRESOLVED.** Engine enum + default is `user` (`validation.ts:63-66`); older docs say the consumer omits it. Resolve in C08 before designing the scope control.

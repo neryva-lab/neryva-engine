@@ -1,0 +1,80 @@
+<svg width="1440" height="1560" viewBox="0 0 1440 1560" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1560" fill="#0A0A0E"/>
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Returns Helper · operate</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Edit in builder</text>
+
+  <rect x="0" y="56" width="1440" height="1504" fill="#0A0A0E"/>
+  <rect x="0" y="56" width="1440" height="1504" fill="url(#bdots)"/>
+
+  <text x="120" y="140" font-size="22" font-weight="600" fill="#F5F5F7">Operate — one banner, then the levers</text>
+  <text x="120" y="164" font-size="13" fill="#8E8E93">Live state first, history second. Exactly two emergency toggles — everything else is evidence.</text>
+
+  <text x="120" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ONE BANNER · MOST SEVERE WINS, ALWAYS WITH A FIX</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="232" width="1200" height="86" rx="14" fill="#14141B" stroke="#FF9F0A" stroke-width="1.5"/>
+    <circle cx="148" cy="268" r="6" fill="#FF9F0A"/>
+    <text x="164" y="273" font-size="14" font-weight="600" fill="#F5F5F7">Degraded waiver expires in 18 hours — returns-2024 unresolved</text>
+    <text x="164" y="295" font-size="12" fill="#A1A1A6">Healthy publish clears it · past-due suspends serving · <tspan fill="#0A84FF">Map the pin →</tspan>   <tspan fill="#8E8E93">Recorded in Audit ›</tspan></text>
+  </g>
+
+  <text x="120" y="362" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">OPERATE HEADER · LIVE / DRAFT / LINEAGE / CHANNELS</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="378" width="580" height="240" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="144" y="412" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">LIVE</text>
+    <text x="144" y="438" font-size="15" font-weight="600" fill="#F5F5F7">v6 · b77c1d… · 11 Sep · by Amara</text>
+    <text x="144" y="460" font-size="12" fill="#A1A1A6">Eval PASS on this content · snapshot + provenance written</text>
+    <text x="144" y="492" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">DRAFT</text>
+    <text x="144" y="516" font-size="13" font-weight="600" fill="#F5F5F7">v7 · attention — 1 blocker (models)</text>
+    <text x="144" y="538" font-size="12" fill="#0A84FF">Resume in builder at Brain →</text>
+    <text x="144" y="566" font-size="11" fill="#8E8E93">Lineage</text>
+    <text x="144" y="588" font-size="12" fill="#A1A1A6">● v6 live  ──  ○ v7 draft (child of v6)  ──  ↩ v5 restored as v8 on 02 Sep</text>
+  </g>
+  <g filter="url(#bnd)">
+    <rect x="740" y="378" width="580" height="240" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="764" y="412" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">SERVING CHANNELS · 2 BOUND</text>
+    <text x="764" y="438" font-size="13" fill="#F5F5F7">● Support WhatsApp — active, verified</text>
+    <text x="764" y="460" font-size="13" fill="#F5F5F7">● Shop widget — pending, verify it →</text>
+    <text x="764" y="492" font-size="12" fill="#0A84FF">Open channels →</text>
+    <text x="764" y="524" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">SPEND · LINKS, NEVER DUPLICATED SUMS</text>
+    <text x="764" y="546" font-size="12" fill="#A1A1A6">Measured in Usage + rollups in Observe — <tspan fill="#0A84FF">Usage → · rollups ↓</tspan></text>
+    <text x="764" y="572" font-size="11" fill="#8E8E93">Rollup math stays in Observe (single derivation).</text>
+  </g>
+
+  <text x="120" y="662" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">EMERGENCY · TWO TOGGLES, BOTH CONFIRMED</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="678" width="1200" height="150" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <rect x="144" y="702" width="240" height="40" rx="10" fill="transparent" stroke="#FF453A"/>
+    <text x="264" y="727" font-size="13" font-weight="600" text-anchor="middle" fill="#FF453A">Pause rollout</text>
+    <rect x="396" y="702" width="240" height="40" rx="10" fill="transparent" stroke="#FF453A"/>
+    <text x="516" y="727" font-size="13" font-weight="600" text-anchor="middle" fill="#FF453A">Disable agent</text>
+    <text x="144" y="768" font-size="12" fill="#A1A1A6">Pause serves the pre-rollout fallback and keeps the percentage for resume. Disable stops run acceptance now.</text>
+    <text x="144" y="790" font-size="12" fill="#A1A1A6">Paused 12 Sep by Amara (operator) · <tspan fill="#0A84FF">Resume at 50/50 →</tspan>   Rollout v6 50 · v5 50 · guardrails: <tspan fill="#0A84FF">usage · outcomes · last eval ›</tspan></text>
+  </g>
+
+  <text x="120" y="872" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">TRAIL · FIXED: PREFIXES, REASONS, REFRESH</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="888" width="1200" height="220" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="144" y="922" font-size="12" fill="#A1A1A6">18 Sep 14:20 · assistant.published · v7 · by Amara</text>
+    <text x="144" y="946" font-size="12" fill="#A1A1A6">12 Sep 09:02 · assistant.rollout_paused · operator · by Amara · “error spike, investigating”</text>
+    <text x="144" y="970" font-size="12" fill="#A1A1A6">02 Sep 11:40 · assistant.rolled_back · live is now v8 (copy of v5) · by Jonas</text>
+    <text x="144" y="994" font-size="12" fill="#A1A1A6">28 Aug 16:11 · control.block_set · tool:refunds · “holiday freeze” · by Amara</text>
+    <text x="144" y="1024" font-size="11" fill="#8E8E93">Newest 100 org events, this agent only · <tspan fill="#0A84FF">Refresh · View all in Audit →</tspan></text>
+    <text x="144" y="1076" font-size="11" fill="#636366">No incident system exists — burn/auto-rollback surface here + the paused banner. Analytics/anomaly/sliders deferred.</text>
+  </g>
+
+  <text x="120" y="1152" font-size="11" fill="#636366">Additive only — panel order untouched · no new routes · no new shortcuts · memory/escalations stay separate (no list reads to aggregate)</text>
+</svg>

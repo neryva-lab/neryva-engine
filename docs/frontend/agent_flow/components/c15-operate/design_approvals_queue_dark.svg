@@ -1,0 +1,66 @@
+<svg width="1440" height="1180" viewBox="0 0 1440 1180" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1180" fill="#0A0A0E"/>
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agent Studio</text>
+  <text x="150" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Approvals</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Audit</text>
+
+  <rect x="0" y="56" width="1440" height="1124" fill="#0A0A0E"/>
+  <rect x="0" y="56" width="1440" height="1124" fill="url(#bdots)"/>
+
+  <text x="120" y="140" font-size="22" font-weight="600" fill="#F5F5F7">Approvals — pending first, payload-locked</text>
+  <text x="120" y="164" font-size="13" fill="#8E8E93">Runtime queue only — memory and escalations stay separate until their lists exist. One visual pattern when they land.</text>
+
+  <text x="120" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">QUEUE · STATE FILTERS (SERVER VOCABULARY ONLY)</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="232" width="640" height="420" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="144" y="264" font-size="12" fill="#F5F5F7">[ Pending ]  All  Approved  Denied  Expired</text>
+    <text x="144" y="288" font-size="11" fill="#8E8E93">Search pending… (client-side, newest 200)</text>
+    <g font-size="13">
+      <circle cx="148" cy="318" r="5" fill="#FF9F0A"/>
+      <text x="164" y="323" font-weight="600" fill="#F5F5F7">Refund $1,240.00 — process_refund</text>
+      <text x="164" y="341" font-size="11" fill="#8E8E93">run a91f… · policy v3 · expires in 42 min · waiting 12 min</text>
+      <rect x="560" y="306" width="88" height="30" rx="8" fill="#30D158"/>
+      <text x="604" y="326" font-size="12" font-weight="600" text-anchor="middle" fill="#06240F">Approve</text>
+      <rect x="656" y="306" width="80" height="30" rx="8" fill="transparent" stroke="#3A3A42"/>
+      <text x="696" y="326" font-size="12" text-anchor="middle" fill="#F5F5F7">Deny</text>
+
+      <circle cx="148" cy="376" r="5" fill="#FF9F0A"/>
+      <text x="164" y="381" font-weight="600" fill="#F5F5F7">Delete customer record — crm.delete</text>
+      <text x="164" y="399" font-size="11" fill="#8E8E93">run 77c2… · policy v3 · expires tomorrow · decided by Amara, 11:58</text>
+    </g>
+    <text x="144" y="440" font-size="11" fill="#8E8E93">Deny requires a reason (the endpoint stores it) · decisions land in audit + on the run trace.</text>
+    <text x="144" y="600" font-size="11" fill="#636366">Polling while pending · per-row pending (one slow decision never freezes the queue) · loud error when a run is missing.</text>
+  </g>
+
+  <text x="800" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PAYLOAD DRAWER · FULL LISTABLE CONTEXT</text>
+  <g filter="url(#bnd)">
+    <rect x="800" y="232" width="520" height="420" rx="14" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="824" y="266" font-size="14" font-weight="600" fill="#F5F5F7">Refund $1,240.00</text>
+    <text x="824" y="290" font-size="12" fill="#A1A1A6">process_refund · approval ORD-8814 · policy v3</text>
+    <text x="824" y="314" font-size="12" fill="#A1A1A6">Run a91f3c… · <tspan fill="#0A84FF">open trace →</tspan> · expires in 42 min</text>
+    <rect x="824" y="332" width="472" height="120" rx="10" fill="#14141B" stroke="#3A3A42"/>
+    <text x="840" y="358" font-size="11" fill="#8E8E93">summary · actionType · approvalRef · policyVersion · created · expires</text>
+    <text x="840" y="380" font-size="11" fill="#8E8E93">No invented args — the list endpoint carries no payload params.</text>
+    <text x="840" y="402" font-size="11" fill="#8E8E93">Decided: by Amara, 11:58 · reasons live in audit · <tspan fill="#0A84FF">audit →</tspan></text>
+    <text x="824" y="478" font-size="12" fill="#A1A1A6">Deny reason (required): [ duplicate charge confirmed ]</text>
+    <rect x="824" y="496" width="220" height="38" rx="10" fill="#0A84FF"/>
+    <text x="934" y="520" font-size="13" font-weight="600" text-anchor="middle" fill="#FFFFFF">Approve</text>
+    <rect x="1052" y="496" width="220" height="38" rx="10" fill="#FF453A"/>
+    <text x="1162" y="520" font-size="13" font-weight="600" text-anchor="middle" fill="#FFFFFF">Deny with reason</text>
+  </g>
+
+  <text x="120" y="700" font-size="11" fill="#636366">Extend keeps the audited pending window · expired rows are read-only history · reasons persist server-side (list shows actor + time, audit holds the words)</text>
+</svg>

@@ -1,0 +1,87 @@
+<svg width="1440" height="1240" viewBox="0 0 1440 1240" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1240" fill="#0A0A0E"/>
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Returns Helper</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Edit in builder</text>
+
+  <rect x="0" y="56" width="1440" height="1184" fill="#0A0A0E"/>
+  <rect x="0" y="56" width="1440" height="1184" fill="url(#bdots)"/>
+
+  <text x="120" y="140" font-size="22" font-weight="600" fill="#F5F5F7">Publish — one gate panel, one publish path</text>
+  <text x="120" y="164" font-size="13" fill="#8E8E93">Same readiness source as the builder — never a fork. Version rows review here, they don’t publish around it.</text>
+
+  <text x="120" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PUBLISH PANEL · SHARED READINESS, TYPED REFUSALS</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="232" width="560" height="430" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="144" y="266" font-size="14" font-weight="600" fill="#F5F5F7">Publish</text>
+    <text x="144" y="288" font-size="12" fill="#8E8E93">Draft ▾  v7 · DRAFT · a41f9c2e…</text>
+    <g font-size="13">
+      <circle cx="148" cy="318" r="5" fill="#30D158"/>
+      <text x="164" y="323" font-weight="600" fill="#F5F5F7">Shape + instructions</text>
+      <circle cx="148" cy="350" r="5" fill="#30D158"/>
+      <text x="164" y="355" font-weight="600" fill="#F5F5F7">Models + residency</text>
+      <circle cx="148" cy="382" r="5" fill="#30D158"/>
+      <text x="164" y="387" font-weight="600" fill="#F5F5F7">Tool pins fresh</text>
+      <circle cx="148" cy="414" r="5" fill="#30D158"/>
+      <text x="164" y="419" font-weight="600" fill="#F5F5F7">Eval gates — PASS on this content</text>
+      <circle cx="148" cy="446" r="5" fill="#FF9F0A"/>
+      <text x="164" y="451" font-weight="600" fill="#F5F5F7">Knowledge degraded</text>
+      <text x="164" y="469" font-size="12" fill="#FF9F0A">returns-2024 unresolved — ack armed ↓</text>
+    </g>
+    <rect x="144" y="492" width="512" height="40" rx="10" fill="#0A84FF"/>
+    <text x="400" y="517" font-size="14" font-weight="600" text-anchor="middle" fill="#FFFFFF">Publish v7</text>
+    <rect x="144" y="544" width="512" height="62" rx="10" fill="#FF3B30" opacity="0.10"/>
+    <text x="160" y="564" font-size="12" fill="#FF3B30">409 · release policy requires a fresh PASS…</text>
+    <text x="160" y="582" font-size="11" fill="#0A84FF">Evaluate v7, then publish ›</text>
+    <text x="160" y="598" font-size="11" fill="#636366">Refusals render verbatim — never a validation form error.</text>
+  </g>
+
+  <text x="740" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">VERSIONS · REVIEW, DON’T BYPASS</text>
+  <g filter="url(#bnd)">
+    <rect x="740" y="232" width="580" height="200" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="764" y="266" font-size="13" font-weight="600" fill="#F5F5F7">v7 · DRAFT · a41f9c2e…</text>
+    <rect x="1064" y="248" width="232" height="36" rx="9" fill="transparent" stroke="#0A84FF"/>
+    <text x="1180" y="271" font-size="13" text-anchor="middle" fill="#0A84FF">Review &amp; publish →</text>
+    <text x="764" y="304" font-size="12" fill="#8E8E93">Row selects v7 in the gate panel and scrolls to it.</text>
+    <text x="764" y="324" font-size="12" fill="#8E8E93">No second publish path — the old direct-mutate bypass is gone.</text>
+    <text x="764" y="360" font-size="13" font-weight="600" fill="#F5F5F7">v6 · PUBLISHED · live</text>
+    <text x="764" y="382" font-size="12" fill="#8E8E93">Rollback target picker lives here — newest PUBLISHED ≠ live, never silent.</text>
+  </g>
+
+  <text x="740" y="476" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ROLLBACK · PICKER + TARGET PREVIEW + REASON</text>
+  <g filter="url(#bnd)">
+    <rect x="740" y="492" width="580" height="250" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="764" y="526" font-size="13" font-weight="600" fill="#F5F5F7">Roll back to… ▾  v5 · 02 Sep · 9be210aa…</text>
+    <text x="764" y="550" font-size="12" fill="#A1A1A6">Live becomes v8 (a copy of v5) — history is kept, nothing is renamed.</text>
+    <text x="764" y="574" font-size="12" fill="#A1A1A6">The rollback itself is audited as assistant.rolled_back.</text>
+    <text x="764" y="622" font-size="12" fill="#A1A1A6">In-flight runs stay pinned · no data or external revert.</text>
+    <rect x="764" y="638" width="240" height="38" rx="10" fill="#FF453A"/>
+    <text x="884" y="662" font-size="13" font-weight="600" text-anchor="middle" fill="#FFFFFF">Roll back to v5</text>
+    <text x="1020" y="662" font-size="12" fill="#8E8E93">Live is now v8 · Audit ›</text>
+  </g>
+
+  <text x="120" y="710" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">CHANNEL EXIT · RETURNTO, NEVER A DEAD END</text>
+  <g filter="url(#bnd)">
+    <rect x="120" y="726" width="1200" height="150" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="144" y="760" font-size="13" font-weight="600" fill="#F5F5F7">Connect a channel →  pick Returns Helper (preselected)  →  back here</text>
+    <text x="144" y="784" font-size="12" fill="#A1A1A6">Channels need an existing agent — the success screen carries it over, the channel screen carries it back.</text>
+    <text x="144" y="806" font-size="12" fill="#A1A1A6">New console plumbing only — the engine path is untouched.</text>
+    <rect x="144" y="822" width="260" height="36" rx="9" fill="transparent" stroke="#0A84FF"/>
+    <text x="274" y="845" font-size="13" text-anchor="middle" fill="#0A84FF">Open channels →</text>
+  </g>
+
+  <text x="120" y="920" font-size="11" fill="#636366">409 no-op → “No changes” + link to live · degraded ack → 7-day waiver line · developer row explains + request path · audit promises carry Audit links</text>
+</svg>

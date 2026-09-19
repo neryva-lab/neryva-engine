@@ -1,0 +1,106 @@
+<svg width="1440" height="1480" viewBox="0 0 1440 1480" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1480" fill="#0A0A0E"/>
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Returns Helper · build</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Detail</text>
+
+  <rect x="216" y="56" width="1224" height="1424" fill="#0A0A0E"/>
+  <rect x="216" y="56" width="1224" height="1424" fill="url(#bdots)"/>
+
+  <text x="500" y="130" font-size="22" font-weight="600" fill="#F5F5F7">Ship — readiness, then publish, then receipt</text>
+  <text x="500" y="154" font-size="13" fill="#8E8E93">Required gates only — the engine refuses nothing else. Advisory rows never block.</text>
+
+  <text x="280" y="206" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">READINESS CARD · VERDICT FIRST, THEN ROWS</text>
+  <g filter="url(#bnd)">
+    <rect x="280" y="222" width="560" height="470" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <circle cx="308" cy="258" r="6" fill="#FF9F0A"/>
+    <text x="324" y="263" font-size="15" font-weight="600" fill="#F5F5F7">Conditional Go — 1 named exception</text>
+    <text x="304" y="288" font-size="12" fill="#8E8E93">Draft v7 · content a41f9c… · go / conditional-go / no-go, never a percentage</text>
+
+    <g font-size="13">
+      <circle cx="308" cy="322" r="5" fill="#30D158"/>
+      <text x="324" y="327" font-weight="600" fill="#F5F5F7">Shape + instructions</text>
+      <text x="324" y="345" font-size="12" fill="#8E8E93">Caps pre-check passes locally.</text>
+
+      <circle cx="308" cy="372" r="5" fill="#30D158"/>
+      <text x="324" y="377" font-weight="600" fill="#F5F5F7">Models in catalog + residency served</text>
+      <text x="324" y="395" font-size="12" fill="#8E8E93">Every allowed model is usable at this org.</text>
+
+      <circle cx="308" cy="422" r="5" fill="#30D158"/>
+      <text x="324" y="427" font-weight="600" fill="#F5F5F7">Tool pins fresh</text>
+      <text x="324" y="445" font-size="12" fill="#8E8E93">Built-ins and enabled rows cover every entry.</text>
+
+      <circle cx="308" cy="472" r="5" fill="#30D158"/>
+      <text x="324" y="477" font-weight="600" fill="#F5F5F7">Eval gates</text>
+      <text x="324" y="495" font-size="12" fill="#8E8E93">Fresh PASS on a41f9c… · 18 Sep 14:02 — required: regression ≤ 2%.</text>
+
+      <circle cx="308" cy="522" r="5" fill="#FF9F0A"/>
+      <text x="324" y="527" font-weight="600" fill="#F5F5F7">Knowledge pins degraded</text>
+      <text x="324" y="545" font-size="12" fill="#FF9F0A">Unresolved: returns-2024 — map it, or ship degraded ↓</text>
+
+      <circle cx="308" cy="572" r="5" fill="#8E8E93"/>
+      <text x="324" y="577" fill="#A1A1A6">No changes vs live v6</text>
+      <text x="324" y="595" font-size="12" fill="#8E8E93">Content identical — publish re-pins the resolved set, or confirms no-op.</text>
+    </g>
+
+    <rect x="304" y="614" width="512" height="52" rx="10" fill="#FF9F0A" opacity="0.10"/>
+    <text x="320" y="634" font-size="12" fill="#FF9F0A">☑ Ship degraded — the agent WILL hallucinate more.</text>
+    <text x="320" y="650" font-size="11" fill="#8E8E93">Audited as assistant.publish_degraded_acknowledged · waiver expires in 7 days.</text>
+  </g>
+
+  <text x="880" y="206" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PUBLISH RAIL · RECEIPT BEFORE THE CLICK</text>
+  <g filter="url(#bnd)">
+    <rect x="880" y="222" width="380" height="300" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="904" y="256" font-size="14" font-weight="600" fill="#F5F5F7">What happens</text>
+    <text x="904" y="282" font-size="12" fill="#A1A1A6">Content  a41f9c2e…  ·  schema v2</text>
+    <text x="904" y="302" font-size="12" fill="#A1A1A6">Snapshot + provenance written in one</text>
+    <text x="904" y="320" font-size="12" fill="#A1A1A6">transaction · pointer swings to v7.</text>
+    <text x="904" y="344" font-size="12" fill="#A1A1A6">In-flight runs stay pinned to v6.</text>
+    <text x="904" y="368" font-size="12" fill="#A1A1A6">Recorded in Audit ›</text>
+    <rect x="904" y="392" width="332" height="40" rx="10" fill="#0A84FF"/>
+    <text x="1070" y="417" font-size="14" font-weight="600" text-anchor="middle" fill="#FFFFFF">Publish v7</text>
+    <text x="904" y="458" font-size="11" fill="#8E8E93">Clicking with open issues scrolls to the first — never a dead click.</text>
+  </g>
+
+  <text x="880" y="566" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">DEVELOPER SEES THIS, NOT A GREY WALL</text>
+  <g filter="url(#bnd)">
+    <rect x="880" y="582" width="380" height="110" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="904" y="614" font-size="13" font-weight="600" fill="#F5F5F7">Publish needs owner or admin</text>
+    <text x="904" y="636" font-size="12" fill="#A1A1A6">You can draft, test and evaluate.</text>
+    <text x="904" y="654" font-size="12" fill="#0A84FF">Ask an owner to publish ›</text>
+  </g>
+
+  <text x="280" y="740" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">SUCCESS · RECEIPT + 3 EXITS (NOTHING ELSE CLAIMS MORE THAN { version })</text>
+  <g filter="url(#bnd)">
+    <rect x="280" y="756" width="980" height="330" rx="14" fill="#14141B" stroke="#30D158" stroke-width="1.5"/>
+    <circle cx="308" cy="792" r="6" fill="#30D158"/>
+    <text x="324" y="797" font-size="15" font-weight="600" fill="#F5F5F7">Live — v7 · a41f9c2e…</text>
+    <text x="304" y="824" font-size="12" fill="#A1A1A6">Template: returns-helper @ 3 · Eval: PASS on a41f9c… · 18 Sep 14:02 · Shipped degraded: returns-2024 (waiver to 25 Sep)</text>
+    <text x="304" y="846" font-size="12" fill="#A1A1A6">Snapshot + provenance written in-transaction · in-flight runs stayed pinned · Recorded in Audit ›</text>
+    <g font-size="13" font-weight="600">
+      <rect x="304" y="870" width="300" height="40" rx="10" fill="#0A84FF"/>
+      <text x="454" y="895" text-anchor="middle" fill="#FFFFFF">Connect a channel →</text>
+      <rect x="616" y="870" width="300" height="40" rx="10" fill="transparent" stroke="#3A3A42"/>
+      <text x="766" y="895" text-anchor="middle" fill="#F5F5F7">Watch in operate</text>
+      <rect x="928" y="870" width="300" height="40" rx="10" fill="transparent" stroke="#3A3A42"/>
+      <text x="1078" y="895" text-anchor="middle" fill="#F5F5F7">Back to agents</text>
+    </g>
+    <text x="304" y="940" font-size="11" fill="#8E8E93">Channel exit returns here after connect — never a dead “Binding required”.</text>
+    <text x="304" y="1058" font-size="11" fill="#636366">Refusal branches (409 BLOCK / required / no-op, 400 degraded / pins / models) reverse this ceremony — exact message + fix link, failing row focused.</text>
+  </g>
+
+  <text x="280" y="1130" font-size="11" fill="#636366">No new shortcut — publish is confirm-gated and pointer-driven · no percentage, no phantom gates (approvals / blocks / drift are not engine gates)</text>
+</svg>

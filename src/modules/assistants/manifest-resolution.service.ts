@@ -8,6 +8,8 @@ import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { toolCatalog } from './tool-catalog.schema';
 import { BUILT_IN_TOOLS } from './tool-catalog.service';
 import { assistantInstalls, assistantTemplates } from './schema';
+import { modelCatalogEntries } from './model-catalog.schema';
+import { qualifyModelAliases } from '../../common/model-aliases';
 import { chunks, documents, documentVersions, embeddings } from '../knowledge/schema';
 import type { AssistantPayload } from './validation';
 
@@ -441,8 +443,19 @@ export class ManifestResolutionService {
         } | null
       )?.models ?? null;
     const catalogPayloadHash = catalog !== null ? canonicalHash(catalog.payload) : null;
+    // Qualify bare aliases against the platform catalog so the snapshot's
+    // modelRef carries real providers (not "unknown") — the run-time
+    // provider check in mcp-authority reads modelRef.models[].provider.
+    const platformRows = await this.db.root
+      .select({
+        provider: modelCatalogEntries.provider,
+        modelId: modelCatalogEntries.modelId,
+      })
+      .from(modelCatalogEntries)
+      .where(eq(modelCatalogEntries.status, 'active'));
+    const qualified = qualifyModelAliases(payload.model_policy.allowed_models, platformRows);
     return {
-      models: payload.model_policy.allowed_models.map((alias) => {
+      models: qualified.map((alias) => {
         const slash = alias.indexOf('/');
         const provider = slash === -1 ? 'unknown' : alias.slice(0, slash);
         const model = slash === -1 ? alias : alias.slice(slash + 1);

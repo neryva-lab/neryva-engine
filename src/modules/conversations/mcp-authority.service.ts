@@ -35,6 +35,7 @@ import { assertRunTransition, isRunState, isTerminalRun } from './state-machine'
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { EscalationsService } from './escalations.service';
 import { issueCapability } from '../../common/auth/capability-token';
+import { qualifyModelAliases } from '../../common/model-aliases';
 
 /**
  * Engine authority side of neryva.mcp.v1 — Phase 5 (imp/ledger.md 5.4-5.11).
@@ -1848,16 +1849,18 @@ export class McpAuthorityService {
    * Failure falls back to all-null (advisory data must never fail context
    * assembly — the run proceeds with aliases only, exactly as before P2).
    */
-  private async resolveModelWindows(aliases: string[]): Promise<Record<string, number | null>> {
-    const windows: Record<string, number | null> = {};
-    for (const alias of aliases) {
-      windows[alias] = null;
-    }
-    if (aliases.length === 0) {
-      return windows;
-    }
+  /**
+   * Active platform model catalog rows (identity + context windows). This is
+   * a root read with no tenant context (documented posture, like the
+   * template registry). Empty on failure: model identity and window data are
+   * advisory and must never fail context assembly — the run proceeds with
+   * aliases only.
+   */
+  private async activeModelCatalogRows(): Promise<
+    Array<{ provider: string; modelId: string; window: number | null }>
+  > {
     try {
-      const rows = await this.db.root
+      return await this.db.root
         .select({
           provider: modelCatalogEntries.provider,
           modelId: modelCatalogEntries.modelId,
@@ -1865,16 +1868,34 @@ export class McpAuthorityService {
         })
         .from(modelCatalogEntries)
         .where(eq(modelCatalogEntries.status, 'active'));
-      const byAlias = new Map(rows.map((r) => [`${r.provider}/${r.modelId}`, r.window]));
-      for (const alias of aliases) {
-        if (byAlias.has(alias)) {
-          windows[alias] = byAlias.get(alias) ?? null;
-        }
-      }
     } catch (err) {
       McpAuthorityService.logger.warn(
-        `model windows unavailable, aliases only: ${(err as Error).message}`,
+        `model catalog unavailable, aliases unresolved: ${(err as Error).message}`,
       );
+      return [];
+    }
+  }
+
+  /**
+   * Per-alias context windows from the platform catalog. Keyed by the same
+   * (qualified) references carried in `allowed_models`, so Studio's pre-call
+   * overflow check reads them with the identical key. Aliases with no catalog
+   * entry map to null (unknown, never zero — zero would look like a real
+   * 0-token window).
+   */
+  private resolveModelWindows(
+    aliases: string[],
+    rows: Array<{ provider: string; modelId: string; window: number | null }>,
+  ): Record<string, number | null> {
+    const windows: Record<string, number | null> = {};
+    for (const alias of aliases) {
+      windows[alias] = null;
+    }
+    const byQualified = new Map(rows.map((r) => [`${r.provider}/${r.modelId}`, r.window]));
+    for (const alias of aliases) {
+      if (byQualified.has(alias)) {
+        windows[alias] = byQualified.get(alias) ?? null;
+      }
     }
     return windows;
   }
@@ -2016,14 +2037,16 @@ export class McpAuthorityService {
         const allowedModels = Array.isArray(modelPolicy.allowed_models)
           ? modelPolicy.allowed_models.slice(0, 16)
           : [];
-        // P2 (overflow routing, engine half): per-alias context windows from
-        // the GLOBAL platform catalog (no RLS — db.root read, same posture as
-        // the template registry). Studio compares the assembled context
-        // estimate against these BEFORE the provider call: over-window routes
-        // to an allowed fallback with room, or summarizes first — never a
-        // blind call. Aliases without a catalog entry map to null (unknown,
-        // never zero — zero would look like a real 0-token window).
-        const modelWindows = await this.resolveModelWindows(allowedModels);
+        // Model identity: the manifest contract requires provider/model
+        // references (context.proto). Bare aliases pinned in the snapshot are
+        // qualified here via the platform catalog; unresolvable ones pass
+        // through and fail loudly in Studio (fail-closed, never guessed).
+        // The same qualified references key modelWindows, so Studio's
+        // pre-call overflow check reads them with the identical key.
+        const modelCatalogRows = await this.activeModelCatalogRows();
+        const qualifiedModels = qualifyModelAliases(allowedModels, modelCatalogRows);
+        // TEMP-DEBUG (wave-4 smoke only): prove the manifest carries qualified
+        const modelWindows = this.resolveModelWindows(qualifiedModels, modelCatalogRows);
         const budgetPolicy =
           (snapshot?.budgetPolicy as {
             max_total_tokens?: number;
@@ -2318,7 +2341,7 @@ export class McpAuthorityService {
             snapshot?.brand ?? null,
           ),
           brandVoice: snapshot?.brand ?? undefined,
-          allowedModels,
+          allowedModels: qualifiedModels,
           modelWindows,
           modelParams: modelParams
             ? {

@@ -167,7 +167,11 @@ export function wireApprovalRequirement(approval: string | undefined): ApprovalR
  * AlreadyExists; everything else maps by its HTTP semantics.
  */
 export function toConnectError(err: unknown): unknown {
-  if (ConnectError.from(err)) {
+  // NB: ConnectError.from() is a converter, not a type guard — it returns a
+  // (truthy) ConnectError for ANY Error input, so `if (ConnectError.from(err))`
+  // would make the mapping below dead code and leak raw ApiErrors to the
+  // framework (surfaced as code=internal). Use instanceof for the guard.
+  if (err instanceof ConnectError) {
     return err;
   }
   const apiErr = err as ApiError;

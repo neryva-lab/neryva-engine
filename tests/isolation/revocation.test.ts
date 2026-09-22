@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 
 /**
@@ -20,6 +20,7 @@ const describeIfDb = DATABASE_URL ? describe : describe.skip;
 describeIfDb('revocation immediacy — L1 sid + sessionsRevokedAt', () => {
   let pool: Pool;
   let subjectSid: string;
+  let subjectAccountId: string;
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: DATABASE_URL, max: 2 });
@@ -27,6 +28,7 @@ describeIfDb('revocation immediacy — L1 sid + sessionsRevokedAt', () => {
     // Reuse existing schema: `accounts` + `oauth_sessions` (drizzle/0001).
     const { randomUUID } = await import('node:crypto');
     const accountId = randomUUID();
+    subjectAccountId = accountId;
     subjectSid = `test-sid-${randomUUID().slice(0, 8)}`;
 
     await pool.query(
@@ -42,6 +44,12 @@ describeIfDb('revocation immediacy — L1 sid + sessionsRevokedAt', () => {
        on conflict (sid) do nothing`,
       [subjectSid, accountId],
     );
+  });
+
+  afterAll(async () => {
+    await pool.query(`delete from oauth_sessions where sid = $1`, [subjectSid]);
+    await pool.query(`delete from accounts where id = $1::uuid`, [subjectAccountId]);
+    await pool.end();
   });
 
   it('placeholder — template for per-principal revocation (copy for membership/key)', async () => {

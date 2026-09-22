@@ -38,7 +38,7 @@ describeIfDb('revocation immediacy — L1 sid + sessionsRevokedAt', () => {
     // Insert a minimal L1 session; only sid + revokedAt matter for isSessionActive().
     await pool.query(
       `insert into oauth_sessions (sid, account_id, client_id, family_id, device, created_at)
-       values ($1, $2, 'test-client', gen_random_uuid(), 'test-device', now())
+       values ($1, $2, 'test-client', gen_random_uuid(), '{"test":"device"}'::jsonb, now())
        on conflict (sid) do nothing`,
       [subjectSid, accountId],
     );

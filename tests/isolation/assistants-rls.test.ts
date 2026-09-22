@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { withBypassRaw, probeAsTenant } from '../helpers/db';
 import { existsSync } from 'node:fs';
 
 /**
@@ -48,10 +49,10 @@ describeIfDb('assistants domain RLS isolation (requires DATABASE_URL)', () => {
       assistant_versions: { a: a.version, b: b.version },
       policy_snapshots: { a: a.snapshot, b: b.snapshot },
     };
-    const client = await pool.connect();
-    try {
-      // Setup as bypass: seed one row per org in every table.
-      await client.query(`select set_config('app.engine_bypass', 'on', true)`);
+    // Setup as bypass: seed one row per org in every table.
+    // (One transaction: SET LOCAL is transaction-scoped, so the autocommit
+    // form would lose the bypass before the inserts run.)
+    await withBypassRaw(pool, async (client) => {
       for (const [org, x] of [[orgA, a], [orgB, b]] as const) {
         await client.query(`insert into assistants (id, organization_id, name) values ($1::uuid, $2::uuid, $3)`, [
           x.assistant,
@@ -69,37 +70,19 @@ describeIfDb('assistants domain RLS isolation (requires DATABASE_URL)', () => {
           [x.snapshot, org, x.version, 'h'.repeat(64)],
         );
       }
-    } finally {
-      client.release();
-    }
+    });
   });
 
   afterAll(async () => {
-    const client = await pool.connect();
-    try {
-      await client.query(`select set_config('app.engine_bypass', 'on', true)`);
+    await withBypassRaw(pool, async (client) => {
       await client.query(`delete from assistants where organization_id in ($1::uuid, $2::uuid)`, [orgA, orgB]);
-    } finally {
-      client.release();
-      await pool.end();
-    }
+    });
+    await pool.end();
   });
 
-  /** Open a client scoped to `tenant` (or bypass when null) for a single probe. */
-  async function probe(tenant: string | null, statement: string, params: unknown[] = []): Promise<{ rows: unknown[][]; rowCount: number | null }> {
-    const client = await pool.connect();
-    try {
-      if (tenant) {
-        await client.query(`select set_config('app.engine_bypass', 'off', true)`);
-        await client.query(`select set_config('app.current_tenant', $1, true)`, [tenant]);
-      } else {
-        await client.query(`select set_config('app.engine_bypass', 'on', true)`);
-      }
-      const res = await client.query(statement, params);
-      return { rows: res.rows as unknown[][], rowCount: res.rowCount };
-    } finally {
-      client.release();
-    }
+  /** Tenant-scoped probe (explicit transaction; see tests/helpers/db.ts). */
+  function probe(tenant: string | null, statement: string, params: unknown[] = []) {
+    return probeAsTenant(pool, tenant, statement, params);
   }
 
   const tables = ['assistants', 'assistant_versions', 'policy_snapshots'] as const;

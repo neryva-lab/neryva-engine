@@ -5,9 +5,9 @@ import { and, eq, sql } from 'drizzle-orm';
 import { TEST_DATABASE_URL } from '../helpers/db';
 
 /**
- * Regression coverage for the four Wave 2 eval-gate fixes that the 2026-09-22
- * live proof exercised but that had no focused test (the fifth fix — the
- * stale-hash publish bypass — is covered by publish-gate.test.ts).
+ * Regression coverage for the Wave 2 eval-gate fixes that the 2026-09-22
+ * live proof exercised (the stale-hash publish bypass is covered by
+ * publish-gate.test.ts).
  *
  * Each test FAILS on the pre-fix code:
  * 1. analytics-rollup recomputeOutcomes: the INSERT listed 6 target columns
@@ -26,6 +26,17 @@ import { TEST_DATABASE_URL } from '../helpers/db';
  *    the snapshot stale (early return on row existence), so a re-eval would
  *    execute the OLD content while the gate attributes the decision to the
  *    new hash.
+ * 6. in-flight edit race (drizzle/0070): startRun pins the snapshot ONCE
+ *    (eval_runs.policy_snapshot_id, carried on eval.run_requested); the
+ *    executor dispatches every case against the pinned row, so a mid-eval
+ *    edit cannot change what the eval runs against. completeRun attests the
+ *    pin (verified against dispatched executions), never the version row's
+ *    live hash.
+ * 7. mixed-content execution: executions split across a pre-pin edit BLOCK
+ *    fail-closed with a NULL content pin (no single evaluated content).
+ * 8. unattested completion (Studio write-back / legacy direct completion):
+ *    the provenance pin is NULL instead of falling back to the version's
+ *    mutable current snapshot — the publish gate fails it closed.
  */
 
 if (existsSync('.env')) process.loadEnvFile('.env');
@@ -489,8 +500,9 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
     // The live-proven defect (2026-09-22): R1 dispatched while the draft
     // carried H1; the draft was edited to H2; R1 completed afterwards and
     // its provenance pinned evaluated_content_hash=H2 (completion-time read
-    // of the mutable snapshot row). Post-fix the pin is derived from the
-    // snapshot rows the executions actually ran against.
+    // of the mutable snapshot row). W2.4 (drizzle/0070): startRun pins the
+    // snapshot ONCE; completeRun attests the pin (verified against the
+    // executions), never the version row's live hash.
     const { assistantInstalls, assistantVersions } = await import('../../src/modules/assistants/schema');
     const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
     const assistantId = await plantAssistant(`egf-race-${assistantIds.length}`);
@@ -505,6 +517,8 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
     const snapH1 = await snapshotIdFor(versionId, hashH1);
     await db.withBypass(async (tx) => {
       await tx.insert(assistantInstalls).values({ organizationId: orgId, slug, templateVersion: '1.0.0', assistantId });
+      // The run as startRun would have created it: pinned to the H1
+      // snapshot row at start time.
       await tx.insert(evalRuns).values({
         id: evalRunId,
         organizationId: orgId,
@@ -512,6 +526,7 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
         assistantVersionId: versionId,
         state: 'running',
         startedBy: actor,
+        policySnapshotId: snapH1,
       });
     });
     // R1's execution dispatched against the H1 snapshot row.
@@ -535,10 +550,11 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
     expect(result.provenance.evaluated_content_hash).toBe(hashH1);
   });
 
-  it('mixed-content execution: executions split across an edit BLOCK fail-closed', async () => {
-    // An edit landing mid-dispatch: one execution ran H1, another ran H2.
-    // No single evaluated content exists — attributing a PASS to either
-    // hash would be a lie, so the run BLOCKS.
+  it('mixed-content execution: executions split across an edit BLOCK fail-closed with a null pin', async () => {
+    // An edit landing mid-dispatch under the PRE-pin executor: one
+    // execution ran H1, another ran H2. No single evaluated content exists
+    // — attributing a PASS to either hash would be a lie, so the run BLOCKS
+    // and the provenance pin stays NULL (the gate fails it closed).
     const { assistantInstalls, assistantVersions } = await import('../../src/modules/assistants/schema');
     const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
     const assistantId = await plantAssistant(`egf-mixed-${assistantIds.length}`);
@@ -561,6 +577,7 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
         assistantVersionId: versionId,
         state: 'running',
         startedBy: actor,
+        policySnapshotId: snapH1,
       });
     });
     // First execution dispatched against H1…
@@ -582,9 +599,169 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
         ],
       },
       actor,
-    })) as { decision: string; provenance: { block_reasons?: string[] } };
+    })) as { decision: string; provenance: { block_reasons?: string[]; evaluated_content_hash?: string | null } };
     // Pre-fix: no mixed-content check existed — this scored 1.0 → PASS.
     expect(result.decision).toBe('BLOCK');
     expect((result.provenance.block_reasons ?? []).join(' ')).toContain('mixed content');
+    // The pin is NULL: no single content was evaluated, so nothing is
+    // attributed (the publish gate fails null pins closed).
+    expect(result.provenance.evaluated_content_hash).toBeNull();
+  });
+
+  it('startRun pins the version\'s current snapshot and carries the pin on eval.run_requested', async () => {
+    // W2.4 (drizzle/0070): the authoritative content pin is witnessed ONCE
+    // at start time — in the same transaction as the run insert — and
+    // travels on the dispatch payload so the executor never re-resolves
+    // mutable "current" content.
+    const { outboxEvents } = await import('../../src/common/infra/outbox/schema');
+    const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
+    const assistantId = await plantAssistant(`egf-pin-${assistantIds.length}`);
+    const hash = `egf-pinh1-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const versionId = await plantVersion({ assistantId, version: 0, status: 'DRAFT', hash });
+    const datasetId = await plantDataset();
+    await (assistantsSvc as unknown as {
+      ensureVersionSnapshot(o: string, a: string, v: string): Promise<void>;
+    }).ensureVersionSnapshot(orgId, assistantId, versionId);
+    const expectedSnap = await snapshotIdFor(versionId, hash);
+    const run = (await evals.startRun({
+      orgId,
+      datasetId,
+      assistantVersionId: versionId,
+      attemptsPerCase: 1,
+      actor,
+    })) as { id: string; policySnapshotId: string };
+    expect(run.policySnapshotId).toBe(expectedSnap);
+    const events = await db.withBypass((tx) =>
+      tx
+        .select({ payload: outboxEvents.payload })
+        .from(outboxEvents)
+        .where(
+          and(
+            eq(outboxEvents.organizationId, orgId),
+            eq(outboxEvents.aggregateId, run.id),
+            eq(outboxEvents.eventType, 'eval.run_requested'),
+          ),
+        )
+        .limit(1),
+    );
+    expect(events.length).toBe(1);
+    expect((events[0].payload as { policy_snapshot_id?: string }).policy_snapshot_id).toBe(expectedSnap);
+    // The row the executor would read also carries the pin (payload/row
+    // fallback path).
+    const rows = await db.withBypass((tx) =>
+      tx.select({ policySnapshotId: evalRuns.policySnapshotId }).from(evalRuns).where(eq(evalRuns.id, run.id)).limit(1),
+    );
+    expect(rows[0].policySnapshotId).toBe(expectedSnap);
+  });
+
+  it('acceptMessage with pinSnapshotId dispatches the PINNED snapshot even after a mid-dispatch edit', async () => {
+    // The true in-flight edit race at the conversation plane: the version
+    // is edited AFTER the eval pinned H1 but BEFORE this case dispatches.
+    // Without the pin the case would resolve the version's CURRENT snapshot
+    // (H2 — mixed-content execution); with the pin it runs H1.
+    const { assistantVersions, policySnapshots } = await import('../../src/modules/assistants/schema');
+    const { runs } = await import('../../src/modules/conversations/schema');
+    const { buildConversationsService } = await import('../helpers/db');
+    const conversationsSvc = await buildConversationsService(db);
+    const assistantId = await plantAssistant(`egf-acceptpin-${assistantIds.length}`);
+    const hashH1 = `egf-acch1-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const hashH2 = `egf-acch2-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const versionId = await plantVersion({ assistantId, version: 0, status: 'DRAFT', hash: hashH1 });
+    const ensure = assistantsSvc as unknown as {
+      ensureVersionSnapshot(o: string, a: string, v: string): Promise<void>;
+    };
+    await ensure.ensureVersionSnapshot(orgId, assistantId, versionId);
+    const snapH1 = await snapshotIdFor(versionId, hashH1);
+    // The edit lands mid-dispatch: version row now carries H2, with its own
+    // immutable snapshot row.
+    await db.withBypass((tx) =>
+      tx.update(assistantVersions).set({ hash: hashH2 }).where(sql`${assistantVersions.id} = ${versionId}::uuid`),
+    );
+    await ensure.ensureVersionSnapshot(orgId, assistantId, versionId);
+    const snapH2 = await snapshotIdFor(versionId, hashH2);
+    expect(snapH2).not.toBe(snapH1);
+    // Case dispatched WITH the run's pin → executes H1's immutable content.
+    const convPinned = await conversationsSvc.createConversation({
+      orgId,
+      assistantId,
+      createdBy: actor,
+      participantScope: 'org',
+    });
+    const pinned = await conversationsSvc.acceptMessage({
+      orgId,
+      principalId: actor,
+      conversationId: convPinned.id,
+      content: { text: 'probe' },
+      pinVersionId: versionId,
+      pinSnapshotId: snapH1,
+      runKind: 'eval',
+    });
+    const pinnedRuns = await db.withBypass((tx) =>
+      tx.select({ policySnapshotId: runs.policySnapshotId }).from(runs).where(eq(runs.id, pinned.run_id as string)).limit(1),
+    );
+    expect(pinnedRuns[0].policySnapshotId).toBe(snapH1);
+    // Contrast — the pre-pin behavior still resolves CURRENT content (H2):
+    // this is the race the pin eliminates for eval dispatch.
+    const convCurrent = await conversationsSvc.createConversation({
+      orgId,
+      assistantId,
+      createdBy: actor,
+      participantScope: 'org',
+    });
+    const current = await conversationsSvc.acceptMessage({
+      orgId,
+      principalId: actor,
+      conversationId: convCurrent.id,
+      content: { text: 'probe' },
+      pinVersionId: versionId,
+      runKind: 'eval',
+    });
+    const currentRuns = await db.withBypass((tx) =>
+      tx.select({ policySnapshotId: runs.policySnapshotId }).from(runs).where(eq(runs.id, current.run_id as string)).limit(1),
+    );
+    expect(currentRuns[0].policySnapshotId).toBe(snapH2);
+    void policySnapshots;
+  });
+
+  it('completeRun with no dispatched executions records a null content pin (fail-closed provenance)', async () => {
+    // Studio write-back / legacy direct completion: the engine did not
+    // observe the execution, so it cannot attest the content. The
+    // provenance pin stays NULL (never the version's mutable current
+    // snapshot) → the publish gate fails it closed (re-evaluate).
+    const { assistantInstalls } = await import('../../src/modules/assistants/schema');
+    const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
+    const assistantId = await plantAssistant(`egf-nopinx-${assistantIds.length}`);
+    const hash = `egf-nopinx-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const versionId = await plantVersion({ assistantId, version: 0, status: 'DRAFT', hash });
+    const datasetId = await plantDataset();
+    const evalRunId = randomUUID();
+    await (assistantsSvc as unknown as {
+      ensureVersionSnapshot(o: string, a: string, v: string): Promise<void>;
+    }).ensureVersionSnapshot(orgId, assistantId, versionId);
+    const snap = await snapshotIdFor(versionId, hash);
+    await db.withBypass(async (tx) => {
+      await tx.insert(assistantInstalls).values({ organizationId: orgId, slug, templateVersion: '1.0.0', assistantId });
+      // Pinned at start (as startRun does) but completed with no dispatched
+      // executions — the Studio write-back shape.
+      await tx.insert(evalRuns).values({
+        id: evalRunId,
+        organizationId: orgId,
+        datasetId,
+        assistantVersionId: versionId,
+        state: 'running',
+        startedBy: actor,
+        policySnapshotId: snap,
+      });
+    });
+    const result = (await evals.completeRun({
+      orgId,
+      evalRunId,
+      results: { cases: [{ case_id: 'c1', attempt: 1, passed: true, score: 1 }] },
+      actor,
+    })) as { decision: string; provenance: { evaluated_content_hash?: string | null } };
+    expect(result.decision).toBe('PASS');
+    // Pre-fix: fell back to the version's CURRENT snapshot hash — claiming
+    // content the engine never observed.
+    expect(result.provenance.evaluated_content_hash).toBeNull();
   });
 });

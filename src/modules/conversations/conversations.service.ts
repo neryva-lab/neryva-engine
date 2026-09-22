@@ -244,6 +244,15 @@ export class ConversationsService {
      * pin a draft whose snapshot the caller materialized first).
      */
     pinVersionId?: string;
+    /**
+     * W2.4 (drizzle/0070) — pin THIS snapshot row instead of resolving the
+     * version's current snapshot (ps.hash = av.hash). The eval executor
+     * passes the run's start-time pin so every dispatched case executes the
+     * same immutable content even if the draft is edited mid-dispatch.
+     * The row must belong to the pinned version (snapshot-gated); absent =
+     * resolve current (pre-existing behavior for test/standard runs).
+     */
+    pinSnapshotId?: string;
   }): Promise<{
     message_id: string;
     run_id: string | null;
@@ -323,6 +332,12 @@ export class ConversationsService {
       attachments?: string[];
       runKind?: 'standard' | 'test' | 'eval';
       pinVersionId?: string;
+      /**
+       * W2.4 (drizzle/0070) — pin THIS snapshot row instead of resolving the
+       * version's current snapshot. Threaded from acceptMessage; see its
+       * docblock.
+       */
+      pinSnapshotId?: string;
     },
   ): Promise<{
     message_id: string;
@@ -383,6 +398,7 @@ export class ConversationsService {
               tx,
               input.pinVersionId,
               input.runKind === 'test' || input.runKind === 'eval',
+              input.pinSnapshotId,
             )
           : await this.pickVersionPin(
               tx,
@@ -538,14 +554,26 @@ export class ConversationsService {
     tx: NodePgDatabase,
     versionId: string,
     allowDraft: boolean,
+    snapshotId?: string,
   ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(versionId)) {
       throw ApiError.validation({ pin_version_id: 'must be a uuid' });
     }
+    if (
+      snapshotId !== undefined &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(snapshotId)
+    ) {
+      throw ApiError.validation({ pin_snapshot_id: 'must be a uuid' });
+    }
+    // W2.4 — a snapshot pin resolves the EXACT row (immutable content the
+    // eval started against); without it, the version's current snapshot
+    // (ps.hash = av.hash at accept time — the in-flight edit race).
+    // Either way the snapshot must belong to the pinned version.
     const rows = await tx.execute(sql`
       select av.id as version_id, ps.id as snapshot_id
       from assistant_versions av
-      join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
+      join policy_snapshots ps on ps.assistant_version_id = av.id
+        ${snapshotId !== undefined ? sql`and ps.id = ${snapshotId}::uuid` : sql`and ps.hash = av.hash`}
       where av.id = ${versionId}::uuid
         ${allowDraft ? sql`` : sql`and av.status = 'PUBLISHED'`}
       limit 1

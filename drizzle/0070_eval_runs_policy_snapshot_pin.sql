@@ -1,0 +1,27 @@
+-- 0070 — Authoritative eval-run content pin (eval_runs.policy_snapshot_id).
+--
+-- 0069 made policy snapshots immutable per (assistant_version_id, hash) and
+-- completeRun learned to DETECT mixed-content execution after the fact
+-- (distinct snapshot hashes across dispatched executions → BLOCK). Detection
+-- is not prevention: the executor still resolved the version's CURRENT
+-- snapshot at every case dispatch (ps.hash = av.hash at accept time), so an
+-- edit landing mid-dispatch meant later cases GENUINELY EXECUTED different
+-- content — the BLOCK arrived after the mixed eval had already run.
+--
+-- Fix: the eval run pins its content ONCE at startRun. EvalService.startRun
+-- resolves the version's current snapshot in the same transaction that
+-- creates the run, stores it on eval_runs.policy_snapshot_id, and carries
+-- it on the eval.run_requested payload. The executor dispatches every case
+-- against the pinned snapshot row (acceptMessage pinSnapshotId); a draft
+-- edited mid-dispatch can no longer change what the eval runs against.
+-- completeRun attests the pin — verified against the snapshots the
+-- dispatched executions actually ran — instead of deriving content from
+-- executions or falling back to the version's mutable current hash.
+--
+-- Data safety: the column is NULLABLE. Pre-0070 rows keep NULL = the engine
+-- cannot attest what content they executed; their provenance records
+-- evaluated_content_hash NULL and the publish gate fails them closed
+-- (re-evaluate). No backfill: inventing a pin for old runs would be a lie.
+-- Snapshots are immutable and never deleted, so the FK needs no ON DELETE
+-- action. RLS is row-level on eval_runs — no policy change required.
+ALTER TABLE "eval_runs" ADD COLUMN "policy_snapshot_id" uuid REFERENCES "policy_snapshots"("id");

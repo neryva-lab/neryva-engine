@@ -42,6 +42,8 @@ export class EvalExecutorConsumer implements OutboxConsumer {
       dataset_id?: string;
       assistant_version_id?: string;
       attempts_per_case?: number;
+      /** W2.4 (drizzle/0070) — the authoritative content pin from startRun. */
+      policy_snapshot_id?: string;
     };
     const evalRunId = payload.eval_run_id;
     const datasetId = payload.dataset_id;
@@ -49,6 +51,25 @@ export class EvalExecutorConsumer implements OutboxConsumer {
     const attempts = Math.min(Math.max(1, Number(payload.attempts_per_case ?? 1)), 5);
     if (!evalRunId || !datasetId || !versionId) {
       throw new Error('eval.run_requested payload missing eval_run_id/dataset_id/assistant_version_id');
+    }
+    // W2.4 — the run's start-time content pin. Prefer the payload (written
+    // by startRun in the same TX as the run row); fall back to the row
+    // itself for events enqueued before the pin existed. WITHOUT a pin the
+    // executor cannot honestly dispatch — fail the event (retry → dead
+    // letter) rather than re-resolving mutable "current" content.
+    let policySnapshotId = typeof payload.policy_snapshot_id === 'string' ? payload.policy_snapshot_id : null;
+    if (!policySnapshotId) {
+      const runRows = await this.db.withOrg(event.organizationId, (tx) =>
+        tx
+          .select({ policySnapshotId: evalRuns.policySnapshotId })
+          .from(evalRuns)
+          .where(eq(evalRuns.id, evalRunId))
+          .limit(1),
+      );
+      policySnapshotId = runRows[0]?.policySnapshotId ?? null;
+    }
+    if (!policySnapshotId) {
+      throw new Error(`eval run ${evalRunId} has no pinned policy snapshot — refusing to dispatch against mutable current content`);
     }
 
     // Claim phase (single TX): mark the run running and claim missing
@@ -132,6 +153,9 @@ export class EvalExecutorConsumer implements OutboxConsumer {
           content: { text: caseText.slice(0, 8192) },
           idempotencyKey: `eval:${evalRunId}:${execution.caseId}:${execution.attempt}`,
           pinVersionId: versionId,
+          // W2.4 — every case executes the run's pinned snapshot row, never
+          // the version's current content (in-flight edit race).
+          pinSnapshotId: policySnapshotId,
           runKind: 'eval',
         });
         await this.db.withOrg(event.organizationId, (tx) =>

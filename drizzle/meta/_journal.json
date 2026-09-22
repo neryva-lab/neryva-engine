@@ -484,6 +484,13 @@
                         "when":  1789623000000,
                         "tag":  "0069_policy_snapshots_content_addressed",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  69,
+                        "version":  6,
+                        "when":  1790107435000,
+                        "tag":  "0070_eval_runs_policy_snapshot_pin",
+                        "breakpoints":  true
                     }
                 ]
 }

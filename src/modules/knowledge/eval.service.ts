@@ -416,6 +416,31 @@ export class EvalService {
       if (dataset.length === 0) {
         throw ApiError.notFound('eval dataset');
       }
+      // W2.4 (drizzle/0070) — authoritative content pin: resolve the
+      // version's CURRENT snapshot in the same transaction that creates the
+      // run, so the eval is forever bound to the content that was live at
+      // start time. The executor dispatches every case against this pinned
+      // row (acceptMessage pinSnapshotId); an edit landing mid-dispatch
+      // inserts a NEW snapshot row and cannot change what the eval runs
+      // against. Fail closed when the version has no snapshot (drafts
+      // without one cannot run — the executor's snapshot-required join
+      // would refuse every case anyway).
+      const snapRows = await tx
+        .select({ id: policySnapshots.id })
+        .from(policySnapshots)
+        .innerJoin(
+          assistantVersions,
+          and(
+            eq(assistantVersions.id, policySnapshots.assistantVersionId),
+            eq(policySnapshots.hash, assistantVersions.hash),
+          ),
+        )
+        .where(eq(policySnapshots.assistantVersionId, input.assistantVersionId))
+        .limit(1);
+      if (snapRows.length === 0) {
+        throw ApiError.conflict('assistant version has no policy snapshot');
+      }
+      const policySnapshotId = snapRows[0].id;
       const rows = await tx
         .insert(evalRuns)
         .values({
@@ -427,6 +452,7 @@ export class EvalService {
           attemptsPerCase: attempts,
           startedBy: input.actor,
           isShadow: input.shadow === true,
+          policySnapshotId,
         })
         .returning();
       await recordOutboxEvent(tx, {
@@ -440,6 +466,9 @@ export class EvalService {
           dataset_id: input.datasetId,
           assistant_version_id: input.assistantVersionId,
           attempts_per_case: attempts,
+          // W2.4 — the authoritative content pin travels with the dispatch
+          // request so the executor never re-resolves "current" content.
+          policy_snapshot_id: policySnapshotId,
           ...(input.environment ? { environment: input.environment } : {}),
           // P5: the executor ignores unknown keys — shadow rides along so
           // downstream scoring can distinguish observation from gating.
@@ -807,22 +836,34 @@ export class EvalService {
           }
         }
       }
-      // 3b. Content pin (in-flight edit race, drizzle/0069): the decision is
-      //    attributed to the content the eval EXECUTED, never the version
-      //    row's live hash at completion time (updateDraft rewrites it in
-      //    place). Snapshots are immutable per (version, hash); each
-      //    dispatched execution's run pins its snapshot row by id. The
-      //    evaluated content is the DISTINCT snapshot hash across dispatched
-      //    executions:
-      //    - exactly one → the honest pin: start-time content derived from
-      //      what actually ran, immune to edits landing mid-eval;
-      //    - more than one → the eval executed MIXED content (an edit
-      //      landed mid-dispatch): no single evaluated content exists, so
-      //      the run BLOCKS fail-closed instead of attributing a decision
-      //      to content that was only partly executed;
-      //    - none (direct completion without the executor) → fall back to
-      //      the version's current snapshot hash below (pre-existing
-      //      semantic for that path).
+      // 3b. Content pin (drizzle/0070): the run pinned its snapshot ONCE at
+      //    startRun (eval_runs.policy_snapshot_id). The decision is
+      //    attributed to the pin — VERIFIED against what the dispatched
+      //    executions actually ran, never derived from executions alone and
+      //    never the version row's live hash at completion time (updateDraft
+      //    rewrites it in place — the in-flight edit race):
+      //    - pin set, executions ran, distinct execution hashes == pin hash
+      //      → the honest pin: what the eval actually executed;
+      //    - pin set, executions ran against anything else (mixed content
+      //      from a pre-pin dispatch, or a different row) → no single
+      //      evaluated content exists → BLOCK fail-closed. Defense in
+      //      depth: the pinned executor makes this unreachable for runs
+      //      dispatched by the current code;
+      //    - pin set, NO executions (Studio write-back / legacy direct
+      //      completion): the engine did not observe the execution, so it
+      //      cannot attest the content. Claiming the pin's hash would assert
+      //      the Studio ran the pinned content — unwitnessed. The pin stays
+      //      NULL → the publish gate fails closed (re-evaluate);
+      //    - pin NULL (pre-0070 rows): unattestable → NULL, same fail-closed.
+      let pinHash: string | null = null;
+      if (run.policySnapshotId) {
+        const pinRows = await tx
+          .select({ hash: policySnapshots.hash })
+          .from(policySnapshots)
+          .where(eq(policySnapshots.id, run.policySnapshotId))
+          .limit(1);
+        pinHash = pinRows[0]?.hash ?? null;
+      }
       const executedHashes = await tx.execute<{ hash: string }>(sql`
         select distinct ps.hash as hash
         from eval_case_executions ece
@@ -833,13 +874,15 @@ export class EvalService {
       `);
       const distinctHashes = [...new Set(executedHashes.rows.map((r) => r.hash))];
       let evaluatedContentHash: string | null = null;
-      if (distinctHashes.length > 1) {
+      if (pinHash !== null && distinctHashes.length === 1 && distinctHashes[0] === pinHash) {
+        evaluatedContentHash = pinHash;
+      } else if (pinHash !== null && distinctHashes.length > 0) {
         blockReasons.push(
-          `mixed content: executions ran against ${distinctHashes.length} distinct content hashes (${distinctHashes.map((h) => h.slice(0, 12)).join(', ')}) — no single evaluated content; re-run the eval`,
+          `mixed content: executions ran against ${distinctHashes.length} distinct content hash(es) (${distinctHashes.map((h) => h.slice(0, 12)).join(', ')}) but the run pinned ${pinHash.slice(0, 12)} — no single evaluated content; re-run the eval`,
         );
-      } else if (distinctHashes.length === 1) {
-        evaluatedContentHash = distinctHashes[0];
       }
+      // pinHash null, or no dispatched executions: evaluatedContentHash
+      // stays null — the engine attests only what it pinned AND observed.
       // 4. Thresholds: task_success defaults to the aggregate score BY
       //    DEFINITION (mean case score); groundedness/policy_compliance with
       //    no worker metric are recorded unevaluated → WARN, never invented.
@@ -1038,9 +1081,14 @@ export class EvalService {
       score: number;
       evaluatedMetrics: Record<string, number | null>;
       /**
-       * Execution-derived content pin (completeRun §3b): the DISTINCT
-       * snapshot hash the dispatched executions ran against, or null when
-       * no execution was dispatched (direct completion / legacy runs).
+       * W2.4 (drizzle/0070) — the authoritative content pin from completeRun
+       * §3b: the snapshot hash the run pinned at startRun AND whose
+       * execution was observed, or null when unattestable. Null is NEVER
+       * backfilled from the version's current snapshot: the current hash is
+       * mutable (updateDraft rewrites it in place), so falling back to it
+       * would reintroduce the completion-time misattribution 0069/0070
+       * exist to kill. Null pins fail closed at the publish gate
+       * (re-evaluate).
        */
       evaluatedContentHash: string | null;
       blockReasons: string[];
@@ -1056,11 +1104,12 @@ export class EvalService {
       })
       .from(toolCatalog)
       .where(eq(toolCatalog.organizationId, orgId));
-    const snapshotRows = await (async () => {
-      if (input.evaluatedContentHash) {
-        // The honest pin: the snapshot row matching the content the
-        // executions actually ran against (content-addressed, immutable).
-        return tx
+    // The honest pin: the snapshot row matching the content the run pinned
+    // at startRun and the executions actually ran against
+    // (content-addressed, immutable). Null when unattestable — no fallback
+    // to the version's mutable current snapshot, ever.
+    const snapshotRows = input.evaluatedContentHash
+      ? await tx
           .select()
           .from(policySnapshots)
           .where(
@@ -1069,27 +1118,8 @@ export class EvalService {
               eq(policySnapshots.hash, input.evaluatedContentHash),
             ),
           )
-          .limit(1);
-      }
-      // Legacy / direct-completion path (no dispatched executions): the
-      // version's current snapshot — the pre-existing semantic.
-      const vRows = await tx
-        .select({ hash: assistantVersions.hash })
-        .from(assistantVersions)
-        .where(eq(assistantVersions.id, input.version.id))
-        .limit(1);
-      if (vRows.length === 0) return [];
-      return tx
-        .select()
-        .from(policySnapshots)
-        .where(
-          and(
-            eq(policySnapshots.assistantVersionId, input.version.id),
-            eq(policySnapshots.hash, vRows[0].hash),
-          ),
-        )
-        .limit(1);
-    })();
+          .limit(1)
+      : [];
     const snapshot = snapshotRows[0] ?? null;
     let modelCatalogMatch: Record<string, unknown> | null = null;
     if (input.parsed.model) {
@@ -1141,12 +1171,13 @@ export class EvalService {
       tool_catalog_hash: canonicalHash(catalogRows.filter((r) => r.enabled)),
       knowledge_pins: (snapshot?.knowledgePins ?? null) as unknown,
       guardrail_ref: snapshot?.hash ?? null,
-      // The content hash the eval actually EXECUTED: derived from the
-      // distinct snapshot hash across dispatched executions (completeRun
-      // §3b), never the version row's live hash at completion time (which
-      // updateDraft rewrites in place — the in-flight edit race). The
-      // publish gate matches on this pin. Null only for legacy runs whose
-      // executions predate content-addressed snapshots (fail closed).
+      // The content hash the eval was PINNED to at startRun and OBSERVED
+      // executing (completeRun §3b). Never the version row's live hash at
+      // completion time (updateDraft rewrites it in place — the in-flight
+      // edit race). The publish gate matches on this pin. Null when the
+      // engine cannot attest the executed content (pre-0070 runs, Studio
+      // write-backs, mixed-content BLOCKs) — null pins fail closed at the
+      // gate (re-evaluate).
       evaluated_content_hash: snapshot?.hash ?? null,
       compiler_version: input.parsed.compiler_version ?? null,
       environment: null,

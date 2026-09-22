@@ -10,7 +10,7 @@ import {
   uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
-import { assistantVersions } from '../assistants/schema';
+import { assistantVersions, policySnapshots } from '../assistants/schema';
 
 /**
  * Eval harness (FL-2.21, drizzle/0040). Engine is the system of record;
@@ -89,6 +89,18 @@ export const evalRuns = pgTable(
      * never satisfy required-checks. FALSE for all pre-P5 rows.
      */
     isShadow: boolean('is_shadow').notNull().default(false),
+    /**
+     * W2.4 (drizzle/0070) — authoritative content pin: the policy_snapshots
+     * row the run was started against. Pinned ONCE at startRun (same TX as
+     * the run insert), carried on the eval.run_requested payload, and every
+     * dispatched execution runs the pinned row — a draft edited mid-dispatch
+     * can no longer change what the eval executes. NULL for pre-0070 rows:
+     * the engine cannot attest what content they executed, so their
+     * provenance records evaluated_content_hash NULL and the publish gate
+     * fails them closed (re-evaluate). No backfill — a pin must be
+     * witnessed at start time, never invented afterwards.
+     */
+    policySnapshotId: uuid('policy_snapshot_id').references(() => policySnapshots.id),
   },
   (t) => [index('ix_eval_runs_org_dataset').on(t.organizationId, t.datasetId, t.startedAt)],
 );

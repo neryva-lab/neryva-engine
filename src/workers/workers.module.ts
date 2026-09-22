@@ -58,14 +58,27 @@ import { AssistantsModule } from '../modules/assistants/assistants.module';
     AnalyticsRollupConsumer,
     MemoryProposerConsumer,
     LlmJudgeConsumer,
-    EvalExecutorConsumer,
-    EvalScoringConsumer,
-    HumanLoopNotifyConsumer,
+    // Flag-gated consumers/workers — same flags as the module imports above.
+    // Registering them unconditionally crashes Nest at boot when their
+    // feature module is disabled (Conversations/Notifications/Eval/
+    // Assistants services are not in the DI graph then). The dispatcher's
+    // @Optional() @Inject(class) tokens resolve to undefined for absent
+    // providers and the consumer is simply skipped — no degraded mode, the
+    // events that feed them cannot exist with the module off.
+    // Eval plane (REL-2.1/2.2): executor drives conversations (GAP-03),
+    // scoring folds terminal run events into EvalService.completeRun.
+    ...(ModuleFlags.conversations ? [EvalExecutorConsumer] : []),
+    ...(ModuleFlags.knowledge ? [EvalScoringConsumer] : []),
+    // Human-loop notifications (REL-5.2): approval/escalation fan-out.
+    ...(ModuleFlags.notifications ? [HumanLoopNotifyConsumer] : []),
     OutboxDispatcherWorker,
     AcceptedRunSweepWorker,
-    RunWatchdogWorker,
-    ModelDriftWorker,
-    DegradedSweepWorker,
+    // Run watchdog resolves conversations (accept/retry bookkeeping).
+    ...(ModuleFlags.conversations ? [RunWatchdogWorker] : []),
+    // P5: drift needs EvalService (knowledge) + notification fan-out; the
+    // degraded sweep needs the AssistantsService suspend path + fan-out.
+    ...(ModuleFlags.knowledge && ModuleFlags.notifications ? [ModelDriftWorker] : []),
+    ...(ModuleFlags.assistants && ModuleFlags.notifications ? [DegradedSweepWorker] : []),
   ],
   exports: [OutboxDispatcherWorker],
 })

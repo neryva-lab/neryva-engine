@@ -67,6 +67,7 @@ import {
 } from '../assistants/model-cost.schema';
 import { productEntitlements } from '../organizations/schema';
 import { quotaReservations } from '../billing/usage-ledger.schema';
+import { QuotaService, type QuotaReservation as QuotaHold } from '../billing/quota.service';
 import { env } from '../../common/config/env';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { usageLedgerEntries } from '../billing/usage-ledger.schema';
@@ -101,6 +102,7 @@ export class ConversationsService {
     private readonly audit: AuditService,
     private readonly purge: RetentionPurgeService,
     private readonly escalations: EscalationsService,
+    private readonly quota: QuotaService,
   ) {}
 
   // ── Conversation lifecycle ───────────────────────────────────────────────
@@ -446,7 +448,17 @@ export class ConversationsService {
       // test/eval runs never reserve (they are not billable traffic). The
       // Redis counter plane stays the satellites' advisory layer.
       if ((input.runKind ?? 'standard') === 'standard') {
-        await this.reserveQuota(tx, input.orgId, runId);
+        // W2.3 — the Redis quota plane refuses first (fail-fast, before any
+        // model spend); the durable wall then commits atomically with the
+        // run. If the durable wall refuses after the hold was taken, the
+        // hold is dropped so the refusal leaves no trace of its own.
+        await this.holdRunQuota(input.orgId);
+        try {
+          await this.reserveQuota(tx, input.orgId, runId);
+        } catch (err) {
+          await this.releaseRunQuotaHold(input.orgId);
+          throw err;
+        }
       }
 
       // TPL-5.6 — manifest commits atomically with the run: no run without it.
@@ -605,7 +617,10 @@ export class ConversationsService {
     await tx.insert(quotaReservations).values({
       id: uuidv7(),
       organizationId: orgId,
-      dimension: 'runs',
+      // W2.3 — 'requests': the row must satisfy chk_quota_dimension
+      // ('runs' was never a legal dimension and crashed the insert for any
+      // org with plan limits set). One run = one billable request event.
+      dimension: 'requests',
       quantity: '1',
       state: 'RESERVED',
       runId,
@@ -626,6 +641,66 @@ export class ConversationsService {
           ${committed ? sql`committed_at` : sql`released_at`} = now()
       where run_id = ${runId}::uuid and state = 'RESERVED'
     `);
+  }
+
+  /**
+   * W2.3 — the Redis quota-plane product bucket runs reserve against. It
+   * matches the durable wall's entitlement product (`agents`) so both planes
+   * read the same plan row; the engine enforces the product level during the
+   * strangler window (see the QuotaService docblock).
+   */
+  private static readonly RUN_QUOTA_PRODUCT = 'agents';
+
+  /**
+   * W2.3 — take the advisory Redis hold for one run BEFORE the durable wall
+   * (and before any model spend). Refusal throws the typed quota wall —
+   * 402 `quota_exceeded` on monthly_spend, 429 `quota_exceeded` on
+   * monthly_events — so an over-quota run is refused at acceptance.
+   *
+   * The hold is `units: 1` with a zero cost estimate: per-run cost is not
+   * knowable at acceptance, so event-count gating rides this plane while
+   * spend gating rides the durable ledger check in reserveQuota (plus the
+   * hourly reconcile that resyncs these counters from billing.spend_events).
+   * Runs are not project-scoped in the current schema, so only the product
+   * bucket is checked.
+   */
+  private async holdRunQuota(orgId: string): Promise<QuotaHold> {
+    const hold: QuotaHold = {
+      orgId,
+      product: ConversationsService.RUN_QUOTA_PRODUCT,
+      units: 1,
+      estimatedCostUsd: 0,
+    };
+    const decision = await this.quota.checkAndReserve(hold);
+    if (!decision.allowed) {
+      const reason = decision.reason ?? 'unknown';
+      throw ApiError.quotaExceeded(
+        reason === 'product_spend' || reason === 'project_spend'
+          ? 'monthly_spend'
+          : 'monthly_events',
+        {
+          reason,
+          product: ConversationsService.RUN_QUOTA_PRODUCT,
+          quota: decision,
+        },
+      );
+    }
+    return hold;
+  }
+
+  /**
+   * W2.3 — drop the advisory hold. Best-effort by contract (QuotaService
+   * never throws from release): called on every terminal transition and on
+   * the durable-wall refusal path, so neither a finished nor a refused run
+   * leaves a hold behind.
+   */
+  private async releaseRunQuotaHold(orgId: string): Promise<void> {
+    await this.quota.release({
+      orgId,
+      product: ConversationsService.RUN_QUOTA_PRODUCT,
+      units: 1,
+      estimatedCostUsd: 0,
+    });
   }
 
   private async pickVersionPin(
@@ -953,6 +1028,16 @@ export class ConversationsService {
         }
         throw err;
       }
+      // W2.3 — regeneration is billable model traffic: the same two-plane
+      // quota gate as the start-message path (Redis hold, then the durable
+      // wall in this transaction).
+      await this.holdRunQuota(input.orgId);
+      try {
+        await this.reserveQuota(tx, input.orgId, runId);
+      } catch (err) {
+        await this.releaseRunQuotaHold(input.orgId);
+        throw err;
+      }
       const manifestHash = await this.insertRunManifest(tx, {
         orgId: input.orgId,
         runId,
@@ -1179,6 +1264,16 @@ export class ConversationsService {
         }
         throw err;
       }
+      // W2.3 — edit-and-resend is billable model traffic: the same two-plane
+      // quota gate as the start-message path (Redis hold, then the durable
+      // wall in this transaction).
+      await this.holdRunQuota(input.orgId);
+      try {
+        await this.reserveQuota(tx, input.orgId, runId);
+      } catch (err) {
+        await this.releaseRunQuotaHold(input.orgId);
+        throw err;
+      }
       const manifestHash = await this.insertRunManifest(tx, {
         orgId: input.orgId,
         runId,
@@ -1390,7 +1485,7 @@ export class ConversationsService {
     assertUuid(input.runId, 'runId');
     validateMessageContent(input.content);
 
-    return this.db.withOrg(input.orgId, async (tx) => {
+    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
       const found = await tx
         .select()
         .from(runs)
@@ -1405,7 +1500,7 @@ export class ConversationsService {
         if (!run.resultMessageId) {
           throw ApiError.internal();
         }
-        return { message_id: run.resultMessageId, run_id: run.id, replay: true };
+        return { message_id: run.resultMessageId, run_id: run.id, replay: true, releaseHold: false };
       }
       if (input.leaseEpoch !== undefined && input.leaseEpoch !== run.leaseEpoch) {
         throw ApiError.conflict('stale lease epoch: run was re-leased or the lease expired', {
@@ -1674,8 +1769,15 @@ export class ConversationsService {
         },
       });
 
-      return { message_id: messageId, run_id: run.id, replay: false };
+      return { message_id: messageId, run_id: run.id, replay: false, releaseHold: run.runKind === 'standard' };
     });
+    // W2.3 — the terminal commit drops the advisory hold; the actuals are in
+    // the ledger now (the hourly reconcile resyncs the Redis counters from
+    // billing.spend_events). Best-effort: release never throws.
+    if (outcome.releaseHold) {
+      await this.releaseRunQuotaHold(input.orgId);
+    }
+    return { message_id: outcome.message_id, run_id: outcome.run_id, replay: outcome.replay };
   }
 
   /**
@@ -2223,6 +2325,11 @@ export class ConversationsService {
           reason: input.reason ?? 'canceled_by_principal',
         },
       });
+      // W2.3 — a canceled run must not strand its reservation: the durable
+      // row releases in the SAME transaction as the state flip (previously
+      // missing — cancelRun leaked RESERVED rows until the 15-minute TTL),
+      // and the advisory Redis hold drops after the commit (best-effort).
+      await this.settleRunQuota(tx, run.id, false);
       return updated[0];
     });
     await this.audit.add({
@@ -2234,6 +2341,9 @@ export class ConversationsService {
       tenantId: input.orgId,
       details: { reason: input.reason ?? 'canceled_by_principal' },
     });
+    if (canceled.runKind === 'standard') {
+      await this.releaseRunQuotaHold(input.orgId);
+    }
     return canceled;
   }
 
@@ -2254,7 +2364,7 @@ export class ConversationsService {
   }): Promise<{ run_id: string; terminal: boolean }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.runId, 'runId');
-    return this.db.withOrg(input.orgId, async (tx) => {
+    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
       const found = await tx
         .select()
         .from(runs)
@@ -2266,7 +2376,7 @@ export class ConversationsService {
       }
       const run = found[0];
       if (isTerminalRun(run.state)) {
-        return { run_id: run.id, terminal: true };
+        return { run_id: run.id, terminal: true, releaseHold: false };
       }
       if (run.state !== 'RUNNING' && run.state !== 'DISPATCHED') {
         throw ApiError.conflict(
@@ -2336,8 +2446,14 @@ export class ConversationsService {
         tenantId: input.orgId,
         details: { reason: input.reason },
       });
-      return { run_id: run.id, terminal: true };
+      return { run_id: run.id, terminal: true, releaseHold: run.runKind === 'standard' };
     });
+    // W2.3 — the watchdog kill drops the advisory hold (the durable row
+    // released inside the transaction above). Best-effort: never throws.
+    if (outcome.releaseHold) {
+      await this.releaseRunQuotaHold(input.orgId);
+    }
+    return { run_id: outcome.run_id, terminal: outcome.terminal };
   }
 
   async listRunEvents(

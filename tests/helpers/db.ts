@@ -372,11 +372,23 @@ export async function buildConversationsService(
     await import('../../src/modules/conversations/escalations.service');
   const { ConversationsService } =
     await import('../../src/modules/conversations/conversations.service');
+  const { RedisService } = await import('../../src/common/infra/redis.service');
+  const { EntitlementsService } =
+    await import('../../src/modules/organizations/entitlements.service');
+  const { EventBus } = await import('../../src/common/events/event-bus');
+  const { QuotaService } = await import('../../src/modules/billing/quota.service');
   const audit = new AuditService(db);
   // Storage seam stubbed (phase-9 precedent): purge object deletes are not
   // under test here; the seam shape is what matters, not the bytes.
   const storage = { requireAvailable: () => undefined, deleteObject: async () => true } as never;
   const purge = new RetentionPurgeService(db, storage, audit);
   const escalations = new EscalationsService(db, audit);
-  return new ConversationsService(db, audit, purge, escalations);
+  // W2.3 — the run path now gates on the Redis quota plane; wire the real
+  // services (live Redis via REDIS_URL) so integration tests exercise the
+  // actual hold/release accounting.
+  const redis = new RedisService();
+  const events = new EventBus();
+  const entitlements = new EntitlementsService(db, audit, events);
+  const quota = new QuotaService(redis, db, entitlements);
+  return new ConversationsService(db, audit, purge, escalations, quota);
 }

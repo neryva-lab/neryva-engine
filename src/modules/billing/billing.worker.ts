@@ -6,6 +6,7 @@ import { AnomalyService } from './anomaly.service';
 import { BillingCreditsService } from './billing-credits.service';
 import { BillingCycleService } from './billing-cycle.service';
 import { QuotaService } from './quota.service';
+import { UsageLedgerService } from './usage-ledger.service';
 import { TrialExpiryService } from './trial-expiry.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BurnRateService } from '../assistants/burn-rate.service';
@@ -41,6 +42,7 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     private readonly db: DbService,
     private readonly trialExpiry: TrialExpiryService,
     private readonly quota: QuotaService,
+    private readonly ledger: UsageLedgerService,
     private readonly burnRate: BurnRateService,
   ) {}
 
@@ -99,8 +101,14 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
           return result;
         }
         if (job.name === 'billing.quota_reconcile') {
+          // W2.3 — reclaim lapsed RESERVED rows (runs that died without a
+          // terminal transition) before resyncing the counters, so neither
+          // plane accumulates orphaned holds.
+          const expired = await this.ledger.expireLapsed();
           const result = await this.quota.reconcileMonth();
-          BillingWorker.logger.log(`quota reconcile: ${result.counters} counters resynced across ${result.ledgers} ledger(s)`);
+          BillingWorker.logger.log(
+            `quota reconcile: ${result.counters} counters resynced across ${result.ledgers} ledger(s), ${expired} lapsed reservation(s) reclaimed`,
+          );
           return result;
         }
         if (job.name === 'billing.burn_sweep') {

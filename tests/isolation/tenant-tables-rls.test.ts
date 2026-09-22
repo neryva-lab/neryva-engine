@@ -74,7 +74,10 @@ describeIfDb('tenant RLS matrix — Phases 3-9 tables (requires DATABASE_URL)', 
     });
 
     it(`${table}: org A cannot update or delete org B rows`, async () => {
-      const update = await probeAsTenant(pool, uuidA, `update ${table} set updated_at = updated_at where organization_id = $1::uuid`, [uuidB]);
+      // No-op self-assignment on organization_id (every tenant table has it):
+      // exercises the UPDATE USING policy without depending on per-table
+      // mutable columns. RLS must admit zero rows for the foreign tenant.
+      const update = await probeAsTenant(pool, uuidA, `update ${table} set organization_id = organization_id where organization_id = $1::uuid`, [uuidB]);
       expect(update.rowCount).toBe(0);
 
       const remove = await probeAsTenant(pool, uuidA, `delete from ${table} where organization_id = $1::uuid and false`, [uuidB]);

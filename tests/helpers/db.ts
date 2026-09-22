@@ -140,6 +140,35 @@ export async function seedOrgChain(pool: Pool, orgId: string): Promise<void> {
        values ($1::uuid, $2::uuid, 'requests', 1, now() + interval '1 hour')`,
       [randomUUID(), orgId],
     );
+    // Lifecycle / platform tables the RLS matrix (tests/isolation) probes for
+    // "org B reads its own row" — seed one row each so the positive control
+    // exists. Seeded as terminal/published states so no worker would act on
+    // them if one were running.
+    await client.query(
+      `insert into provider_reconciliation_runs (id, organization_id, provider, state, started_at)
+       values ($1::uuid, $2::uuid, 'stripe', 'completed', now())`,
+      [randomUUID(), orgId],
+    );
+    await client.query(
+      `insert into legal_holds (id, organization_id, scope_type, hold_reason, placed_by, status, placed_at)
+       values ($1::uuid, $2::uuid, 'organization', 'seed', 'seed', 'released', now())`,
+      [randomUUID(), orgId],
+    );
+    await client.query(
+      `insert into purge_tasks (id, organization_id, scope_type, scope_id, reason, state, step)
+       values ($1::uuid, $2::uuid, 'organization', $2::uuid, 'seed', 'done', 'done')`,
+      [randomUUID(), orgId],
+    );
+    await client.query(
+      `insert into outbox_events (event_id, aggregate_type, aggregate_id, organization_id, event_type, partition_key, status, published_at)
+       values ($1::uuid, 'seed', $1::uuid, $2::uuid, 'seed.probe', 'seed', 'PUBLISHED', now())`,
+      [randomUUID(), orgId],
+    );
+    await client.query(
+      `insert into idempotency_records (organization_id, principal_id, endpoint_family, idempotency_key, request_hash, status, expires_at)
+       values ($1::uuid, 'seed', 'seed', $2, 'seed', 'SUCCEEDED', now() + interval '1 day')`,
+      [orgId, `seed:${orgId}`],
+    );
     await client.query(
       `insert into retention_policies (id, organization_id, resource_type, retention_class, keep_until_rule)
        values ($1::uuid, $2::uuid, 'artifact', 'business-history', '{"keep_days":3650}')`,
@@ -195,6 +224,7 @@ export async function cleanupOrg(pool: Pool, orgIds: string[]): Promise<void> {
       await client.query(`delete from retention_policies where organization_id = $1::uuid`, [org]);
       await client.query(`delete from export_requests where organization_id = $1::uuid`, [org]);
       await client.query(`delete from purge_tasks where organization_id = $1::uuid`, [org]);
+      await client.query(`delete from provider_reconciliation_runs where organization_id = $1::uuid`, [org]);
       await client.query(`delete from legal_holds where organization_id = $1::uuid`, [org]);
       await client.query(`delete from outbox_events where organization_id = $1::uuid`, [org]);
       await client.query(`delete from idempotency_records where organization_id = $1::uuid`, [org]);

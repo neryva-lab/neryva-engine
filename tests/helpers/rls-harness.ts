@@ -101,6 +101,12 @@ export async function assertTransactionLocal(pool: Pool, orgA: string, orgB: str
   const a = await pool.connect();
   const b = await pool.connect();
   try {
+    // SET LOCAL is transaction-scoped: the autocommit form
+    // (set_config as its own implicit transaction) loses the tenant before
+    // the next statement runs. Hold both transactions open concurrently —
+    // that is exactly the "two withOrg calls on one pool" shape under test.
+    await a.query('begin');
+    await b.query('begin');
     await a.query(`select set_config('app.current_tenant', $1, true)`, [orgA]);
     await b.query(`select set_config('app.current_tenant', $1, true)`, [orgB]);
     const [{ rows: ra }, { rows: rb }] = await Promise.all([
@@ -109,6 +115,8 @@ export async function assertTransactionLocal(pool: Pool, orgA: string, orgB: str
     ]);
     return ra[0].v === orgA && rb[0].v === orgB;
   } finally {
+    await a.query('rollback').catch(() => undefined);
+    await b.query('rollback').catch(() => undefined);
     a.release();
     b.release();
   }

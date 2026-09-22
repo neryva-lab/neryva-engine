@@ -6,6 +6,7 @@ import { decideBlockedContent, decideRequiredChecks } from '../../src/modules/as
 import { estimateCostMicros, microsToLedgerString } from '../../src/modules/assistants/model-cost.schema';
 import { fingerprintSecret, deriveExternalRef } from '../../src/modules/assistants/provider-credentials.service';
 import { partitionModelGaps } from '../../src/modules/assistants/model-catalog.service';
+import { previousMonthWindow } from '../../src/modules/billing/billing-credits.service';
 
 /**
  * Simulated E2E — no DB, no Temporal, no network.
@@ -91,10 +92,11 @@ describe('simulated E2E — Engine+MCP+Studio (no DB)', () => {
     expect(() => normalizeResidency('moon')).toThrow(/unknown residency/);
     expect(normalizeResidency('eu-west-1')).toBe('eu');
     expect(normalizeResidency('global')).toBe('default'); // org global → default
-    // Billing: half-open window [from, to) — no double-count
-    // (covered by rel-invoice-derivation.test.ts, but sanity here)
-    const from = new Date(Date.UTC(2026, 0, 1)).toISOString();
-    const to = new Date(Date.UTC(2026, 1, 1)).toISOString();
-    expect(new Date(from) < new Date(to)).toBe(true);
+    // Billing: half-open window [from, to) — no double-count. The real
+    // derivation is previousMonthWindow; adjacent months must chain exactly.
+    const june = previousMonthWindow(new Date(Date.UTC(2026, 6, 20)));
+    const july = previousMonthWindow(new Date(Date.UTC(2026, 7, 20)));
+    expect(july.from).toBe(june.to);
+    expect(new Date(june.from) < new Date(june.to)).toBe(true);
   });
 });

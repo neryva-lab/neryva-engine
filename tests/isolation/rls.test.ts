@@ -31,12 +31,4 @@ describeIfDb('RLS isolation (requires DATABASE_URL)', () => {
     const ok = await assertTransactionLocal(pool, orgA, orgB);
     expect(ok).toBe(true);
   });
-
-  it('placeholder — template for per-table isolation (copy per new tenant table)', async () => {
-    // Example shape for a future `conversations` table:
-    // const harness = new RlsHarness(pool);
-    // const result = await harness.assertTenantIsolation('conversations', orgA, orgB);
-    // expect(result.readBlocked).toBe(true);
-    expect(true).toBe(true);
-  });
 });

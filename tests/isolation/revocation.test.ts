@@ -52,19 +52,7 @@ describeIfDb('revocation immediacy — L1 sid + sessionsRevokedAt', () => {
     await pool.end();
   });
 
-  it('placeholder — template for per-principal revocation (copy for membership/key)', async () => {
-    // Real revocation flow (documented in revocation-consistency.md):
-    //  1. UPDATE oauth_sessions SET revoked_at = now() WHERE sid = subjectSid
-    //  2. Redis SET auth:deny:sid:{sid} 1 EX IDENTITY_ACCESS_TTL_SECONDS
-    //  3. RevocationLogService.record('session', sid, {...})
-    // Then:
-    //  - auth.guard resolveL1: Redis hit → 401 without DB
-    //  - after Redis flush / TTL: sessionRegistry.isSessionActive({sid}) reads revokedAt → still 401
-    //  - satellite: GET /internal/revocations?since=cursor includes the row
-    expect(true).toBe(true);
-  });
-
-  it('DB fallback would reject a sid whose oauth_sessions.revokedAt is set', async () => {
+  it('DB fallback rejects a sid whose oauth_sessions.revokedAt is set', async () => {
     const sid = subjectSid;
     await pool.query(`update oauth_sessions set revoked_at = now() where sid = $1`, [sid]);
     const { rows } = await pool.query(`select revoked_at from oauth_sessions where sid = $1`, [sid]);

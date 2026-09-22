@@ -233,11 +233,12 @@ jobs:
             END IF;
           END $$;
           GRANT CONNECT ON DATABASE neryva TO neryva_app;
-          GRANT USAGE ON SCHEMA public TO neryva_app;
-          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO neryva_app;
-          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO neryva_app;
-          ALTER DEFAULT PRIVILEGES FOR ROLE neryva IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO neryva_app;
-          ALTER DEFAULT PRIVILEGES FOR ROLE neryva IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO neryva_app;
+          GRANT USAGE ON SCHEMA public, billing, product_deployment, drizzle TO neryva_app;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, billing, product_deployment TO neryva_app;
+          GRANT SELECT ON ALL TABLES IN SCHEMA drizzle TO neryva_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, billing, product_deployment TO neryva_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE neryva IN SCHEMA public, billing, product_deployment GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO neryva_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE neryva IN SCHEMA public, billing, product_deployment GRANT USAGE, SELECT ON SEQUENCES TO neryva_app;
           SQLEOF
       - name: integration + isolation suites
         env:

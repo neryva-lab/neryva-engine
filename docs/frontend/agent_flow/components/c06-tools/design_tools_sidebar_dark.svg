@@ -1,0 +1,138 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="tnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="tdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+    <marker id="tarwLit" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
+      <path d="M2.5,1.5 L6.5,4.5 L2.5,7.5" fill="none" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="900" fill="#0A0A0E"/>
+
+  <!-- ===== builder top bar ===== -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <path d="M28 28 L22 34 L28 40" fill="none" stroke="#A1A1A6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library →</text>
+
+  <!-- ===== side menu: component palette (Tools open) ===== -->
+  <rect x="0" y="56" width="216" height="776" fill="#0E0E13"/>
+  <path d="M216 56 V832" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <text x="20" y="122" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">FOUNDATIONS</text>
+  <g>
+    <rect x="20" y="130" width="176" height="40" rx="10" fill="#14141B" stroke="#26262F"/>
+    <text x="56" y="147" font-size="12" font-weight="600" fill="#F5F5F7">Purpose</text>
+    <text x="56" y="162" font-size="10" fill="#30D158">on canvas ✓</text>
+  </g>
+  <g>
+    <rect x="20" y="176" width="176" height="40" rx="10" fill="#14141B" stroke="#26262F"/>
+    <text x="56" y="193" font-size="12" font-weight="600" fill="#F5F5F7">Model</text>
+    <text x="56" y="208" font-size="10" fill="#30D158">on canvas ✓</text>
+  </g>
+  <text x="20" y="242" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">SOURCES</text>
+  <g>
+    <rect x="20" y="250" width="176" height="40" rx="10" fill="#14141B" stroke="#26262F"/>
+    <text x="56" y="267" font-size="12" font-weight="600" fill="#F5F5F7">Knowledge</text>
+    <text x="56" y="282" font-size="10" fill="#30D158">3 pinned ✓</text>
+  </g>
+  <text x="20" y="316" font-size="10" font-weight="600" letter-spacing="0.9" fill="#A78BFA">CAPABILITIES · TOOLS OPEN</text>
+  <!-- Tools: dedicated palette section, selected + expanded -->
+  <g filter="url(#tnd)">
+    <rect x="20" y="324" width="176" height="150" rx="12" fill="#14141B" stroke="#A78BFA" stroke-width="1.5"/>
+  </g>
+  <rect x="30" y="337" width="18" height="18" rx="5" fill="#A78BFA" opacity="0.25"/>
+  <path d="M34 346 h10 M39 341 v10" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="56" y="345" font-size="12" font-weight="600" fill="#F5F5F7">Tool</text>
+  <text x="56" y="360" font-size="10" fill="#A78BFA">2 bound · T</text>
+  <g font-size="11" font-weight="500" fill="#8E8E93">
+    <rect x="30" y="368" width="156" height="28" rx="7" fill="#A78BFA" opacity="0.12"/>
+    <text x="42" y="386" fill="#F5F5F7">Attach from catalog</text>
+    <text x="42" y="414">Shadow a binding</text>
+    <text x="42" y="442">Review drift</text>
+  </g>
+  <text x="20" y="500" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">SAFEGUARDS</text>
+  <g>
+    <rect x="20" y="508" width="176" height="40" rx="10" fill="#14141B" stroke="#26262F"/>
+    <text x="56" y="525" font-size="12" font-weight="600" fill="#F5F5F7">Guardrail</text>
+    <text x="56" y="540" font-size="10" fill="#8E8E93">defaults active</text>
+  </g>
+  <g font-size="10" fill="#636366">
+    <text x="20" y="764">N search · T tools · ⇧K knowledge</text>
+    <text x="20" y="780">⌘S save · Del detach</text>
+  </g>
+
+  <!-- ===== canvas (dimmed; Tools satellite lit) ===== -->
+  <g opacity="0.4">
+    <rect x="216" y="56" width="864" height="776" fill="url(#tdots)"/>
+    <g fill="#14141B" stroke="#26262F">
+      <rect x="640" y="110" width="170" height="62" rx="14"/>
+      <rect x="640" y="214" width="170" height="62" rx="14"/>
+      <rect x="640" y="318" width="170" height="62" rx="14"/>
+    </g>
+    <g font-size="13" font-weight="600" fill="#F5F5F7">
+      <text x="688" y="139">Purpose</text><text x="688" y="243">Context</text><text x="688" y="347">Model</text>
+    </g>
+  </g>
+  <!-- lit leg: Tools → Model (capabilities feed the brain) -->
+  <path d="M812 300 C790 300 786 340 780 345" fill="none" stroke="#A78BFA" stroke-width="1.5" marker-end="url(#tarwLit)"/>
+  <!-- Tools satellite: hash-pin rows with effect × approval × shadow -->
+  <rect x="852" y="196" width="228" height="8" rx="4" fill="none" stroke="#A78BFA" stroke-opacity="0.25" stroke-width="8"/>
+  <g filter="url(#tnd)">
+    <rect x="860" y="204" width="212" height="252" rx="16" fill="#14141B" stroke="#A78BFA" stroke-width="1.5"/>
+  </g>
+  <text x="880" y="231" font-size="13" font-weight="600" fill="#F5F5F7">Tools</text>
+  <text x="1056" y="231" font-size="10" text-anchor="end" fill="#A78BFA">2 bound</text>
+  <g font-size="11">
+    <rect x="872" y="241" width="188" height="52" rx="9" fill="#0A0A0E" stroke="#26262F"/>
+    <circle cx="886" cy="262" r="4" fill="#30D158"/>
+    <text x="898" y="259" font-weight="600" fill="#F5F5F7">lookup_ticket</text>
+    <text x="898" y="273" font-size="10" fill="#8E8E93">READ_ONLY · approval none · live</text>
+    <rect x="1010" y="252" width="38" height="16" rx="8" fill="none" stroke="#3A3A3F"/>
+    <text x="1029" y="264" font-size="9" text-anchor="middle" fill="#8E8E93">v3 ✓</text>
+    <rect x="872" y="297" width="188" height="62" rx="9" fill="#0A0A0E" stroke="#FF9F0A" stroke-opacity="0.5"/>
+    <circle cx="886" cy="318" r="4" fill="#FF9F0A"/>
+    <text x="898" y="315" font-weight="600" fill="#F5F5F7">refund_payment</text>
+    <text x="898" y="329" font-size="10" fill="#FF9F0A">DESTRUCTIVE · approval required</text>
+    <text x="898" y="343" font-size="10" fill="#0A84FF">shadow — simulated, executes nothing</text>
+    <rect x="872" y="363" width="188" height="42" rx="9" fill="#0A0A0E" stroke="#FF453A" stroke-opacity="0.4"/>
+    <circle cx="886" cy="384" r="4" fill="#FF453A"/>
+    <text x="898" y="381" font-weight="600" fill="#F5F5F7">sync_crm</text>
+    <text x="898" y="395" font-size="10" fill="#FF453A">pin stale — re-pin to v7</text>
+  </g>
+  <rect x="872" y="409" width="188" height="22" rx="11" fill="#A78BFA" opacity="0.12"/>
+  <text x="966" y="424" font-size="11" text-anchor="middle" fill="#A78BFA">+ Bind from catalog</text>
+  <text x="880" y="444" font-size="10" fill="#636366">unbind ≠ delete · stays in catalog</text>
+
+  <!-- ===== inspector (dimmed) ===== -->
+  <g opacity="0.4">
+    <rect x="1080" y="56" width="360" height="776" fill="#0E0E13"/>
+    <path d="M1080 56 V832" stroke="#26262F"/>
+    <text x="1104" y="94" font-size="17" font-weight="600" fill="#F5F5F7">Tools</text>
+    <text x="1104" y="114" font-size="12" fill="#8E8E93">2 bound · 1 needs approval setup</text>
+    <rect x="1104" y="136" width="312" height="60" rx="12" fill="#14141B" stroke="#26262F"/>
+    <rect x="1104" y="204" width="312" height="76" rx="12" fill="#14141B" stroke="#FF9F0A" stroke-opacity="0.5"/>
+    <rect x="1104" y="288" width="312" height="60" rx="12" fill="#14141B" stroke="#FF453A" stroke-opacity="0.35"/>
+  </g>
+
+  <!-- ===== bottom action bar ===== -->
+  <rect x="0" y="832" width="1440" height="68" fill="#14141B"/>
+  <path d="M0 832 H1440" stroke="#26262F"/>
+  <circle cx="28" cy="866" r="4" fill="#A78BFA"/>
+  <text x="40" y="870" font-size="12" fill="#8E8E93">Tools are optional. 1 pin stale — publish refuses until re-pinned.</text>
+  <text x="1064" y="871" font-size="13" text-anchor="middle" fill="#A1A1A6">Skip for now</text>
+  <rect x="1212" y="846" width="128" height="40" rx="12" fill="#0A84FF"/>
+  <text x="1276" y="871" font-size="14" font-weight="600" text-anchor="middle" fill="#FFF">Continue</text>
+</svg>

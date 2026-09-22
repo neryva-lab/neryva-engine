@@ -1,6 +1,9 @@
-# C04. Brain — SPEC (STATUS: NOT STARTED)
+# C04. Model (Brain) — SPEC (STATUS: SIGNED OFF 2026-09-17)
 
 > Design position: first blocking step ("Choose a model"). Depends on: C01.
+> Implementation: `console/neryva-website/src/sections/pages/products/agent-studio/`
+> (`builder/` Brain satellite + inspector + `agents/detail/BrainPanel.tsx`,
+> PLAN.md). First component with a dedicated detail section alongside the builder.
 
 ## Engine binds (verified 2026-09-17)
 
@@ -11,14 +14,30 @@
 - Publish enforces: unknown models rejected, residency fail-closed, per-model disable reasons.
 - Compromised/revoked credential on the pinned model = model unusable (new reason row in the Brain inspector; engine has no 4th code — label it as derived, e.g. `credential_compromised (derived)`).
 
-## Design (fill in the C04 pass)
+## Design (built in the C04 pass — see PLAN.md for the full contract)
 
-- [ ] Profile cards (Clerk/Scholar/Creator) with exact parameter map, inspectable, unusable-profile disabled-with-reason.
-- [ ] Resolved-model row: usable vs per-reason states + inline fix per reason.
-- [ ] Provider connect inline panel (key-only form, fingerprint microcopy, step-up inline, resume + refetch).
-- [ ] Fallback control (switch + order list in advanced).
-- [ ] Advanced dial (catalog multi-pick ≤16 with reasons, params within engine ranges, caps pre-checked per keystroke).
-- [ ] Permission variants (viewer/developer vs owner/admin for credentials).
+- [x] Profile cards (Clerk/Scholar/Creator) with exact parameter map, inspectable, unusable-profile disabled-with-reason.
+      Maps shown before apply; computed match badge; all values range-pinned by test.
+      (No profile is ever "unusable" — profiles are param presets, availability lives on models.)
+- [x] Resolved-model row: usable vs per-reason states + inline fix per reason.
+      Primary + fallback-next line; all-unusable → attention + first-fix CTA;
+      derived `credential_compromised (derived)` row with rotate fix.
+- [x] Provider connect inline panel (key-only form, fingerprint microcopy, step-up inline, resume + refetch).
+      Hook invalidation refreshes picker availability (stated in UI where relevant).
+- [x] Fallback control (switch + order list in advanced).
+      Switch + list-order semantics + order strip in the picker (always visible —
+      the chain is policy, not advanced); honesty line about availability-vs-difficulty.
+- [x] Advanced dial (catalog multi-pick ≤16 with reasons, params within engine ranges, caps pre-checked per keystroke).
+      Search, disabled-with-reason rows, cost labels, cap hold; temp/top_p/schema
+      locally gated (caps gap verified), max_output via caps.
+- [x] Permission variants (viewer/developer vs owner/admin for credentials).
+      Reads open to list roles; mutates owner/admin with denied copy; revoke
+      proof-free stated; compromised pages owners (success toast states it).
+- [x] Dedicated detail section (`agents/detail/BrainPanel.tsx` docked between
+      System instructions and Versions): serving chain, params + preset, costs,
+      credential status with derived consequences, deep-links out, zero writes.
+      Served-reality counts CUT (no per-run model source exists — verified twice;
+      mock keeps it as future state, C13/C15 own it if the engine ever exposes it).
 
 ## Open questions
 
@@ -26,4 +45,12 @@
 
 ## Exit gate
 
-- Per `../README.md` component gate. Flip status to SIGNED OFF with date.
+- Per `../README.md` component gate. Evidence 2026-09-17:
+  `brain-model.test.ts` (ranges/reasons/order/schema), `ModelPicker.test.tsx`,
+  `CredentialsPanel.test.tsx` (fingerprints, validation, revoke-with-reason +
+  paging, rotate, permission variants), `BrainSection.test.tsx` (fallback writes,
+  presets, holds, reorder, 409/412, viewer), `BrainPanel.test.tsx` (chain, params,
+  costs, derived consequences, deep-links, no-write rule), projector usability
+  suite, store defaults, hook parser extensions; C02 suite green unmodified after
+  ConflictDialog + debounce extraction; eslint clean on all touched files; `tsc -b`
+  shows only the pre-existing, unrelated `ResearchPapers.tsx` motion-typing error.

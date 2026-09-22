@@ -1,6 +1,6 @@
-# C06. Tools — SPEC (STATUS: NOT STARTED)
+# C06. Tools — SPEC (STATUS: SIGNED OFF 2026-09-17)
 
-> Design position: Behavior ("Hands"). Depends on: C01. Builder invents no tools — catalog attach only.
+> Design position: behavior section (model + tools + advanced). Depends on: C01. Builder invents no tools — catalog attach only.
 
 ## Engine binds (verified 2026-09-17)
 
@@ -11,16 +11,24 @@
 - **Shadow bindings**: simulated result, executes nothing; authorize path denies on perimeter drift (`mcp-authority.service.ts:1376-1382`).
 - Tool writes: upsert/from-template = owner,admin,developer; enabled-toggle = owner,admin. Credential shown never.
 
-## Design (fill in the C06 pass)
+## Design (built 2026-09-17 — PLAN.md FINAL, all traces verified)
 
-- [ ] Catalog drawer rows: name, effect class, approval requirement, enabled, credential, schema-pin state, environment, egress, shadow badge.
-- [ ] Tool chips on the map with approval/effect/shadow/drift states.
-- [ ] Drift → review-change → re-pin flow. Approval-required → request/approve inline.
-- [ ] Remove = unpin only (microcopy).
+- [x] Catalog drawer rows: name, effect class, approval requirement, enabled, credential, schema-pin state, environment, egress, shadow badge.
+- [x] Tool chips on the map with approval/effect/shadow/drift states.
+- [x] Drift → review-change → re-pin flow. Approval-required → request/approve inline (display + Approvals deep link — no pre-approve endpoint exists).
+- [x] Remove = unpin only (microcopy).
+- [x] Entry-name rule resolved: catalog `^[a-z][a-z0-9_]{1,63}$`, entries contract `^[a-z0-9_]+$` min 2, never leading-letter.
+- [x] Perimeter default corrected: catalog `external_gateway` (built-ins `in_process`); effective environment shown, never default-claimed.
+- [x] Console `execution_mode` gap closed (type + both mappings + tests); `effectiveApproval` understated cell fixed.
+- [x] Builder satellite grading (ready/attention/info) + read-only detail panel + Tools library keep-and-extend (filters, drawer, edit, per-row pending, rate validation, perimeter).
 
 ## Open questions
 
-- **Tool-name leading-letter rule UNVERIFIED** (README correction 12). Do not enforce `^[a-z]…` until proven; contract regex governs.
+- ~~**Tool-name leading-letter rule UNVERIFIED** (README correction 12). Do not enforce `^[a-z]…` until proven; contract regex governs.~~
+  RESOLVED 2026-09-17: catalog names REQUIRE leading letter (`tool-catalog.service.ts:47,434`,
+  console `TOOL_NAME_PATTERN` mirrors it); consumer entry names contract-only (`^[a-z0-9_]+$`,
+  min 2 — engine min 1, no regex). Two objects, two rules. README correction 12 stands (never
+  enforce leading-letter on entries).
 
 ## Exit gate
 

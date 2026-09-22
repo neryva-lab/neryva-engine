@@ -1,0 +1,194 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="n1" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.04"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F5F5F7"/>
+
+  <!-- ===== PRIMARY RAIL (64) : domains only, never destinations ===== -->
+  <rect width="64" height="900" fill="#FFF"/>
+  <path d="M64 0 V900" stroke="#E5E5EA"/>
+  <rect x="18" y="14" width="28" height="28" rx="8" fill="#1D1D1F"/>
+  <text x="32" y="33" font-size="14" font-weight="700" text-anchor="middle" fill="#FFF">N</text>
+  <g font-size="7.5" fill="#6E6E73" text-anchor="middle">
+    <rect x="8" y="62" width="48" height="44" rx="10" fill="none"/>
+    <circle cx="32" cy="76" r="7" fill="none" stroke="#A1A1A6" stroke-width="1.4"/>
+    <text x="32" y="98">Home</text>
+    <circle cx="32" cy="128" r="7" fill="none" stroke="#A1A1A6" stroke-width="1.4"/>
+    <path d="M28 132 l3 3 l5 -6" stroke="#A1A1A6" stroke-width="1.3" fill="none"/>
+    <text x="32" y="150">Chat</text>
+  </g>
+  <rect x="8" y="158" width="48" height="48" rx="12" fill="#EAF1FF"/>
+  <rect x="22" y="168" width="20" height="16" rx="4" fill="none" stroke="#0071E3" stroke-width="1.6"/>
+  <path d="M26 180 h12" stroke="#0071E3" stroke-width="1.6" stroke-linecap="round"/>
+  <text x="32" y="198" font-size="7.5" text-anchor="middle" fill="#0058B0" font-weight="600">Agents</text>
+  <g font-size="7.5" fill="#6E6E73" text-anchor="middle">
+    <circle cx="32" cy="226" r="7" fill="none" stroke="#A1A1A6" stroke-width="1.4"/>
+    <path d="M29 226 h6 M32 223 v6" stroke="#A1A1A6" stroke-width="1.3"/>
+    <text x="32" y="246">Knowl.</text>
+    <circle cx="32" cy="274" r="7" fill="none" stroke="#A1A1A6" stroke-width="1.4"/>
+    <path d="M28 278 v-6 M28 274 l-2 -2 M28 274 l2 -2" stroke="#A1A1A6" stroke-width="1.3" fill="none"/>
+    <text x="32" y="294">Insights</text>
+    <rect x="25" y="310" width="14" height="14" rx="4" fill="none" stroke="#A1A1A6" stroke-width="1.4"/>
+    <text x="32" y="342">Platform</text>
+    <circle cx="32" cy="362" r="7" fill="none" stroke="#A1A1A6" stroke-width="1.4"/>
+    <path d="M32 359 v3" stroke="#A1A1A6" stroke-width="1.3"/>
+    <text x="32" y="382">Settings</text>
+  </g>
+  <circle cx="32" cy="862" r="14" fill="#EAF1FF"/>
+  <text x="32" y="867" font-size="11" font-weight="600" text-anchor="middle" fill="#0071E3">AS</text>
+
+  <!-- ===== SECONDARY SIDEBAR (232) : Agents section only ===== -->
+  <rect x="64" y="0" width="232" height="900" fill="#FFF"/>
+  <path d="M296 0 V900" stroke="#E5E5EA"/>
+  <text x="88" y="34" font-size="15" font-weight="600" fill="#1D1D1F">Agents</text>
+  <text x="88" y="52" font-size="11" fill="#A1A1A6">Build and operate agents</text>
+  <rect x="88" y="176" width="184" height="34" rx="10" fill="#F5F5F7"/>
+  <g font-size="13" font-weight="500">
+    <text x="112" y="144" fill="#1D1D1F" font-weight="600">Overview</text>
+    <text x="112" y="198" fill="#6E6E73">All agents</text>
+    <text x="112" y="232" fill="#6E6E73">Templates</text>
+    <text x="112" y="266" fill="#6E6E73">Conversations</text>
+    <text x="112" y="300" fill="#6E6E73">Evaluations</text>
+  </g>
+  <rect x="88" y="128" width="3" height="20" rx="1.5" fill="#0071E3"/>
+  <g font-size="10" fill="#A1A1A6" text-anchor="end">
+    <text x="272" y="198">12</text>
+    <text x="272" y="232">20</text>
+    <text x="272" y="266">48</text>
+  </g>
+  <text x="272" y="300" font-size="10" text-anchor="end" fill="#B25E00">1 blocked</text>
+  <text x="88" y="852" font-size="11" fill="#A1A1A6">Provisioning: 1 seeding…</text>
+  <text x="88" y="870" font-size="11" fill="#0071E3">View status</text>
+
+  <!-- ===== TOPBAR ===== -->
+  <rect x="296" y="0" width="1144" height="56" fill="#FFF" opacity="0.94"/>
+  <path d="M296 56 H1440" stroke="#E5E5EA"/>
+  <text x="320" y="35" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="372" y="35" font-size="13" fill="#C7C7CC">/</text>
+  <text x="384" y="35" font-size="13" font-weight="600" fill="#1D1D1F">Overview</text>
+  <rect x="900" y="14" width="280" height="28" rx="8" fill="#F5F5F7"/>
+  <text x="916" y="32" font-size="12" fill="#A1A1A6">Search agents, templates, models…  ⌘K</text>
+  <circle cx="1330" cy="28" r="4" fill="#FF453A"/>
+  <circle cx="1330" cy="28" r="8" fill="none" stroke="#FF453A" stroke-opacity="0.2" stroke-width="3"/>
+  <text x="1352" y="32" font-size="12" fill="#6E6E73">3 need you</text>
+
+  <!-- ===== CONTENT ===== -->
+  <text x="336" y="104" font-size="26" font-weight="600" letter-spacing="-0.4" fill="#1D1D1F">Agents</text>
+  <text x="336" y="128" font-size="14" fill="#6E6E73">12 agents · 9 live · 3 need you</text>
+  <rect x="1236" y="84" width="130" height="40" rx="12" fill="#0071E3" filter="url(#n1)"/>
+  <text x="1301" y="109" font-size="14" font-weight="600" text-anchor="middle" fill="#FFF">New agent</text>
+  <text x="1220" y="109" font-size="11" text-anchor="end" fill="#A1A1A6">⌘N</text>
+
+  <!-- health strip -->
+  <g filter="url(#n1)" font-size="13">
+    <rect x="336" y="152" width="180" height="76" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+    <rect x="528" y="152" width="180" height="76" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+    <rect x="720" y="152" width="180" height="76" rx="14" fill="#FFF" stroke="#FF9F0A" stroke-opacity="0.4"/>
+    <rect x="912" y="152" width="180" height="76" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+    <rect x="1104" y="152" width="180" height="76" rx="14" fill="#FFF" stroke="#E5E5EA"/>
+  </g>
+  <g font-size="22" font-weight="600" fill="#1D1D1F">
+    <text x="356" y="186">9</text><text x="548" y="186">2</text><text x="740" y="186">3</text>
+    <text x="932" y="186">1</text><text x="1124" y="186">0</text>
+  </g>
+  <g font-size="11" fill="#6E6E73">
+    <text x="356" y="208">Live</text><text x="548" y="208">Draft</text>
+    <text x="740" y="208">Needs attention</text><text x="932" y="208">Degraded</text>
+    <text x="1124" y="208">Blocked</text>
+  </g>
+  <g font-size="11" fill="#0071E3">
+    <text x="356" y="222">View live →</text><text x="548" y="222">Resume →</text>
+    <text x="740" y="222">Fix now →</text><text x="932" y="222">Review →</text>
+  </g>
+
+  <!-- needs-attention queue -->
+  <text x="336" y="270" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">NEEDS ATTENTION · 3</text>
+  <g filter="url(#n1)">
+    <rect x="336" y="282" width="592" height="64" rx="12" fill="#FFF" stroke="#E5E5EA"/>
+    <rect x="336" y="354" width="592" height="64" rx="12" fill="#FFF" stroke="#E5E5EA"/>
+    <rect x="336" y="426" width="592" height="64" rx="12" fill="#FFF" stroke="#E5E5EA"/>
+  </g>
+  <g>
+    <circle cx="360" cy="306" r="4.5" fill="#FF453A"/><circle cx="360" cy="378" r="4.5" fill="#FF9F0A"/>
+    <circle cx="360" cy="378" r="8.5" fill="none" stroke="#FF9F0A" stroke-opacity="0.22" stroke-width="4"/>
+    <circle cx="360" cy="450" r="4.5" fill="#FF9F0A"/>
+  </g>
+  <g font-size="13" font-weight="600" fill="#1D1D1F">
+    <text x="378" y="302">Billing Support — evaluation BLOCK</text>
+    <text x="378" y="374">Support Agent — Anthropic credential compromised</text>
+    <text x="378" y="446">Refund Specialist — knowledge coverage 62%</text>
+  </g>
+  <g font-size="11" fill="#6E6E73">
+    <text x="378" y="320">2 critical failures · re-evaluate to publish</text>
+    <text x="378" y="392">affects 2 published agents + drafts — rotate or revoke with reason</text>
+    <text x="378" y="464">faq-2026.pdf re-embedding · wait or acknowledge degraded</text>
+  </g>
+  <g font-size="12" fill="#0071E3">
+    <text x="884" y="306" text-anchor="end">View cases</text>
+    <text x="884" y="378" text-anchor="end">Review credential</text>
+    <text x="884" y="450" text-anchor="end">View progress</text>
+  </g>
+
+  <!-- recent agents -->
+  <text x="336" y="530" font-size="11" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">RECENT AGENTS</text>
+  <g filter="url(#n1)"><rect x="336" y="542" width="592" height="252" rx="14" fill="#FFF" stroke="#E5E5EA"/></g>
+  <g font-size="13" font-weight="600" fill="#1D1D1F">
+    <text x="360" y="576">Billing Support</text>
+    <text x="360" y="624">Support Agent</text>
+    <text x="360" y="672">Refund Specialist</text>
+    <text x="360" y="720">Sales Researcher</text>
+  </g>
+  <g font-size="11" fill="#6E6E73">
+    <text x="360" y="594">v3 live · edited 2h ago</text>
+    <text x="360" y="642">v1 live · degraded until Fri</text>
+    <text x="360" y="690">draft · 60% complete</text>
+    <text x="360" y="738">v2 live · eval PASS on hash</text>
+  </g>
+  <g font-size="10">
+    <rect x="830" y="562" width="74" height="20" rx="10" fill="#FFF4E5" stroke="#FF9F0A" stroke-opacity="0.35"/>
+    <text x="867" y="576" text-anchor="middle" fill="#B25E00">attention</text>
+    <rect x="830" y="610" width="74" height="20" rx="10" fill="#FFF8EE" stroke="#FF9F0A" stroke-opacity="0.35"/>
+    <text x="867" y="624" text-anchor="middle" fill="#B25E00">degraded</text>
+    <rect x="830" y="658" width="52" height="20" rx="10" fill="#F5F5F7" stroke="#E5E5EA"/>
+    <text x="856" y="672" text-anchor="middle" fill="#6E6E73">Draft</text>
+    <rect x="830" y="706" width="44" height="20" rx="10" fill="#EAF9EF" stroke="#34C759" stroke-opacity="0.3"/>
+    <text x="852" y="720" text-anchor="middle" fill="#1E7A3C">Live</text>
+  </g>
+  <text x="904" y="774" font-size="12" text-anchor="end" fill="#0071E3">All agents →</text>
+
+  <!-- aside : models + templates -->
+  <g filter="url(#n1)"><rect x="960" y="282" width="324" height="196" rx="14" fill="#FFF" stroke="#E5E5EA"/></g>
+  <text x="984" y="312" font-size="13" font-weight="600" fill="#1D1D1F">Models you can use</text>
+  <text x="1260" y="312" font-size="11" text-anchor="end" fill="#0071E3">Manage →</text>
+  <g font-size="12" fill="#1D1D1F">
+    <text x="984" y="342">Claude Sonnet 4.5</text>
+    <text x="984" y="368">GPT-5 mini</text>
+    <text x="984" y="394">Claude Haiku 4.5</text>
+  </g>
+  <g font-size="11" fill="#6E6E73">
+    <text x="984" y="358">Anthropic · usable</text>
+    <text x="984" y="384">OpenAI · usable</text>
+    <text x="984" y="410">Anthropic · compromised credential</text>
+  </g>
+  <g>
+    <circle cx="1252" cy="338" r="4" fill="#34C759"/>
+    <circle cx="1252" cy="364" r="4" fill="#34C759"/>
+    <circle cx="1252" cy="390" r="4" fill="#FF453A"/>
+  </g>
+  <text x="984" y="448" font-size="11" fill="#A1A1A6">1 model unusable — connect or rotate a credential.</text>
+
+  <g filter="url(#n1)"><rect x="960" y="494" width="324" height="150" rx="14" fill="#FFF" stroke="#E5E5EA"/></g>
+  <text x="984" y="524" font-size="13" font-weight="600" fill="#1D1D1F">Start from a template</text>
+  <text x="984" y="544" font-size="11" fill="#6E6E73">20 curated starting points. 14 compatible,</text>
+  <text x="984" y="560" font-size="11" fill="#6E6E73">6 need setup — never blocked.</text>
+  <text x="984" y="596" font-size="12" font-weight="600" fill="#FFF"/>
+  <rect x="984" y="576" width="150" height="34" rx="10" fill="#1D1D1F"/>
+  <text x="1059" y="598" font-size="13" font-weight="600" text-anchor="middle" fill="#FFF">Browse templates</text>
+
+  <text x="336" y="852" font-size="11" fill="#A1A1A6">Every amber row carries its fix. Nothing here links away without a return.</text>
+</svg>

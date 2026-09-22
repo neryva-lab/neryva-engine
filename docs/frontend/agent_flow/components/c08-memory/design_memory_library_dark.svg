@@ -1,0 +1,115 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="ynd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Libraries</text>
+  <text x="104" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Memory</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#8E8E93">owner</text>
+
+  <text x="48" y="104" font-size="20" font-weight="600" fill="#F5F5F7">Memory</text>
+  <text x="48" y="126" font-size="13" fill="#8E8E93">What your agents remember. Visibility defaults to organization: treat content here as shared unless scoped otherwise.</text>
+
+  <!-- org policy strip (NEW) -->
+  <g filter="url(#ynd)">
+    <rect x="48" y="142" width="1344" height="52" rx="10" fill="#14141B" stroke="#26262F"/>
+    <circle cx="72" cy="168" r="4" fill="#30D158"/>
+    <text x="86" y="172" font-size="12" fill="#A1A1A6">Scrub: Redact — PII scrubbed before embedding</text>
+    <circle cx="470" cy="168" r="4" fill="#30D158"/>
+    <text x="484" y="172" font-size="12" fill="#A1A1A6">Default TTL: 30 days</text>
+    <text x="1330" y="172" font-size="12" text-anchor="end" fill="#0A84FF">Workspace settings ›</text>
+  </g>
+
+  <!-- scope + search + purge -->
+  <g font-size="12">
+    <rect x="48" y="210" width="330" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="62" y="231" fill="#F5F5F7">Organization · User · Assistant</text>
+    <rect x="386" y="210" width="320" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="400" y="231" fill="#636366">Search content…</text>
+    <rect x="1222" y="210" width="170" height="34" rx="9" fill="none" stroke="#FF453A"/>
+    <text x="1307" y="231" text-anchor="middle" fill="#FF453A">Purge by text…</text>
+  </g>
+
+  <!-- table -->
+  <g filter="url(#ynd)">
+    <rect x="48" y="260" width="900" height="300" rx="12" fill="#14141B" stroke="#26262F"/>
+    <g font-size="11" font-weight="600" letter-spacing="0.7" fill="#8E8E93">
+      <text x="72" y="288">CONTENT</text><text x="470" y="288">VISIBILITY</text>
+      <text x="600" y="288">EXPIRES</text><text x="730" y="288">CREATED</text>
+    </g>
+    <path d="M48 302 H948" stroke="#26262F"/>
+    <g font-size="13" fill="#F5F5F7">
+      <text x="72" y="334">Ships on Fridays; freeze Thursdays…</text>
+      <rect x="470" y="320" width="96" height="22" rx="11" fill="#0A84FF" opacity="0.16"/>
+      <text x="518" y="335" text-anchor="middle" font-size="11" fill="#0A84FF">organization</text>
+      <text x="600" y="334" fill="#A1A1A6">in 27 days · Oct 15</text>
+      <text x="730" y="334" fill="#A1A1A6">Sep 10</text>
+    </g>
+    <path d="M48 356 H948" stroke="#1E1E25"/>
+    <g font-size="13" fill="#F5F5F7">
+      <text x="72" y="388">Prefers morning standup notes…</text>
+      <rect x="470" y="374" width="64" height="22" rx="11" fill="#FF9F0A" opacity="0.16"/>
+      <text x="502" y="389" text-anchor="middle" font-size="11" fill="#FF9F0A">private</text>
+      <text x="600" y="388" fill="#A1A1A6">no TTL — kept until deleted</text>
+      <text x="730" y="388" fill="#A1A1A6">Sep 12</text>
+    </g>
+    <path d="M48 410 H948" stroke="#1E1E25"/>
+    <text x="72" y="438" font-size="12" fill="#8E8E93">Delete tombstones: retrieval stops immediately. Audited.</text>
+    <text x="72" y="458" font-size="12" fill="#8E8E93">Thread memories live on their conversation, not here.</text>
+    <text x="72" y="530" font-size="12" fill="#636366">No proposals queue exists yet — approvals stay explicit where they surface.</text>
+  </g>
+
+  <!-- drawer -->
+  <g filter="url(#ynd)">
+    <rect x="964" y="260" width="428" height="300" rx="12" fill="#14141B" stroke="#3A3A42"/>
+    <text x="988" y="290" font-size="14" font-weight="600" fill="#F5F5F7">Memory detail</text>
+    <text x="1368" y="290" font-size="12" text-anchor="end" fill="#8E8E93">Esc closes</text>
+    <text x="988" y="316" font-size="12" fill="#A1A1A6">Ships on Fridays; freeze Thursdays for release trains.</text>
+    <text x="988" y="344" font-size="12" fill="#8E8E93">scope: organization · visibility: organization</text>
+    <text x="988" y="362" font-size="12" fill="#8E8E93">from: run 8f3a… · confidence 0.92</text>
+    <text x="988" y="380" font-size="12" fill="#8E8E93">valid: Sep 10 → Oct 15 · supersedes: —</text>
+    <text x="988" y="398" font-size="12" fill="#8E8E93">embedding: granted-embed-3 · created Sep 10 by ava@acme.co</text>
+    <rect x="988" y="416" width="120" height="30" rx="8" fill="none" stroke="#3A3A42"/>
+    <text x="1048" y="435" text-anchor="middle" font-size="12" fill="#A1A1A6">Copy content</text>
+    <rect x="1116" y="416" width="90" height="30" rx="8" fill="none" stroke="#FF453A"/>
+    <text x="1161" y="435" text-anchor="middle" font-size="12" fill="#FF453A">Delete</text>
+  </g>
+
+  <!-- composer (migrated) -->
+  <g filter="url(#ynd)">
+    <rect x="48" y="580" width="900" height="190" rx="12" fill="#14141B" stroke="#26262F"/>
+    <text x="72" y="610" font-size="14" font-weight="600" fill="#F5F5F7">New memory</text>
+    <text x="72" y="630" font-size="12" fill="#8E8E93">Moved here from Knowledge — one surface remembers. Moved, not copied.</text>
+    <rect x="72" y="644" width="852" height="52" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="86" y="674" font-size="12" fill="#636366">The org ships on Fridays; freeze Thursdays… (7,912 / 8,192)</text>
+    <g font-size="12">
+      <rect x="72" y="706" width="130" height="30" rx="15" fill="#0A84FF" opacity="0.9"/>
+      <text x="137" y="725" text-anchor="middle" fill="#FFFFFF" font-weight="600">Organization</text>
+      <rect x="208" y="706" width="70" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+      <text x="243" y="725" text-anchor="middle" fill="#A1A1A6">User</text>
+    </g>
+    <rect x="804" y="706" width="120" height="30" rx="8" fill="#0A84FF"/>
+    <text x="864" y="725" text-anchor="middle" font-size="12" font-weight="600" fill="#FFFFFF">Save memory</text>
+  </g>
+
+  <!-- purge modal -->
+  <g filter="url(#ynd)">
+    <rect x="440" y="800" width="560" height="280" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="472" y="840" font-size="15" font-weight="600" fill="#F5F5F7">Purge memories by text</text>
+    <text x="472" y="862" font-size="12" fill="#FF9F0A">Every scope. Tombstoned — retrieval stops immediately.</text>
+    <rect x="472" y="878" width="496" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="486" y="899" font-size="12" fill="#F5F5F7">acme-contract-2024 (18 / 3 min)</text>
+    <text x="472" y="930" font-size="12" fill="#8E8E93">3–128 characters, literal match. The query itself is never stored —</text>
+    <text x="472" y="946" font-size="12" fill="#8E8E93">the audit keeps a hash, the count, and the ids.</text>
+    <rect x="768" y="1022" width="200" height="36" rx="9" fill="#FF453A"/>
+    <text x="868" y="1044" text-anchor="middle" font-size="13" font-weight="600" fill="#FFFFFF">Purge 14 matches</text>
+  </g>
+</svg>

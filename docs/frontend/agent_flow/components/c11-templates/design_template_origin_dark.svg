@@ -1,0 +1,85 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">New agent</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library</text>
+
+  <rect x="0" y="56" width="216" height="1164" fill="#0E0E13"/>
+  <path d="M216 56 V1220" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <circle cx="30" cy="116" r="5" fill="#636366"/><text x="44" y="120" font-size="13" fill="#8E8E93">Purpose</text>
+  <text x="20" y="160" font-size="11" fill="#636366">The circuit wakes up</text>
+  <text x="20" y="176" font-size="11" fill="#636366">after the origin choice.</text>
+
+  <rect x="216" y="56" width="1224" height="1164" fill="#0A0A0E"/>
+  <rect x="216" y="56" width="1224" height="1164" fill="url(#bdots)"/>
+
+  <text x="500" y="150" font-size="22" font-weight="600" fill="#F5F5F7">Start from a template, or start blank</text>
+  <text x="500" y="174" font-size="13" fill="#8E8E93">Templates copy into a draft — never live. Install is one transaction; fulfillment happens per org.</text>
+
+  <g filter="url(#bnd)">
+    <rect x="380" y="220" width="320" height="200" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <circle cx="408" cy="256" r="12" fill="#A78BFA" opacity="0.2"/>
+    <text x="408" y="261" font-size="12" text-anchor="middle" fill="#A78BFA">✦</text>
+    <text x="432" y="252" font-size="14" font-weight="600" fill="#F5F5F7">Start from template</text>
+    <text x="404" y="280" font-size="12" fill="#A1A1A6">Support concierge · 4 tools · 3 sources</text>
+    <text x="404" y="298" font-size="12" fill="#A1A1A6">2 models · seeded eval suite</text>
+    <rect x="404" y="318" width="150" height="24" rx="12" fill="#30D158" opacity="0.16"/>
+    <text x="416" y="334" font-size="11" fill="#30D158">compatible</text>
+    <rect x="404" y="356" width="200" height="36" rx="9" fill="#0A84FF"/>
+    <text x="504" y="379" font-size="13" font-weight="600" text-anchor="middle" fill="#FFFFFF">Browse gallery →</text>
+  </g>
+
+  <g filter="url(#bnd)">
+    <rect x="740" y="220" width="320" height="200" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <circle cx="768" cy="256" r="12" fill="#8E8E93" opacity="0.2"/>
+    <text x="768" y="261" font-size="12" text-anchor="middle" fill="#8E8E93">○</text>
+    <text x="792" y="252" font-size="14" font-weight="600" fill="#F5F5F7">Start blank</text>
+    <text x="764" y="280" font-size="12" fill="#A1A1A6">Name it, write the purpose,</text>
+    <text x="764" y="298" font-size="12" fill="#A1A1A6">configure every slot by hand.</text>
+    <rect x="764" y="356" width="200" height="36" rx="9" fill="transparent" stroke="#3A3A42"/>
+    <text x="864" y="379" font-size="13" text-anchor="middle" fill="#A1A1A6">Name the agent →</text>
+  </g>
+
+  <text x="380" y="470" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">IN THE GALLERY · EVERY CARD SHOWS</text>
+
+  <g filter="url(#bnd)">
+    <rect x="380" y="486" width="680" height="120" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="404" y="518" font-size="13" font-weight="600" fill="#F5F5F7">support-concierge@3</text>
+    <rect x="590" y="504" width="52" height="21" rx="10.5" fill="#30D158" opacity="0.16"/>
+    <text x="616" y="518" font-size="11" text-anchor="middle" fill="#30D158">stable</text>
+    <rect x="650" y="504" width="78" height="21" rx="10.5" fill="#30D158" opacity="0.16"/>
+    <text x="689" y="518" font-size="11" text-anchor="middle" fill="#30D158">compatible</text>
+    <text x="404" y="544" font-size="12" fill="#A1A1A6">4 tools · 3 knowledge · 2 models · seeded eval suite</text>
+    <text x="404" y="564" font-size="11" fill="#FF9F0A">▲ major update available — Install v4.0.0 as new assistant</text>
+    <text x="404" y="586" font-size="11" fill="#8E8E93">Installed badge carries no link — entries carry no assistant id.</text>
+  </g>
+
+  <text x="380" y="648" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">AFTER INSTALL · THE MAP (BUILDER BANNER)</text>
+
+  <g filter="url(#bnd)">
+    <rect x="380" y="664" width="680" height="150" rx="14" fill="#14141B" stroke="#A78BFA" stroke-width="1.5"/>
+    <text x="404" y="696" font-size="13" font-weight="600" fill="#F5F5F7">Installed support-concierge@3 as draft</text>
+    <rect x="404" y="706" width="150" height="22" rx="11" fill="#A78BFA" opacity="0.16"/>
+    <text x="416" y="721" font-size="11" fill="#A78BFA">slug@version badge</text>
+    <text x="404" y="748" font-size="12" fill="#A1A1A6">✓ knowledge 3/3 READY · ✓ tools 4/4 · … credentials need an owner</text>
+    <text x="404" y="768" font-size="12" fill="#A1A1A6">… test-run, then evaluate — nothing prefilled is re-asked</text>
+    <text x="404" y="792" font-size="11" fill="#0A84FF">Open repair checklist › · Recorded in Audit ›</text>
+  </g>
+
+  <text x="380" y="860" font-size="11" fill="#636366">No new shortcut — gallery is pointer-driven · E stays evaluation</text>
+</svg>

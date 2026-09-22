@@ -1,0 +1,135 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="sbs" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.5"/>
+      <feDropShadow dx="0" dy="12" stdDeviation="28" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+    <linearGradient id="sbside" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14141B"/><stop offset="1" stop-color="#0E0E14"/>
+    </linearGradient>
+    <linearGradient id="sbmark" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c084fc"/><stop offset="0.55" stop-color="#2563eb"/><stop offset="1" stop-color="#05e3a4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1440" height="900" fill="#0A0A0E"/>
+  <text x="48" y="50" font-size="24" font-weight="600" letter-spacing="-0.4" fill="#F5F5F7">One sidebar, two levels — same shell, swapped content</text>
+  <text x="48" y="74" font-size="13" fill="#8E8E93">Current dark language kept exactly. No second column ever. Chrome persists; only the nav region swaps.</text>
+
+  <!-- ===== LEVEL 1 : domains ===== -->
+  <g filter="url(#sbs)"><rect x="48" y="104" width="288" height="724" rx="16" fill="url(#sbside)" stroke="#26262F"/></g>
+  <rect x="72" y="124" width="24" height="24" rx="7" fill="url(#sbmark)"/>
+  <text x="104" y="141" font-size="14" font-weight="600" fill="#F5F5F7">Studio<tspan fill="#0A84FF">·</tspan></text>
+  <rect x="72" y="160" width="240" height="32" rx="9" fill="#08080C" stroke="#23232E"/>
+  <text x="88" y="180" font-size="12" fill="#6E6E73">Search Studio…</text>
+  <text x="72" y="220" font-size="10" font-weight="600" letter-spacing="1" fill="#6E6E73">SECTIONS</text>
+  <g font-size="13">
+    <rect x="72" y="232" width="240" height="34" rx="10" fill="none"/>
+    <text x="104" y="254" fill="#A1A1A6">Dashboard</text>
+    <rect x="72" y="270" width="240" height="34" rx="10" fill="none"/>
+    <text x="104" y="292" fill="#A1A1A6">Chat</text>
+    <rect x="72" y="308" width="240" height="34" rx="10" fill="rgba(10,132,255,0.14)"/>
+    <rect x="72" y="308" width="3" height="34" rx="1.5" fill="#0A84FF"/>
+    <text x="104" y="330" font-weight="600" fill="#FFF">Agents</text>
+    <rect x="72" y="346" width="240" height="34" rx="10" fill="none"/>
+    <text x="104" y="368" fill="#A1A1A6">Libraries</text>
+    <rect x="72" y="384" width="240" height="34" rx="10" fill="none"/>
+    <text x="104" y="406" fill="#A1A1A6">Insights</text>
+    <rect x="72" y="422" width="240" height="34" rx="10" fill="none"/>
+    <text x="104" y="444" fill="#A1A1A6">Platform</text>
+    <rect x="72" y="460" width="240" height="34" rx="10" fill="none"/>
+    <text x="104" y="482" fill="#A1A1A6">Settings</text>
+  </g>
+  <g font-size="13" fill="#6E6E73" text-anchor="middle">
+    <text x="88" y="254">▦</text><text x="88" y="292">✉</text><text x="88" y="368">▤</text>
+    <text x="88" y="406">◔</text><text x="88" y="444">▣</text><text x="88" y="482">⚙</text>
+  </g>
+  <text x="88" y="330" font-size="13" text-anchor="middle" fill="#5AA9FF">✦</text>
+  <circle cx="292" cy="325" r="9" fill="rgba(255,159,10,0.16)"/>
+  <text x="292" y="329" font-size="10" font-weight="600" text-anchor="middle" fill="#FF9F0A">3</text>
+  <text x="72" y="524" font-size="10" font-weight="600" letter-spacing="1" fill="#6E6E73">RECENT CHATS</text>
+  <g font-size="12" fill="#A1A1A6">
+    <text x="72" y="548">Refund policy question</text>
+    <text x="72" y="570">Onboarding flow test</text>
+  </g>
+  <path d="M72 748 H312" stroke="#23232E"/>
+  <circle cx="84" cy="778" r="13" fill="rgba(10,132,255,0.16)"/>
+  <text x="84" y="782" font-size="10" font-weight="600" text-anchor="middle" fill="#5AA9FF">AS</text>
+  <text x="106" y="774" font-size="12" font-weight="600" fill="#F5F5F7">Aurora Labs</text>
+  <text x="106" y="790" font-size="11" fill="#6E6E73">Pro workspace</text>
+  <text x="72" y="810" font-size="11" fill="#6E6E73">level 1 · sections</text>
+
+  <!-- drill annotation -->
+  <g text-anchor="middle">
+    <path d="M348 460 h24 M364 454 l8 6 l-8 6" fill="none" stroke="#0A84FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="360" y="440" font-size="11" fill="#5AA9FF">tap drills in —</text>
+    <text x="360" y="512" font-size="11" fill="#5AA9FF">same sidebar</text>
+  </g>
+
+  <!-- ===== LEVEL 2 : Agents section ===== -->
+  <g filter="url(#sbs)"><rect x="384" y="104" width="288" height="724" rx="16" fill="url(#sbside)" stroke="#26262F"/></g>
+  <rect x="408" y="124" width="24" height="24" rx="7" fill="url(#sbmark)"/>
+  <text x="440" y="141" font-size="14" font-weight="600" fill="#F5F5F7">Studio<tspan fill="#0A84FF">·</tspan></text>
+  <rect x="408" y="160" width="240" height="32" rx="9" fill="#08080C" stroke="#23232E"/>
+  <text x="424" y="180" font-size="12" fill="#6E6E73">Filter section…</text>
+  <text x="408" y="222" font-size="12" font-weight="600" fill="#5AA9FF">‹ All sections</text>
+  <text x="408" y="248" font-size="15" font-weight="600" fill="#F5F5F7">Agents</text>
+  <text x="408" y="266" font-size="11" fill="#6E6E73">Build and operate agents</text>
+  <rect x="408" y="278" width="240" height="34" rx="10" fill="rgba(10,132,255,0.14)"/>
+  <rect x="408" y="278" width="3" height="34" rx="1.5" fill="#0A84FF"/>
+  <g font-size="13">
+    <text x="424" y="300" font-weight="600" fill="#FFF">Overview</text>
+    <text x="424" y="334" fill="#A1A1A6">All agents</text>
+    <text x="424" y="368" fill="#A1A1A6">Templates</text>
+    <text x="424" y="402" fill="#A1A1A6">Conversations</text>
+    <text x="424" y="436" fill="#A1A1A6">Evaluations</text>
+  </g>
+  <g font-size="11" fill="#6E6E73" text-anchor="end">
+    <text x="648" y="334">12</text><text x="648" y="368">20</text><text x="648" y="402">48</text>
+  </g>
+  <text x="648" y="436" font-size="11" text-anchor="end" fill="#FF9F0A">1 blocked</text>
+  <text x="408" y="560" font-size="11" fill="#6E6E73">Provisioning: 1 seeding… · </text>
+  <text x="578" y="560" font-size="11" fill="#5AA9FF">View</text>
+  <path d="M408 748 H648" stroke="#23232E"/>
+  <circle cx="420" cy="778" r="13" fill="rgba(10,132,255,0.16)"/>
+  <text x="420" y="782" font-size="10" font-weight="600" text-anchor="middle" fill="#5AA9FF">AS</text>
+  <text x="442" y="774" font-size="12" font-weight="600" fill="#F5F5F7">Aurora Labs</text>
+  <text x="442" y="790" font-size="11" fill="#6E6E73">Pro workspace</text>
+  <text x="408" y="810" font-size="11" fill="#6E6E73">level 2 · Agents section</text>
+
+  <!-- ===== CONTRACT ===== -->
+  <g filter="url(#sbs)"><rect x="704" y="104" width="688" height="724" rx="16" fill="#14141B" stroke="#26262F"/></g>
+  <text x="736" y="140" font-size="11" font-weight="600" letter-spacing="1" fill="#6E6E73">SWAP CONTRACT — THE WHOLE SPEC IN ONE PANEL</text>
+
+  <g font-size="13" font-weight="600" fill="#F5F5F7">
+    <text x="736" y="178">1 · Chrome persists, nav region swaps</text>
+    <text x="736" y="236">2 · Back never navigates</text>
+    <text x="736" y="294">3 · Level follows the route, not memory</text>
+    <text x="736" y="352">4 · Focus moves, screen reader told once</text>
+    <text x="736" y="410">5 · Esc has an order</text>
+    <text x="736" y="468">6 · Builder hides the sidebar entirely</text>
+    <text x="736" y="526">7 · Dirty blocks everything alike</text>
+    <text x="736" y="584">8 · Badges roll up, never shift</text>
+  </g>
+  <g font-size="11" fill="#8E8E93">
+    <text x="736" y="196">Brand, search, footer, topbar, content stay. Slide ±12px, 200ms, instant on reduced-motion.</text>
+    <text x="736" y="254">‹ All sections returns to level 1 on the same route. Logo goes to Dashboard.</text>
+    <text x="736" y="312">Cold-load /blocks renders Platform › Blocks with zero prior state. No client state in derivation.</text>
+    <text x="736" y="370">Focus to back control (level 2) or active row (level 1). aria-live announces the section once.</text>
+    <text x="736" y="428">Modal → drawer → level-up → nothing. Desktop only; mobile drawer closes first.</text>
+    <text x="736" y="486">/agents/new and /edit render full-bleed with ← Agents. Zero sidebars there.</text>
+    <text x="736" y="544">useBlocker guards domain rows, back, items, breadcrumbs, palette, history. beforeunload for reload.</text>
+    <text x="736" y="602">Null until data. Dot + count on both levels; domain rows show the rolled-up sum.</text>
+  </g>
+
+  <rect x="736" y="640" width="624" height="112" rx="12" fill="#0A0A0E" stroke="#26262F"/>
+  <text x="756" y="666" font-size="10" font-weight="600" letter-spacing="1" fill="#6E6E73">LEDGER · SIDEBAR_LEDGER.md §§3–4</text>
+  <g font-size="11" fill="#8E8E93">
+    <text x="756" y="690">P1 skeleton (swap + mapping test + focus/Esc) → P2 homes → P3 Datasets · Blocks · Memory → P4 wiring.</text>
+    <text x="756" y="708">Styling untouched — additive slide/back-row styles only. Agents work starts at P1 green.</text>
+    <text x="756" y="726">nav.json v2 shape unchanged (already domain-based). One registry, four readers.</text>
+  </g>
+
+  <text x="736" y="796" font-size="11" fill="#6E6E73">Tokens: canvas #0A0A0E · sidebar gradient #14141B→#0E0E14 · hairline #26262F · accent #0A84FF · dot + word, always.</text>
+</svg>

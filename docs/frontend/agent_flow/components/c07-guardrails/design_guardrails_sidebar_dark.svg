@@ -1,0 +1,116 @@
+<svg width="1440" height="1180" viewBox="0 0 1440 1180" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="gnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="gdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1180" fill="#0A0A0E"/>
+
+  <!-- ===== builder top bar ===== -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library</text>
+
+  <!-- ===== left components rail ===== -->
+  <rect x="0" y="56" width="216" height="1124" fill="#0E0E13"/>
+  <path d="M216 56 V1180" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <circle cx="30" cy="116" r="5" fill="#0A84FF"/><text x="44" y="120" font-size="13" fill="#F5F5F7">Knowledge</text>
+  <circle cx="30" cy="146" r="5" fill="#A78BFA"/><text x="44" y="150" font-size="13" fill="#F5F5F7">Tools</text>
+  <circle cx="30" cy="176" r="5" fill="#FF9F0A"/><text x="44" y="180" font-size="13" font-weight="600" fill="#F5F5F7">Guardrails</text>
+  <rect x="14" y="162" width="188" height="30" rx="8" fill="#FF9F0A" opacity="0.12"/>
+  <text x="150" y="181" font-size="11" fill="#8E8E93">G</text>
+  <circle cx="30" cy="206" r="5" fill="#FF9F0A" opacity="0.45"/><text x="44" y="210" font-size="13" fill="#8E8E93">Memory</text>
+  <circle cx="30" cy="236" r="5" fill="#30D158" opacity="0.45"/><text x="44" y="240" font-size="13" fill="#8E8E93">Evaluator</text>
+
+  <!-- ===== canvas: guardrails satellite (attention: logging) ===== -->
+  <rect x="216" y="56" width="824" height="1124" fill="#0A0A0E"/>
+  <rect x="216" y="56" width="824" height="1124" fill="url(#gdots)"/>
+  <g filter="url(#gnd)">
+    <rect x="480" y="420" width="300" height="150" rx="14" fill="#14141B" stroke="#FF9F0A" stroke-width="1.5"/>
+    <circle cx="504" cy="452" r="6" fill="#FF9F0A"/>
+    <text x="518" y="457" font-size="14" font-weight="600" fill="#F5F5F7">Guardrails</text>
+    <text x="132" y="0" font-size="11" fill="#8E8E93" transform="translate(372,482)">Logging · in default / out brand-safe</text>
+    <text x="504" y="506" font-size="12" fill="#FF9F0A">verdicts recorded — nothing refused</text>
+    <text x="504" y="530" font-size="11" fill="#8E8E93">Flip to blocking when false positives settle</text>
+    <text x="504" y="552" font-size="11" fill="#636366">G · What this agent may never do</text>
+  </g>
+
+  <!-- ===== right inspector ===== -->
+  <rect x="1040" y="56" width="400" height="1124" fill="#101014"/>
+  <path d="M1040 56 V1180" stroke="#26262F"/>
+  <text x="1064" y="96" font-size="15" font-weight="600" fill="#F5F5F7">Guardrails</text>
+  <text x="1064" y="116" font-size="12" fill="#8E8E93">Logging · verdicts recorded, nothing refused</text>
+  <text x="1064" y="140" font-size="11" fill="#8E8E93">Simple</text>
+  <text x="1116" y="140" font-size="11" fill="#636366">Advanced</text>
+  <rect x="1064" y="148" width="52" height="2" fill="#FF9F0A"/>
+
+  <!-- Block A: Protection -->
+  <text x="1064" y="180" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PROTECTION</text>
+  <text x="1064" y="206" font-size="13" fill="#F5F5F7">Input screening</text>
+  <g font-size="12">
+    <rect x="1064" y="216" width="76" height="30" rx="15" fill="#FF9F0A" opacity="0.9"/>
+    <text x="1102" y="235" text-anchor="middle" fill="#0A0A0E" font-weight="600">Default</text>
+    <rect x="1146" y="216" width="62" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1177" y="235" text-anchor="middle" fill="#A1A1A6">Strict</text>
+    <rect x="1214" y="216" width="52" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1240" y="235" text-anchor="middle" fill="#A1A1A6">Off</text>
+  </g>
+  <text x="1064" y="268" font-size="13" fill="#F5F5F7">Output screening</text>
+  <g font-size="12">
+    <rect x="1064" y="278" width="92" height="30" rx="15" fill="#FF9F0A" opacity="0.9"/>
+    <text x="1110" y="297" text-anchor="middle" fill="#0A0A0E" font-weight="600">Brand-safe</text>
+    <rect x="1162" y="278" width="62" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1193" y="297" text-anchor="middle" fill="#A1A1A6">Strict</text>
+    <rect x="1230" y="278" width="52" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1256" y="297" text-anchor="middle" fill="#A1A1A6">Off</text>
+  </g>
+  <text x="1064" y="322" font-size="11" fill="#8E8E93">Strict also refuses borderline content. Off disables</text>
+  <text x="1064" y="336" font-size="11" fill="#8E8E93">screening for that direction — violations pass through.</text>
+
+  <rect x="1064" y="352" width="352" height="1" fill="#26262F"/>
+  <text x="1064" y="380" font-size="13" font-weight="600" fill="#F5F5F7">PII redaction</text>
+  <text x="1064" y="398" font-size="12" fill="#8E8E93">Identifiers redacted before storage and logging.</text>
+  <rect x="1352" y="366" width="48" height="28" rx="14" fill="#30D158"/>
+  <circle cx="1380" cy="380" r="10" fill="#FFFFFF"/>
+  <text x="1064" y="422" font-size="11" fill="#8E8E93">Applies to new runs from publish — past runs keep</text>
+  <text x="1064" y="436" font-size="11" fill="#8E8E93">what they stored.</text>
+
+  <!-- Block B: Execution mode -->
+  <text x="1064" y="472" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">EXECUTION MODE</text>
+  <rect x="1064" y="484" width="352" height="44" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <rect x="1068" y="488" width="172" height="36" rx="8" fill="#2C2C34"/>
+  <text x="1154" y="511" text-anchor="middle" font-size="13" font-weight="600" fill="#F5F5F7">Blocking</text>
+  <rect x="1240" y="488" width="172" height="36" rx="8" fill="#FF9F0A" opacity="0.9"/>
+  <text x="1326" y="511" text-anchor="middle" font-size="13" font-weight="600" fill="#0A0A0E">Logging</text>
+  <circle cx="1072" cy="548" r="4" fill="#FF9F0A"/>
+  <text x="1084" y="552" font-size="12" fill="#FF9F0A">Logging — verdicts recorded, nothing is refused.</text>
+  <text x="1064" y="574" font-size="11" fill="#8E8E93">Measure first: watch what WOULD have been refused,</text>
+  <text x="1064" y="588" font-size="11" fill="#8E8E93">then flip. The flip ships as a new draft — auditable,</text>
+  <text x="1064" y="602" font-size="11" fill="#8E8E93">never a silent toggle.</text>
+
+  <!-- Block C teaser -->
+  <text x="1064" y="638" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ADVANCED</text>
+  <text x="1064" y="662" font-size="12" fill="#0A84FF">Custom policy names · resolved behavior shown ›</text>
+  <text x="1064" y="684" font-size="11" fill="#636366">A name you invent screens like Default — shown, not hidden.</text>
+
+  <!-- viewer note -->
+  <rect x="1064" y="712" width="352" height="66" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1080" y="736" font-size="12" fill="#A1A1A6">Viewers see this read-only. Owners, admins,</text>
+  <text x="1080" y="752" font-size="12" fill="#A1A1A6">and developers can edit drafts.</text>
+
+  <!-- footer note -->
+  <text x="1064" y="1140" font-size="11" fill="#636366">Autosaves in 8s · full draft · 409 adopts · 412 merges</text>
+</svg>

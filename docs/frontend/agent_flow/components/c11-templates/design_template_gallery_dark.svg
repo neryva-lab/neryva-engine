@@ -1,0 +1,82 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agent Studio · Libraries</text>
+  <text x="280" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Templates</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Agents</text>
+
+  <rect x="38" y="88" width="824" height="1100" rx="14" fill="#101014" stroke="#26262F"/>
+  <text x="66" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Templates</text>
+  <text x="66" y="150" font-size="12" fill="#8E8E93">Registry blueprints with compatibility truth — install copies into a draft, never live</text>
+
+  <rect x="66" y="170" width="300" height="32" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="82" y="190" font-size="12" fill="#636366">Search name, tools, knowledge…</text>
+  <rect x="374" y="170" width="60" height="32" rx="16" fill="#0A84FF" opacity="0.16"/>
+  <text x="404" y="190" font-size="12" text-anchor="middle" fill="#0A84FF">All</text>
+  <rect x="440" y="170" width="96" height="32" rx="16" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="488" y="190" font-size="12" text-anchor="middle" fill="#A1A1A6">Compatible</text>
+  <rect x="542" y="170" width="90" height="32" rx="16" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="587" y="190" font-size="12" text-anchor="middle" fill="#A1A1A6">support · 4</text>
+
+  <rect x="66" y="218" width="376" height="220" rx="12" fill="#14141B" stroke="#3A3A42"/>
+  <text x="86" y="250" font-size="13" font-weight="600" fill="#F5F5F7">support-concierge@3</text>
+  <rect x="290" y="236" width="52" height="21" rx="10.5" fill="#30D158" opacity="0.16"/>
+  <text x="316" y="250" font-size="11" text-anchor="middle" fill="#30D158">stable</text>
+  <rect x="86" y="260" width="70" height="21" rx="10.5" fill="#8E8E93" opacity="0.16"/>
+  <text x="121" y="274" font-size="11" text-anchor="middle" fill="#8E8E93">installed</text>
+  <text x="86" y="300" font-size="12" fill="#A1A1A6">4 tools · 3 knowledge · 2 models · seeded evals</text>
+  <rect x="86" y="310" width="110" height="24" rx="12" fill="#30D158" opacity="0.14"/>
+  <text x="98" y="326" font-size="11" fill="#30D158">compatible</text>
+  <text x="86" y="356" font-size="11" fill="#FF9F0A">▲ major update — Install v4.0.0 as new →</text>
+  <text x="86" y="378" font-size="12" fill="#0A84FF">Details · Install</text>
+  <text x="86" y="398" font-size="11" fill="#8E8E93">Re-install creates ANOTHER assistant — confirm names it.</text>
+
+  <rect x="458" y="218" width="376" height="220" rx="12" fill="#14141B" stroke="#FF453A" stroke-width="1"/>
+  <text x="478" y="250" font-size="13" font-weight="600" fill="#F5F5F7">billing-auditor@2</text>
+  <rect x="640" y="236" width="46" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="663" y="250" font-size="11" text-anchor="middle" fill="#0A84FF">beta</text>
+  <rect x="478" y="262" width="300" height="52" rx="10" fill="#FF453A" opacity="0.10"/>
+  <text x="494" y="284" font-size="12" fill="#FF453A">Install blocked — platform hold, expires in 6 days.</text>
+  <text x="494" y="300" font-size="11" fill="#0A84FF">View blocks</text>
+  <text x="478" y="330" font-size="12" fill="#A1A1A6">provider_credential_missing — Add credentials →</text>
+  <text x="478" y="356" font-size="12" fill="#636366">Install disabled for block-readers; 409/403 is the backstop.</text>
+  <text x="478" y="378" font-size="12" fill="#0A84FF">Details</text>
+
+  <rect x="890" y="88" width="512" height="1100" rx="14" fill="#14141B" stroke="#3A3A42" filter="url(#bnd)"/>
+  <text x="918" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Install support-concierge@3</text>
+  <text x="1352" y="130" font-size="12" fill="#8E8E93">Esc ✕</text>
+
+  <text x="918" y="164" font-size="12" fill="#A1A1A6">One transaction: assistant + DRAFT v0 + install row + outbox.</text>
+  <text x="918" y="182" font-size="12" fill="#A1A1A6">Active pointer untouched — nothing goes live.</text>
+
+  <text x="918" y="216" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">AGENT NAME · 2–128</text>
+  <rect x="918" y="226" width="300" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="934" y="248" font-size="13" fill="#F5F5F7">returns-helper</text>
+  <text x="918" y="272" font-size="11" fill="#8E8E93">Description is set by the template and cannot be edited later.</text>
+
+  <text x="918" y="306" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">OUTCOME WHISPERS · VERBATIM, NEVER CODES</text>
+  <text x="918" y="328" font-size="12" fill="#FF9F0A">Name taken — one-tap rename, overlay stays, nothing created.</text>
+  <text x="918" y="346" font-size="12" fill="#FF453A">Template blocked (platform hold) — pick another template.</text>
+  <text x="918" y="364" font-size="12" fill="#FF9F0A">Tool “pdf-extract” unresolvable — ask an admin to enable it.</text>
+  <text x="918" y="382" font-size="12" fill="#8E8E93">Registry bug — report it. You cannot fix a template.</text>
+
+  <text x="918" y="416" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">AFTER INSTALL · FULFILLMENT CHECKLIST</text>
+  <text x="918" y="438" font-size="12" fill="#30D158">✓ Map knowledge 3/3 READY</text>
+  <text x="918" y="456" font-size="12" fill="#FF9F0A">◷ Tool pins 3/4 — pdf-extract disabled → enable / admin</text>
+  <text x="918" y="474" font-size="12" fill="#A1A1A6">… Models 2/2 usable · credentials need an owner → notify</text>
+  <text x="918" y="492" font-size="12" fill="#A1A1A6">… eval seeded → run it · test-run the draft first</text>
+  <text x="918" y="510" font-size="11" fill="#8E8E93">Loading shows skeletons — never red X before truth arrives.</text>
+
+  <text x="918" y="548" font-size="12" fill="#FFFFFF">Install as draft</text>
+  <text x="918" y="570" font-size="11" fill="#8E8E93">Recorded in Audit › · provisioning fulfills async, draft editable now</text>
+</svg>

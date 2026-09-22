@@ -1,0 +1,79 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agent Studio · Libraries</text>
+  <text x="280" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Evaluations</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Datasets</text>
+
+  <rect x="38" y="88" width="824" height="1100" rx="14" fill="#101014" stroke="#26262F"/>
+  <text x="66" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Runs</text>
+  <text x="66" y="150" font-size="12" fill="#8E8E93">Newest first (cap 100) · latest completed decision per content hash is what every gate reads</text>
+
+  <rect x="66" y="170" width="200" height="32" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="82" y="190" font-size="12" fill="#A1A1A6">All decisions ⌄</text>
+  <rect x="274" y="170" width="180" height="32" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="290" y="190" font-size="12" fill="#A1A1A6">All states ⌄</text>
+
+  <rect x="66" y="216" width="768" height="52" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <circle cx="86" cy="242" r="5" fill="#30D158"/>
+  <text x="98" y="238" font-size="12" font-weight="600" fill="#F5F5F7">PASS</text>
+  <text x="98" y="254" font-size="11" fill="#8E8E93">0.9312 · v3 · refund-regressions</text>
+  <text x="420" y="246" font-size="11" fill="#8E8E93">12 Feb 14:03</text>
+  <text x="640" y="246" font-size="12" fill="#0A84FF">Results · Re-run · Copy</text>
+
+  <rect x="66" y="276" width="768" height="52" rx="10" fill="#1C1C22" stroke="#FF9F0A" stroke-width="1"/>
+  <circle cx="86" cy="302" r="5" fill="#FF9F0A"/>
+  <text x="98" y="298" font-size="12" font-weight="600" fill="#F5F5F7">WARN · Stale decision — re-run</text>
+  <text x="98" y="314" font-size="11" fill="#8E8E93">WARN on a41f9c… · draft now b77c1d…</text>
+  <text x="640" y="306" font-size="12" fill="#0A84FF">Results · Re-run</text>
+
+  <rect x="66" y="336" width="768" height="52" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <circle cx="86" cy="362" r="5" fill="#FF453A"/>
+  <text x="98" y="358" font-size="12" font-weight="600" fill="#F5F5F7">BLOCK</text>
+  <text x="98" y="374" font-size="11" fill="#8E8E93">critical failure: unsafe_refund · 0.8120</text>
+  <text x="420" y="366" font-size="11" fill="#8E8E93">11 Feb 09:41</text>
+  <text x="640" y="366" font-size="12" fill="#0A84FF">Results · Re-run · Copy</text>
+
+  <rect x="66" y="396" width="768" height="52" rx="10" fill="transparent" stroke="#3A3A42" stroke-dasharray="5 4"/>
+  <circle cx="86" cy="422" r="5" fill="#0A84FF"/>
+  <text x="98" y="418" font-size="12" fill="#A1A1A6">PASS · shadow — never gates</text>
+  <text x="98" y="434" font-size="11" fill="#8E8E93">drift watch: acme/sonnet entry_changed · owner paged</text>
+  <text x="640" y="426" font-size="12" fill="#0A84FF">Results</text>
+
+  <rect x="890" y="88" width="512" height="1100" rx="14" fill="#14141B" stroke="#3A3A42" filter="url(#bnd)"/>
+  <text x="918" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Results · WARN</text>
+  <text x="918" y="150" font-size="12" fill="#8E8E93">refund-regressions · v3 · score 0.8801</text>
+  <text x="1352" y="130" font-size="12" fill="#8E8E93">Esc ✕</text>
+
+  <rect x="918" y="170" width="456" height="52" rx="10" fill="#FF9F0A" opacity="0.10"/>
+  <text x="934" y="192" font-size="12" font-weight="600" fill="#FF9F0A">Stale decision — re-run</text>
+  <text x="934" y="208" font-size="11" fill="#8E8E93">WARN on a41f9c… · draft now b77c1d…</text>
+
+  <text x="918" y="256" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">REQUIRED · TEMPLATE</text>
+  <text x="918" y="278" font-size="12" fill="#30D158">✓ refund_policy_cited — passed</text>
+  <text x="918" y="296" font-size="12" fill="#FF453A">✗ tone_calm — failed, BLOCKs publish</text>
+  <text x="918" y="314" font-size="11" fill="#8E8E93">Only a fresh PASS on this hash publishes.</text>
+
+  <text x="918" y="348" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">FAILING CASES · 2</text>
+  <text x="918" y="370" font-size="12" fill="#F5F5F7">case_014 · 0.42 — missing contain “30 days”</text>
+  <text x="918" y="388" font-size="11" fill="#8E8E93">“We process returns whenever…” (excerpt, 512 max)</text>
+  <text x="918" y="410" font-size="12" fill="#F5F5F7">case_021 · 0.55 — rubric 0.55 &lt; min 0.7</text>
+  <text x="918" y="428" font-size="11" fill="#8E8E93">Case inputs aren’t listable — cases are add-only.</text>
+
+  <text x="918" y="462" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PROVENANCE</text>
+  <text x="918" y="484" font-size="12" fill="#A1A1A6">template support-concierge@3 · dataset #a9f1…</text>
+  <text x="918" y="502" font-size="12" fill="#A1A1A6">definition #a41f9c… · seed 7 · 2 attempts · ⧉ copy full</text>
+
+  <text x="918" y="540" font-size="12" fill="#0A84FF">Re-run with same dataset ↻ · Add a covering case →</text>
+  <text x="918" y="562" font-size="11" fill="#8E8E93">Latest wins — a later PASS clears any earlier verdict.</text>
+</svg>

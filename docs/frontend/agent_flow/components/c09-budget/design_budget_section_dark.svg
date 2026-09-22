@@ -1,0 +1,82 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library</text>
+
+  <rect x="0" y="56" width="216" height="1164" fill="#0E0E13"/>
+  <path d="M216 56 V1220" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <circle cx="30" cy="116" r="5" fill="#0A84FF"/><text x="44" y="120" font-size="13" fill="#F5F5F7">Knowledge</text>
+  <circle cx="30" cy="146" r="5" fill="#A78BFA"/><text x="44" y="150" font-size="13" fill="#F5F5F7">Tools</text>
+  <circle cx="30" cy="176" r="5" fill="#FF9F0A"/><text x="44" y="180" font-size="13" fill="#F5F5F7">Memory</text>
+  <circle cx="30" cy="206" r="5" fill="#64D2FF"/><text x="44" y="210" font-size="13" font-weight="600" fill="#F5F5F7">Budget</text>
+  <rect x="14" y="192" width="188" height="30" rx="8" fill="#64D2FF" opacity="0.12"/>
+  <text x="150" y="211" font-size="11" fill="#8E8E93">S</text>
+
+  <rect x="216" y="56" width="824" height="1164" fill="#0A0A0E"/>
+  <rect x="216" y="56" width="824" height="1164" fill="url(#bdots)"/>
+  <g filter="url(#bnd)">
+    <rect x="480" y="430" width="300" height="150" rx="14" fill="#14141B" stroke="#64D2FF" stroke-width="1.5"/>
+    <circle cx="504" cy="462" r="6" fill="#30D158"/>
+    <text x="518" y="467" font-size="14" font-weight="600" fill="#F5F5F7">Budget</text>
+    <text x="504" y="492" font-size="12" fill="#A1A1A6">Capped · ~$2.40 rough</text>
+    <text x="504" y="514" font-size="11" fill="#8E8E93">20k tokens · $5 cap · 30 model calls</text>
+    <text x="504" y="552" font-size="11" fill="#636366">S · Cost and time guardrails</text>
+  </g>
+
+  <rect x="1040" y="56" width="400" height="1164" fill="#101014"/>
+  <path d="M1040 56 V1220" stroke="#26262F"/>
+  <text x="1064" y="96" font-size="15" font-weight="600" fill="#F5F5F7">Budget</text>
+  <text x="1064" y="116" font-size="12" fill="#8E8E93">Capped · ~$2.40 rough</text>
+
+  <text x="1064" y="150" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">CAPS · PER-RUN</text>
+  <text x="1064" y="176" font-size="13" fill="#F5F5F7">Spend cap</text>
+  <text x="1064" y="194" font-size="12" fill="#8E8E93">$5.00 — breach fails the run closed.</text>
+  <rect x="1064" y="202" width="200" height="32" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1078" y="222" font-size="13" fill="#F5F5F7">$ 5.00</text>
+
+  <text x="1064" y="256" font-size="13" fill="#F5F5F7">Total tokens</text>
+  <text x="1064" y="274" font-size="12" fill="#8E8E93">20,000 set · platform serves 200,000 unset.</text>
+  <rect x="1064" y="282" width="200" height="32" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1078" y="302" font-size="13" fill="#F5F5F7">20,000</text>
+
+  <text x="1064" y="336" font-size="13" fill="#F5F5F7">Model calls</text>
+  <text x="1064" y="354" font-size="12" fill="#8E8E93">30 set · serves 16 unset · min 1, no disable.</text>
+  <text x="1064" y="372" font-size="11" fill="#8E8E93">Unset spend = no cap: runs are cost-unchecked.</text>
+
+  <text x="1064" y="406" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ESTIMATE · ROUGH, NOT THE BILL</text>
+  <text x="1064" y="430" font-size="12" fill="#A1A1A6">acme/sonnet — in $3.0000 · cached-in $0.3000 · out $15.0000 /1k</text>
+  <text x="1064" y="448" font-size="12" fill="#A1A1A6">acme/haiku — unpriced. Estimates need a priced model.</text>
+  <text x="1064" y="470" font-size="13" font-weight="600" fill="#F5F5F7">~$2.40 for a 20k-token run on Sonnet</text>
+  <text x="1064" y="488" font-size="11" fill="#8E8E93">Uncached rates. Measured spend lives in Usage.</text>
+
+  <text x="1064" y="522" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">IF A CAP BREAKS</text>
+  <text x="1064" y="544" font-size="12" fill="#A1A1A6">The run fails closed — FAILED, terminal event naming</text>
+  <text x="1064" y="560" font-size="12" fill="#A1A1A6">the dimension, quota released.</text>
+  <text x="1064" y="582" font-size="12" fill="#0A84FF">Open Usage (measured) ›</text>
+
+  <rect x="1064" y="608" width="352" height="66" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1080" y="632" font-size="12" fill="#A1A1A6">Viewers see this read-only. Owners, admins,</text>
+  <text x="1080" y="648" font-size="12" fill="#A1A1A6">and developers can edit drafts.</text>
+
+  <text x="1064" y="1180" font-size="11" fill="#636366">Autosaves in 8s · full draft · 409 adopts · 412 merges</text>
+</svg>

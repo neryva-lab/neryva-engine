@@ -1,4 +1,4 @@
-# C11. Templates — SPEC (STATUS: NOT STARTED — MODEL RESOLVED 2026-09-17)
+# C11. Templates — SPEC (STATUS: SIGNED OFF 2026-09-18)
 
 > Design position: origin mode (gallery lives inside the builder per locked decision). Depends on: C01–C10 (repair checklist points at them).
 > Governing mental model (resolved — every design decision below must be consistent with it):
@@ -58,19 +58,24 @@ Each requirement × fulfillment-state → exactly one row state. Nothing prefill
 - `installed` badge routes to the existing assistant's detail (re-clicking Use on an installed slug creates ANOTHER assistant — say so on the confirm, never silently duplicate).
 - Re-install (second assistant from same slug) is legitimate — no "already installed" block.
 
-## Design (fill in the C11 pass)
+## Design (built 2026-09-18 — PLAN.md FINAL, all traces verified)
 
-- [ ] Gallery + filters + badges + detail sheet (3 tabs: what it does / what it needs / seed data) with per-requirement fix links.
-- [ ] Install stepper (I7 states) + I2–I6 failure whispers + I1 success transition.
-- [ ] I8 provisioning-failure banner + retry.
-- [ ] Post-install map state: badge + repair checklist wired to C02/C04/C05/C06/C10 rows.
-- [ ] Update banners (minor/major wording + adoption action — pending open question 1).
+- [x] Gallery + filters + badges + detail sheet (3 tabs: what it does / what it needs / seed data) with per-requirement fix links. Template-targeted platform blocks render ON the card (`Install blocked — reason, expiry` + link to Blocks); install refuses in-TX (409), so click-to-fail is a dead end.
+  Shared `TemplateGallery` (library + builder origin, never forked): atomic cards (BOM counts, compat + reason fixes, block banner, update badge), extended search (name/tools/knowledge/evaluators), 6-tab detail (eval untruncate, live Channels state, object-safe release rows), blocked-install disable for block-readers, re-install confirm naming the duplication.
+- [x] Install stepper (I7 states) + I2–I6 failure whispers + I1 success transition.
+  Shared `InstallWizard`: NO phase stepper (I7 states don't exist — identity commits in one TX, 3-step consumer, generic outbox states only); post-install reads live fulfillment inputs immediately with the draft editable at once. I2–I6 whispers name fixes (400/403/409 mapped, codes never shown); I1 transitions into build mode with the map banner. Description input REMOVED (engine-discarded, immutable after — Q2).
+- [x] I8 provisioning-failure banner + retry.
+  No outbox read exists (Q3) — failure surfaces as re-read failure inputs (pins/docs/models) + the shared checklist's error row with Retry; draft editable; publish gate linked, never re-derived.
+- [x] Post-install map state: badge + repair checklist wired to C02/C04/C05/C06/C10 rows.
+  Builder `TemplateBanner` (badge + drift + update lifecycle + diff + inline checklist) + detail origin row. Shared `PostInstallChecklist` with all 4 correctness bugs fixed (truthful credentials with role-aware fix, hash compare when both pins exist, deterministic duplicate slugs, skeleton/error/gap states). Test CTA routes to the builder (chat serves active-only).
+- [x] Update banners (minor/major wording + adoption action — pending open question 1).
+  ANSWERED: no update endpoint exists — adoption is "Install vX.Y.Z as new assistant" + `diffDefinitions` diff modal, never in-place, never auto-migrate. Banners on builder + detail + cards.
 
-## Open questions (resolve during the C11 pass — banner/action design depends on them)
+## Open questions — ANSWERED 2026-09-18 (all three, firsthand)
 
-1. **Update-adoption mechanism UNVERIFIED.** No apply-update endpoint was found in this pass (only `checkUpdates` signals + never-auto-migrate). Before designing the banner's action, verify: does adoption mean re-install-as-new, or is there an update path? Do not design the button until answered.
-2. Description editability post-install (auto-set at install; which route edits it?) — minor, verify in pass.
-3. Provisioning progress events transport (poll which read? SSE?) — verify in pass so the stepper binds to a real source.
+1. **Update-adoption mechanism: NO apply-update endpoint exists** (exhaustive search; doctrine twice: never auto-migrate, "new draft from vX.Y.Z"). Adoption = re-install-as-new + diff. No in-place button ships.
+2. **Description editability: NO route exists** (writable only at creation; install ignores caller input). Post-install description is immutable — wizard input removed with an immutable whisper.
+3. **Provisioning progress transport: NONE exists** (no poll/SSE/status; SSE is run/conversation-only). No stepper, no polling, no faked phases — checklist reads live inputs, draft editable immediately.
 
 ## Exit gate
 

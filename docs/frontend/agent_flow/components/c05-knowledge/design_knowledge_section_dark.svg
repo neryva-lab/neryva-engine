@@ -1,0 +1,188 @@
+<svg width="1440" height="1160" viewBox="0 0 1440 1160" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="knd2" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="kdots2" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+    <marker id="karw2" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
+      <path d="M2.5,1.5 L6.5,4.5 L2.5,7.5" fill="none" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="karwLit2" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
+      <path d="M2.5,1.5 L6.5,4.5 L2.5,7.5" fill="none" stroke="#0A84FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="1160" fill="#0A0A0E"/>
+
+  <!-- ===== builder top bar ===== -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <path d="M28 28 L22 34 L28 40" fill="none" stroke="#A1A1A6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library →</text>
+
+  <!-- ===== side menu (resting state; Knowledge on canvas) ===== -->
+  <rect x="0" y="56" width="216" height="1036" fill="#0E0E13"/>
+  <path d="M216 56 V1092" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <text x="20" y="122" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">FOUNDATIONS</text>
+  <g>
+    <rect x="20" y="130" width="176" height="40" rx="10" fill="#14141B" stroke="#26262F"/>
+    <text x="56" y="147" font-size="12" font-weight="600" fill="#F5F5F7">Purpose</text>
+    <text x="56" y="162" font-size="10" fill="#30D158">on canvas ✓</text>
+  </g>
+  <g>
+    <rect x="20" y="176" width="176" height="40" rx="10" fill="#14141B" stroke="#26262F"/>
+    <text x="56" y="193" font-size="12" font-weight="600" fill="#F5F5F7">Model</text>
+    <text x="56" y="208" font-size="10" fill="#30D158">on canvas ✓</text>
+  </g>
+  <text x="20" y="242" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">SOURCES</text>
+  <g filter="url(#knd2)">
+    <rect x="20" y="250" width="176" height="44" rx="10" fill="#14141B" stroke="#0A84FF" stroke-width="1.5"/>
+  </g>
+  <rect x="30" y="263" width="18" height="18" rx="5" fill="#0A84FF" opacity="0.25"/>
+  <path d="M34 272 h10 M34 276 h7" stroke="#0A84FF" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="56" y="271" font-size="12" font-weight="600" fill="#F5F5F7">Knowledge</text>
+  <text x="56" y="286" font-size="10" fill="#0A84FF">3 pinned · editing →</text>
+
+  <!-- ===== canvas (resting; satellite feeds Context) ===== -->
+  <rect x="216" y="56" width="864" height="1036" fill="url(#kdots2)"/>
+  <g fill="#14141B" stroke="#26262F">
+    <rect x="640" y="110" width="170" height="62" rx="14"/>
+    <rect x="640" y="214" width="170" height="62" rx="14"/>
+    <rect x="640" y="318" width="170" height="62" rx="14"/>
+    <rect x="640" y="422" width="170" height="62" rx="14"/>
+    <rect x="640" y="526" width="170" height="62" rx="14"/>
+  </g>
+  <rect x="640" y="318" width="170" height="62" rx="14" fill="none" stroke="#3A3A3F"/>
+  <g font-size="13" font-weight="600" fill="#F5F5F7">
+    <text x="688" y="139">Purpose</text><text x="688" y="243">Context</text>
+    <text x="688" y="347">Model</text><text x="688" y="451">Response</text><text x="688" y="555">Publish</text>
+  </g>
+  <g>
+    <circle cx="794" cy="126" r="4" fill="#30D158"/><circle cx="794" cy="230" r="4" fill="#0A84FF"/>
+    <circle cx="794" cy="334" r="4" fill="#30D158"/><circle cx="794" cy="438" r="4" fill="#3A3A3F"/>
+    <circle cx="794" cy="542" r="4" fill="#FF9F0A"/>
+  </g>
+  <path d="M576 300 C600 300 596 245 636 245" fill="none" stroke="#0A84FF" stroke-width="1.5" marker-end="url(#karwLit2)"/>
+  <g filter="url(#knd2)">
+    <rect x="352" y="204" width="212" height="150" rx="16" fill="#14141B" stroke="#0A84FF" stroke-width="1.5"/>
+  </g>
+  <text x="372" y="231" font-size="13" font-weight="600" fill="#F5F5F7">Knowledge</text>
+  <text x="548" y="231" font-size="10" text-anchor="end" fill="#0A84FF">3 pinned</text>
+  <g font-size="11">
+    <circle cx="386" cy="252" r="4" fill="#30D158"/>
+    <text x="398" y="256" font-weight="600" fill="#F5F5F7">refund-policy · Ready</text>
+    <circle cx="386" cy="274" r="4" fill="#0A84FF"/>
+    <text x="398" y="278" font-weight="600" fill="#F5F5F7">faq-2026 · embedding 62%</text>
+    <circle cx="386" cy="296" r="4" fill="#FF453A"/>
+    <text x="398" y="300" font-weight="600" fill="#F5F5F7">pricing-tiers · quarantined</text>
+  </g>
+  <text x="372" y="330" font-size="10" fill="#636366">detach ≠ delete · stays in library</text>
+
+  <!-- ===== dedicated Knowledge section (inspector) ===== -->
+  <rect x="1080" y="56" width="360" height="1036" fill="#0E0E13"/>
+  <path d="M1080 56 V1092" stroke="#26262F"/>
+  <text x="1104" y="94" font-size="17" font-weight="600" fill="#F5F5F7">Knowledge</text>
+  <text x="1104" y="114" font-size="12" fill="#8E8E93">Sources this agent may retrieve.</text>
+  <text x="1104" y="130" font-size="11" fill="#636366">Uploads write to the org library · Recorded in Audit</text>
+  <path d="M1396 88 l10 10 M1406 88 l-10 10" stroke="#8E8E93" stroke-width="1.6" stroke-linecap="round"/>
+
+  <!-- Block A · retrieval policy -->
+  <text x="1104" y="162" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">RETRIEVAL</text>
+  <text x="1104" y="188" font-size="13" font-weight="500" fill="#F5F5F7">Retrieval enabled</text>
+  <rect x="1374" y="174" width="42" height="26" rx="13" fill="#3A3A3F"/><circle cx="1387" cy="187" r="11" fill="#FFF"/>
+  <text x="1104" y="216" font-size="11" fill="#8E8E93">Off — the agent answers from instructions</text>
+  <text x="1104" y="232" font-size="11" fill="#8E8E93">and model only. Deliberate, not empty.</text>
+  <text x="1104" y="260" font-size="13" font-weight="500" fill="#F5F5F7">Max results</text>
+  <g font-size="13" fill="#F5F5F7">
+    <rect x="1330" y="246" width="26" height="26" rx="8" fill="#14141B" stroke="#26262F"/>
+    <text x="1343" y="264" text-anchor="middle" fill="#8E8E93">−</text>
+    <text x="1369" y="264" text-anchor="middle">5</text>
+    <rect x="1382" y="246" width="26" height="26" rx="8" fill="#14141B" stroke="#26262F"/>
+    <text x="1395" y="264" text-anchor="middle" fill="#8E8E93">+</text>
+  </g>
+  <text x="1104" y="292" font-size="11" fill="#636366">1–20 · default 5 · applies when enabled</text>
+
+  <!-- Block B · pinned sources (document machine + coverage) -->
+  <text x="1104" y="324" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PINNED · 3/16</text>
+  <g filter="url(#knd2)"><rect x="1104" y="336" width="312" height="72" rx="12" fill="#14141B" stroke="#26262F"/></g>
+  <circle cx="1122" cy="358" r="4.5" fill="#30D158"/>
+  <text x="1134" y="355" font-size="13" font-weight="600" fill="#F5F5F7">refund-policy</text>
+  <text x="1134" y="373" font-size="11" fill="#8E8E93">Refund policy 2026 · v3 · ready-for-retrieval</text>
+  <text x="1134" y="393" font-size="12" fill="#0A84FF">Unmap</text>
+  <text x="1186" y="393" font-size="12" fill="#8E8E93">Rename</text>
+  <text x="1392" y="358" font-size="11" text-anchor="end" fill="#30D158">Ready</text>
+
+  <g filter="url(#knd2)"><rect x="1104" y="416" width="312" height="92" rx="12" fill="#14141B" stroke="#0A84FF" stroke-opacity="0.5"/></g>
+  <circle cx="1122" cy="438" r="4.5" fill="#0A84FF"/>
+  <text x="1134" y="435" font-size="13" font-weight="600" fill="#F5F5F7">faq-2026</text>
+  <text x="1134" y="453" font-size="11" fill="#8E8E93">FAQ 2026 · v1 · re-embedding for current model</text>
+  <rect x="1134" y="462" width="180" height="4" rx="2" fill="#26262F"/>
+  <rect x="1134" y="462" width="112" height="4" rx="2" fill="#0A84FF"/>
+  <text x="1392" y="470" font-size="11" text-anchor="end" fill="#0A84FF">62%</text>
+  <text x="1134" y="492" font-size="11" fill="#0A84FF">coverage-incomplete — publish will ask for the ack</text>
+
+  <g filter="url(#knd2)"><rect x="1104" y="516" width="312" height="104" rx="12" fill="#14141B" stroke="#FF453A" stroke-opacity="0.4"/></g>
+  <circle cx="1122" cy="538" r="4.5" fill="#FF453A"/>
+  <text x="1134" y="535" font-size="13" font-weight="600" fill="#F5F5F7">pricing-tiers</text>
+  <text x="1134" y="553" font-size="11" fill="#8E8E93">Pricing tiers · quarantined: password-protected file</text>
+  <text x="1134" y="575" font-size="12" fill="#0A84FF">Replace file</text>
+  <text x="1212" y="575" font-size="12" fill="#8E8E93">Remove pin</text>
+  <text x="1134" y="595" font-size="11" fill="#636366">No retry exists — upload a replacement.</text>
+
+  <!-- Block C · add sources (single-purpose tabs) -->
+  <text x="1104" y="652" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ADD SOURCES</text>
+  <g font-size="12" font-weight="600">
+    <text x="1104" y="676" fill="#F5F5F7">Upload</text>
+    <rect x="1104" y="682" width="44" height="2" fill="#0A84FF"/>
+    <text x="1164" y="676" fill="#8E8E93">Paste</text>
+    <text x="1214" y="676" fill="#8E8E93">Library</text>
+    <text x="1276" y="676" fill="#8E8E93">Connector</text>
+    <circle cx="1348" cy="672" r="2.5" fill="#FF9F0A"/>
+  </g>
+  <rect x="1104" y="692" width="312" height="100" rx="14" fill="#0A84FF" fill-opacity="0.06" stroke="#0A84FF" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="1260" y="726" font-size="13" font-weight="600" text-anchor="middle" fill="#F5F5F7">Drop files here</text>
+  <text x="1260" y="744" font-size="11" text-anchor="middle" fill="#8E8E93">PDF · PNG · JPG · WebP · TXT · MD · CSV · JSON</text>
+  <text x="1260" y="760" font-size="11" text-anchor="middle" fill="#8E8E93">No Word / Excel — convert first · org size limit applies</text>
+  <text x="1260" y="776" font-size="11" text-anchor="middle" fill="#0A84FF">Browse  ·  Paste text instead</text>
+  <!-- live session row: session machine, never merged with document rows -->
+  <g filter="url(#knd2)"><rect x="1104" y="800" width="312" height="66" rx="12" fill="#14141B" stroke="#26262F"/></g>
+  <circle cx="1122" cy="822" r="4.5" fill="#0A84FF"/>
+  <text x="1134" y="819" font-size="12" font-weight="600" fill="#F5F5F7">faq-2026.pdf · 1.2 MB</text>
+  <text x="1134" y="837" font-size="11" fill="#8E8E93">Indexing — upload complete, pipeline running</text>
+  <text x="1134" y="855" font-size="11" fill="#636366">session 9f2c… · scan → extract → index</text>
+
+  <!-- Block D · coverage & publish consequence -->
+  <rect x="1104" y="884" width="312" height="104" rx="12" fill="#FF9F0A" fill-opacity="0.08" stroke="#FF9F0A" stroke-opacity="0.3"/>
+  <circle cx="1124" cy="908" r="7" fill="none" stroke="#FF9F0A" stroke-width="1.4"/>
+  <path d="M1124 904 v5 M1124 912 v0.5" stroke="#FF9F0A" stroke-width="1.6" stroke-linecap="round"/>
+  <text x="1140" y="906" font-size="12" font-weight="600" fill="#FF9F0A">Embedding coverage incomplete</text>
+  <text x="1140" y="924" font-size="11" fill="#FF9F0A">faq-2026 is still embedding for the current</text>
+  <text x="1140" y="940" font-size="11" fill="#FF9F0A">model. Publish will ask you to acknowledge</text>
+  <text x="1140" y="956" font-size="11" fill="#FF9F0A">degraded knowledge — recorded in Audit.</text>
+  <text x="1140" y="974" font-size="11" fill="#0A84FF">Open in Knowledge library →</text>
+
+  <text x="1104" y="1018" font-size="12" fill="#636366">Unmap removes the pin, never the document.</text>
+  <text x="1104" y="1036" font-size="12" fill="#636366">Skipped is not broken — publish still gates.</text>
+  <rect x="1104" y="1048" width="120" height="32" rx="9" fill="#14141B" stroke="#3A3A3F"/>
+  <text x="1164" y="1068" font-size="12" text-anchor="middle" fill="#8E8E93">Skip for now</text>
+
+  <!-- ===== bottom action bar ===== -->
+  <rect x="0" y="1092" width="1440" height="68" fill="#14141B"/>
+  <path d="M0 1092 H1440" stroke="#26262F"/>
+  <circle cx="28" cy="1126" r="4" fill="#0A84FF"/>
+  <text x="40" y="1130" font-size="12" fill="#8E8E93">Knowledge is optional. Skipped is not broken — 1 source still embedding.</text>
+  <text x="1064" y="1131" font-size="13" text-anchor="middle" fill="#A1A1A6">Skip for now</text>
+  <rect x="1212" y="1106" width="128" height="40" rx="12" fill="#0A84FF"/>
+  <text x="1276" y="1131" font-size="14" font-weight="600" text-anchor="middle" fill="#FFF">Continue</text>
+</svg>

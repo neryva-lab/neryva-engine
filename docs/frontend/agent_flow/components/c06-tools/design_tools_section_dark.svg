@@ -1,0 +1,139 @@
+<svg width="1440" height="1180" viewBox="0 0 1440 1180" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="tnd2" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="tdots2" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1180" fill="#0A0A0E"/>
+
+  <!-- ===== builder top bar ===== -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <path d="M28 28 L22 34 L28 40" fill="none" stroke="#A1A1A6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library →</text>
+
+  <!-- ===== side menu (resting) ===== -->
+  <rect x="0" y="56" width="216" height="1056" fill="#0E0E13"/>
+  <path d="M216 56 V1112" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <text x="20" y="122" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">CAPABILITIES</text>
+  <g filter="url(#tnd2)">
+    <rect x="20" y="130" width="176" height="44" rx="10" fill="#14141B" stroke="#A78BFA" stroke-width="1.5"/>
+  </g>
+  <text x="56" y="148" font-size="12" font-weight="600" fill="#F5F5F7">Tool</text>
+  <text x="56" y="163" font-size="10" fill="#A78BFA">2 bound · editing →</text>
+
+  <!-- ===== canvas (resting) ===== -->
+  <rect x="216" y="56" width="864" height="1056" fill="url(#tdots2)"/>
+  <g fill="#14141B" stroke="#26262F">
+    <rect x="640" y="110" width="170" height="62" rx="14"/>
+    <rect x="640" y="214" width="170" height="62" rx="14"/>
+    <rect x="640" y="318" width="170" height="62" rx="14"/>
+  </g>
+  <g font-size="13" font-weight="600" fill="#F5F5F7">
+    <text x="688" y="139">Purpose</text><text x="688" y="243">Context</text><text x="688" y="347">Model</text>
+  </g>
+  <g filter="url(#tnd2)">
+    <rect x="860" y="240" width="180" height="110" rx="16" fill="#14141B" stroke="#A78BFA" stroke-width="1.5"/>
+  </g>
+  <text x="880" y="267" font-size="13" font-weight="600" fill="#F5F5F7">Tools</text>
+  <text x="1024" y="267" font-size="10" text-anchor="end" fill="#A78BFA">2 bound</text>
+  <g font-size="11" font-weight="600" fill="#F5F5F7">
+    <text x="880" y="292">lookup_ticket · live</text>
+    <text x="880" y="312">refund_payment · shadow</text>
+    <text x="880" y="332" fill="#FF453A">sync_crm · pin stale</text>
+  </g>
+
+  <!-- ===== dedicated Tools section (inspector) ===== -->
+  <rect x="1080" y="56" width="360" height="1056" fill="#0E0E13"/>
+  <path d="M1080 56 V1112" stroke="#26262F"/>
+  <text x="1104" y="94" font-size="17" font-weight="600" fill="#F5F5F7">Tools</text>
+  <text x="1104" y="114" font-size="12" fill="#8E8E93">Capabilities this agent may call.</text>
+  <text x="1104" y="130" font-size="11" fill="#636366">Catalog writes land in the org library · Recorded in Audit</text>
+  <path d="M1396 88 l10 10 M1406 88 l-10 10" stroke="#8E8E93" stroke-width="1.6" stroke-linecap="round"/>
+
+  <!-- Block A · bound entries -->
+  <text x="1104" y="162" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">BOUND · 2/32</text>
+  <g filter="url(#tnd2)"><rect x="1104" y="174" width="312" height="84" rx="12" fill="#14141B" stroke="#26262F"/></g>
+  <circle cx="1122" cy="196" r="4.5" fill="#30D158"/>
+  <text x="1134" y="193" font-size="13" font-weight="600" fill="#F5F5F7">lookup_ticket</text>
+  <text x="1392" y="196" font-size="11" text-anchor="end" fill="#30D158">v3 ✓</text>
+  <text x="1134" y="211" font-size="11" fill="#8E8E93">READ_ONLY · approval none · live · read</text>
+  <text x="1134" y="229" font-size="11" fill="#8E8E93">sandboxed_microvm · egress: api.crm.example</text>
+  <text x="1134" y="247" font-size="12" fill="#8E8E93">Unbind · Shadow · Pin v4</text>
+
+  <g filter="url(#tnd2)"><rect x="1104" y="266" width="312" height="104" rx="12" fill="#14141B" stroke="#FF9F0A" stroke-opacity="0.5"/></g>
+  <circle cx="1122" cy="288" r="4.5" fill="#FF9F0A"/>
+  <text x="1134" y="285" font-size="13" font-weight="600" fill="#F5F5F7">refund_payment</text>
+  <text x="1392" y="288" font-size="11" text-anchor="end" fill="#FF9F0A">v2 ✓</text>
+  <text x="1134" y="303" font-size="11" fill="#8E8E93">DESTRUCTIVE · approval required · write</text>
+  <text x="1134" y="321" font-size="11" fill="#0A84FF">shadow — simulated, executes nothing</text>
+  <text x="1134" y="339" font-size="11" fill="#8E8E93">external_gateway · egress: pay.example (+binding host ✓)</text>
+  <text x="1134" y="357" font-size="12" fill="#0A84FF">Require approval in Approvals →</text>
+
+  <g filter="url(#tnd2)"><rect x="1104" y="378" width="312" height="104" rx="12" fill="#14141B" stroke="#FF453A" stroke-opacity="0.4"/></g>
+  <circle cx="1122" cy="400" r="4.5" fill="#FF453A"/>
+  <text x="1134" y="397" font-size="13" font-weight="600" fill="#F5F5F7">sync_crm</text>
+  <text x="1392" y="400" font-size="11" text-anchor="end" fill="#FF453A">stale</text>
+  <text x="1134" y="415" font-size="11" fill="#8E8E93">MUTATING · approval required · live</text>
+  <text x="1134" y="433" font-size="11" fill="#FF453A">Catalog is at v7 — this pin holds v5. Publish refuses.</text>
+  <text x="1134" y="455" font-size="12" fill="#0A84FF">Re-pin to v7</text>
+  <text x="1214" y="455" font-size="12" fill="#8E8E93">Unbind</text>
+
+  <!-- Block B · bind from catalog -->
+  <text x="1104" y="516" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">BIND FROM CATALOG</text>
+  <rect x="1104" y="528" width="312" height="30" rx="8" fill="#14141B" stroke="#26262F"/>
+  <text x="1118" y="547" font-size="12" fill="#636366">Filter by name, effect, approval…</text>
+  <g filter="url(#tnd2)"><rect x="1104" y="566" width="312" height="66" rx="12" fill="#14141B" stroke="#26262F"/></g>
+  <text x="1122" y="588" font-size="12" font-weight="600" fill="#F5F5F7">export_report</text>
+  <text x="1392" y="588" font-size="11" text-anchor="end" fill="#8E8E93">v1</text>
+  <text x="1122" y="606" font-size="11" fill="#8E8E93">MUTATING · approval none → linted: effectful without approval</text>
+  <text x="1122" y="624" font-size="12" fill="#0A84FF">Bind with hash pin</text>
+  <text x="1104" y="652" font-size="11" fill="#636366">Names: 2–64, lowercase/digits/_ — no leading-letter rule.</text>
+  <text x="1104" y="668" font-size="11" fill="#636366">Built-ins (web_search…) need no row — pick them directly.</text>
+
+  <!-- Block C · perimeter -->
+  <text x="1104" y="700" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PERIMETER · PINNED AT PUBLISH</text>
+  <rect x="1104" y="712" width="312" height="120" rx="12" fill="#14141B" stroke="#26262F"/>
+  <text x="1122" y="736" font-size="12" font-weight="600" fill="#F5F5F7">refund_payment</text>
+  <text x="1122" y="754" font-size="11" fill="#8E8E93">environment <text font-weight="600" fill="#F5F5F7">external_gateway</text> (catalog default —</text>
+  <text x="1122" y="770" font-size="11" fill="#8E8E93">historical posture, not in_process)</text>
+  <text x="1122" y="788" font-size="11" fill="#8E8E93">egress allowlist (2): pay.example, vault.example</text>
+  <text x="1122" y="804" font-size="11" fill="#30D158">binding host covered ✓ · authorize denies on drift</text>
+  <text x="1122" y="822" font-size="11" fill="#8E8E93">in_process rows declare no egress surface at all</text>
+
+  <!-- Block D · shadow rollout -->
+  <text x="1104" y="864" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">SHADOW ROLLOUT</text>
+  <rect x="1104" y="876" width="312" height="88" rx="12" fill="#0A84FF" fill-opacity="0.06" stroke="#0A84FF" stroke-opacity="0.3"/>
+  <text x="1122" y="900" font-size="12" font-weight="600" fill="#F5F5F7">Measure first, enforce later</text>
+  <text x="1122" y="918" font-size="11" fill="#8E8E93">refund_payment runs simulated while you watch</text>
+  <text x="1122" y="934" font-size="11" fill="#8E8E93">real traffic. Flip to live when the behavior earns it.</text>
+  <text x="1122" y="952" font-size="12" fill="#0A84FF">Flip refund_payment to live</text>
+
+  <text x="1104" y="994" font-size="12" fill="#636366">Unbind removes the entry, never the catalog row.</text>
+  <text x="1104" y="1012" font-size="12" fill="#636366">Effectful-without-approval rows are legal but linted.</text>
+  <rect x="1104" y="1024" width="120" height="32" rx="9" fill="#14141B" stroke="#3A3A3F"/>
+  <text x="1164" y="1044" font-size="12" text-anchor="middle" fill="#8E8E93">Skip for now</text>
+  <text x="1104" y="1074" font-size="12" fill="#0A84FF">Open in Tools library →</text>
+
+  <!-- ===== bottom action bar ===== -->
+  <rect x="0" y="1112" width="1440" height="68" fill="#14141B"/>
+  <path d="M0 1112 H1440" stroke="#26262F"/>
+  <circle cx="28" cy="1146" r="4" fill="#A78BFA"/>
+  <text x="40" y="1150" font-size="12" fill="#8E8E93">Tools are optional. 1 pin stale — publish refuses until re-pinned.</text>
+  <text x="1064" y="1151" font-size="13" text-anchor="middle" fill="#A1A1A6">Skip for now</text>
+  <rect x="1212" y="1126" width="128" height="40" rx="12" fill="#0A84FF"/>
+  <text x="1276" y="1151" font-size="14" font-weight="600" text-anchor="middle" fill="#FFF">Continue</text>
+</svg>

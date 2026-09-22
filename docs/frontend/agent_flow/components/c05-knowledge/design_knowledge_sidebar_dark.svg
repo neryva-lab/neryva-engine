@@ -1,0 +1,166 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="knd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="kdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+    <marker id="karw" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
+      <path d="M2.5,1.5 L6.5,4.5 L2.5,7.5" fill="none" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="karwLit" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
+      <path d="M2.5,1.5 L6.5,4.5 L2.5,7.5" fill="none" stroke="#0A84FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="900" fill="#0A0A0E"/>
+
+  <!-- ===== builder top bar (full-bleed) ===== -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <path d="M28 28 L22 34 L28 40" fill="none" stroke="#A1A1A6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library →</text>
+
+  <!-- ===== side menu: component palette (Knowledge owns its section) ===== -->
+  <rect x="0" y="56" width="216" height="776" fill="#0E0E13"/>
+  <path d="M216 56 V832" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <rect x="20" y="100" width="176" height="30" rx="8" fill="#14141B" stroke="#26262F"/>
+  <circle cx="34" cy="115" r="5" fill="none" stroke="#636366" stroke-width="1.5"/>
+  <path d="M38 119 l3 3" stroke="#636366" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="46" y="119" font-size="12" fill="#636366">Search…</text>
+
+  <text x="20" y="154" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">FOUNDATIONS</text>
+  <g>
+    <rect x="20" y="162" width="176" height="44" rx="10" fill="#14141B" stroke="#26262F"/>
+    <rect x="30" y="175" width="18" height="18" rx="5" fill="none" stroke="#30D158" stroke-width="1.5"/>
+    <path d="M34 184 l3 3 l6 -7" fill="none" stroke="#30D158" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="56" y="183" font-size="12" font-weight="600" fill="#F5F5F7">Purpose</text>
+    <text x="56" y="198" font-size="10" fill="#30D158">on canvas ✓</text>
+  </g>
+  <g>
+    <rect x="20" y="212" width="176" height="44" rx="10" fill="#14141B" stroke="#26262F"/>
+    <rect x="30" y="225" width="18" height="18" rx="5" fill="none" stroke="#30D158" stroke-width="1.5"/>
+    <path d="M34 234 l3 3 l6 -7" fill="none" stroke="#30D158" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="56" y="233" font-size="12" font-weight="600" fill="#F5F5F7">Model</text>
+    <text x="56" y="248" font-size="10" fill="#30D158">on canvas ✓</text>
+  </g>
+
+  <text x="20" y="282" font-size="10" font-weight="600" letter-spacing="0.9" fill="#0A84FF">SOURCES · KNOWLEDGE OPEN</text>
+  <!-- Knowledge: dedicated palette section, selected + expanded -->
+  <g filter="url(#knd)">
+    <rect x="20" y="290" width="176" height="172" rx="12" fill="#14141B" stroke="#0A84FF" stroke-width="1.5"/>
+  </g>
+  <rect x="30" y="303" width="18" height="18" rx="5" fill="#0A84FF" opacity="0.25"/>
+  <path d="M34 312 h10 M34 316 h7" stroke="#0A84FF" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="56" y="311" font-size="12" font-weight="600" fill="#F5F5F7">Knowledge</text>
+  <text x="56" y="326" font-size="10" fill="#0A84FF">3 pinned · K</text>
+  <g font-size="11" font-weight="500">
+    <rect x="30" y="334" width="156" height="28" rx="7" fill="#0A84FF" opacity="0.12"/>
+    <text x="42" y="352" fill="#F5F5F7">Upload files</text>
+    <text x="42" y="380" fill="#8E8E93">Paste text / JSON</text>
+    <text x="42" y="408" fill="#8E8E93">Pin from library</text>
+    <text x="42" y="436" fill="#8E8E93">Connector</text>
+    <rect x="122" y="424" width="30" height="15" rx="7.5" fill="none" stroke="#FF9F0A" stroke-width="1"/>
+    <text x="137" y="435" font-size="9" text-anchor="middle" fill="#FF9F0A">org</text>
+  </g>
+
+  <text x="20" y="488" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">CAPABILITIES</text>
+  <g>
+    <rect x="20" y="496" width="176" height="44" rx="10" fill="#14141B" stroke="#26262F"/>
+    <rect x="30" y="509" width="18" height="18" rx="5" fill="none" stroke="#8E8E93" stroke-width="1.5"/>
+    <path d="M34 518 h10 M39 513 v10" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
+    <text x="56" y="517" font-size="12" font-weight="600" fill="#F5F5F7">Tool</text>
+    <text x="56" y="532" font-size="10" fill="#8E8E93">drag to attach</text>
+  </g>
+  <text x="20" y="566" font-size="10" font-weight="600" letter-spacing="0.9" fill="#636366">SAFEGUARDS</text>
+  <g>
+    <rect x="20" y="574" width="176" height="44" rx="10" fill="#14141B" stroke="#26262F"/>
+    <rect x="30" y="587" width="18" height="18" rx="5" fill="none" stroke="#8E8E93" stroke-width="1.5"/>
+    <path d="M39 589 v6 M36 592 h6" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
+    <text x="56" y="595" font-size="12" font-weight="600" fill="#F5F5F7">Guardrail</text>
+    <text x="56" y="610" font-size="10" fill="#8E8E93">defaults active</text>
+  </g>
+  <g font-size="10" fill="#636366">
+    <text x="20" y="764">N search · K knowledge</text>
+    <text x="20" y="780">⌘S save · Del detach</text>
+    <text x="20" y="796">F fit · Esc close</text>
+  </g>
+
+  <!-- ===== canvas (dimmed; Knowledge satellite lit) ===== -->
+  <g opacity="0.4">
+    <rect x="216" y="56" width="864" height="776" fill="url(#kdots)"/>
+    <g fill="#14141B" stroke="#26262F">
+      <rect x="640" y="110" width="170" height="62" rx="14"/>
+      <rect x="640" y="214" width="170" height="62" rx="14"/>
+      <rect x="640" y="422" width="170" height="62" rx="14"/>
+      <rect x="640" y="526" width="170" height="62" rx="14"/>
+    </g>
+    <g font-size="13" font-weight="600" fill="#F5F5F7">
+      <text x="688" y="139">Purpose</text><text x="688" y="243">Context</text>
+      <text x="688" y="451">Response</text><text x="688" y="555">Publish</text>
+    </g>
+  </g>
+  <!-- lit feed: Knowledge → Context -->
+  <path d="M576 300 C600 300 596 245 636 245" fill="none" stroke="#0A84FF" stroke-width="1.5" marker-end="url(#karwLit)"/>
+  <!-- Knowledge satellite: slug-first rows, no invented Retry -->
+  <rect x="344" y="196" width="228" height="8" rx="4" fill="none" stroke="#0A84FF" stroke-opacity="0.25" stroke-width="8"/>
+  <g filter="url(#knd)">
+    <rect x="352" y="204" width="212" height="252" rx="16" fill="#14141B" stroke="#0A84FF" stroke-width="1.5"/>
+  </g>
+  <text x="372" y="231" font-size="13" font-weight="600" fill="#F5F5F7">Knowledge</text>
+  <circle cx="540" cy="227" r="4" fill="#0A84FF"/>
+  <text x="540" y="247" font-size="10" text-anchor="end" fill="#0A84FF">3 pinned</text>
+  <g font-size="11">
+    <rect x="364" y="257" width="188" height="42" rx="9" fill="#0A0A0E" stroke="#26262F"/>
+    <circle cx="378" cy="278" r="4" fill="#30D158"/>
+    <text x="390" y="275" font-weight="600" fill="#F5F5F7">refund-policy</text>
+    <text x="390" y="289" font-size="10" fill="#30D158">Ready · v3 · covered</text>
+    <rect x="364" y="303" width="188" height="52" rx="9" fill="#0A0A0E" stroke="#0A84FF" stroke-opacity="0.5"/>
+    <circle cx="378" cy="324" r="4" fill="#0A84FF"/>
+    <text x="390" y="321" font-weight="600" fill="#F5F5F7">faq-2026</text>
+    <rect x="390" y="328" width="110" height="3.5" rx="1.75" fill="#26262F"/>
+    <rect x="390" y="328" width="68" height="3.5" rx="1.75" fill="#0A84FF"/>
+    <text x="506" y="332" font-size="10" fill="#0A84FF">62%</text>
+    <rect x="364" y="359" width="188" height="52" rx="9" fill="#0A0A0E" stroke="#FF453A" stroke-opacity="0.4"/>
+    <circle cx="378" cy="380" r="4" fill="#FF453A"/>
+    <text x="390" y="377" font-weight="600" fill="#F5F5F7">pricing-tiers</text>
+    <text x="390" y="391" font-size="10" fill="#FF453A">Quarantined · replace</text>
+  </g>
+  <rect x="364" y="415" width="188" height="22" rx="11" fill="#0A84FF" opacity="0.12"/>
+  <text x="458" y="430" font-size="11" text-anchor="middle" fill="#0A84FF">+ Attach from library</text>
+  <text x="372" y="450" font-size="10" fill="#636366">detach ≠ delete · stays in library</text>
+
+  <!-- ===== inspector (dimmed; dedicated section lives here) ===== -->
+  <g opacity="0.4">
+    <rect x="1080" y="56" width="360" height="776" fill="#0E0E13"/>
+    <path d="M1080 56 V832" stroke="#26262F"/>
+    <text x="1104" y="94" font-size="17" font-weight="600" fill="#F5F5F7">Knowledge</text>
+    <text x="1104" y="114" font-size="12" fill="#8E8E93">3 pinned · retrieval off</text>
+    <rect x="1104" y="136" width="312" height="104" rx="14" fill="#0A84FF" fill-opacity="0.06" stroke="#0A84FF" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="1260" y="182" font-size="13" font-weight="600" text-anchor="middle" fill="#F5F5F7">Drop files here</text>
+    <text x="1260" y="200" font-size="11" text-anchor="middle" fill="#8E8E93">allowlist + org limit stated</text>
+    <text x="1104" y="272" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">PINNED · 3/16</text>
+    <rect x="1104" y="284" width="312" height="60" rx="12" fill="#14141B" stroke="#26262F"/>
+    <rect x="1104" y="352" width="312" height="70" rx="12" fill="#14141B" stroke="#0A84FF" stroke-opacity="0.5"/>
+    <rect x="1104" y="430" width="312" height="60" rx="12" fill="#14141B" stroke="#FF453A" stroke-opacity="0.35"/>
+  </g>
+
+  <!-- ===== bottom action bar ===== -->
+  <rect x="0" y="832" width="1440" height="68" fill="#14141B"/>
+  <path d="M0 832 H1440" stroke="#26262F"/>
+  <circle cx="28" cy="866" r="4" fill="#0A84FF"/>
+  <text x="40" y="870" font-size="12" fill="#8E8E93">Knowledge is optional. Skipped is not broken — 1 source still embedding.</text>
+  <text x="1064" y="871" font-size="13" text-anchor="middle" fill="#A1A1A6">Skip for now</text>
+  <rect x="1212" y="846" width="128" height="40" rx="12" fill="#0A84FF"/>
+  <text x="1276" y="871" font-size="14" font-weight="600" text-anchor="middle" fill="#FFF">Continue</text>
+</svg>

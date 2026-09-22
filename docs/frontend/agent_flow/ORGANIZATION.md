@@ -10,8 +10,10 @@
 
 - **Library plane** — `documents` (+versions/chunks/embeddings), `upload_sessions`, `connector_accounts`,
   `tool_catalog`, `provider_credentials` + `provider_enablements`, `model_catalog_entries` + `model_cost_entries`,
-  `assistant_templates`, `eval_datasets`/`eval_cases` (scope to confirm in C10 pass), `memory_items` (org-scoped).
-  One row serves many agents. Governed by role (enable/credential/admin acts).
+  `assistant_templates`, `eval_datasets`/`eval_cases` (org-scoped, unique org+name — `eval.schema.ts:19-32`),
+  `memory_items` (org-scoped). One row serves many agents. Governed by role (enable/credential/admin acts).
+  Table names above are schema-verified; release pointers are controller-verified (`releases.controller.ts`)
+  with no table name asserted here — do not cite one.
 - **Agent plane** — `assistants`, `assistant_versions`, `policy_snapshots`, `run_manifests`, `assistant_installs`,
   `assistant_rollouts`, `releases`. One row-set per agent. Drafted by makers, published by owners/admins.
 - **Bridges** (agent → library references, never copies): knowledge **pins** (slugs), tool **bindings**
@@ -20,63 +22,56 @@
 
 ## Global sidebar (proposed — 4 groups, no per-component items)
 
+SUPERSEDED by `../sidebar/SIDEBAR_CEO_REPORT.md` §5 (7 domains, single-sidebar level swap), which
+preserves every rule below and corrects the grouping: the flat 4-group sidebar mixed tiers and
+contradicted the own-entry locks. Authoritative domain map:
+
 ```text
-BUILD
-  Agents                agents list → agent detail (operate, C15; install/provisioning state lives on detail)
-  Templates             gallery → detail → install (C11)
-
-LIBRARIES
-  Knowledge             documents + uploads + connectors (C05)
-  Memory                scope-aware browse (organization/user/assistant) + proposals queue (C08)
-  Tools                 catalog govern + attach source (C06)
-  Providers & Models    credentials + enablements + catalog + costs, two tabs (C04-govern half)
-  Datasets              read-only browse (C10; ids discoverable for the 422 path)
-
-OPERATE
-  Channels              binds with returnTo (C14-success exit, C15)
-  Approvals             ONE queue, kind filter (tool-call · memory-proposal · runtime) (C06/C08/C13)
-  Blocks                org blocks manageable (owner/admin) · platform template blocks read-only
-  Audit                 filterable log (degraded acks, compromises, publishes)
-
-ADMIN
-  Members · Billing & usage · Settings   (org prefs incl. memory scrub/TTL + DSR entry — C08 routes here)
+Dashboard (org-level roll-up only) · Chat (single surface) · Agents (Overview · All agents ·
+Templates · Conversations · Evaluations) · Libraries (Documents · Sources · Memory · Datasets ·
+Tools · Providers & Models) · Insights (Analytics · Usage · Activity) · Platform (Connect:
+Integrations · Webhooks · Channels / Governance: Approvals · Blocks · Compliance incl. audit /
+Developer: API explorer) · Settings (Profile · Workspace · Roles · Billing · Security · API keys)
 ```
 
-New agent = primary button on the Agents toolbar (+ palette), never a nav item. Terminology follows
-the locked vocabulary below (Agents not Fleet; Test run not Try; Publish not Ship).
+Invariants carried over unchanged: placement rule per component, scope classes, both-layer tokens,
+drift column, vocabulary lock, used-by decision, three don't-builds. New agent = primary button on
+the Agents toolbar (+ palette), never a nav item.
 
-Builder, Try, Ship, Engine Room: NOT sidebar. Entered via New / agent row / deep link; left rail = C-state checklist.
+Builder, Test run, Publish, Advanced editor: NOT sidebar. Entered via New / agent row / deep link;
+left rail = C-state checklist. (Codename policy: retired words survive ONLY in internal identifiers —
+file paths, component IDs, phase enum values. They are forbidden in any user-readable string.)
 
-## Component placement rule (all 15, no exceptions)
+## Component placement rule (all 15)
 
 | Component | Lives in | Why |
 |---|---|---|
-| C01 Identity | builder Purpose + fleet row | agent plane, created once |
+| C01 Identity | builder identity step + Agents row | agent plane, created once |
 | C02 Instructions | builder inspector only | agent plane, no shared entity behind it |
 | C03 Brand | builder inspector only | version field, no shared entity |
-| C04 Brain | SPLIT: govern half → Providers & Models library; pick half → builder inspector | catalog+credentials shared; allowlist per-agent |
+| C04 Model | SPLIT: govern half → Providers & Models library; pick half → builder inspector | catalog+credentials shared; allowlist per-agent |
 | C05 Knowledge | SPLIT: pool → Knowledge library; pins+retrieval+coverage → builder inspector | docs shared; pins per-agent |
 | C06 Tools | SPLIT: rows → Tools catalog; bindings → builder inspector | catalog shared; bindings per-agent |
 | C07 Guardrails | builder inspector only (+ static defaults) | per-agent policy; no shared entity — NO new library without backend |
-| C08 Memory | SPLIT: scope/history → builder inspector; scrub/TTL → Admin Settings (read-only rows route there); proposals queue → Knowledge library Memory tab | memories org-scoped; governance org-level |
+| C08 Memory | SPLIT: scope/history → builder inspector; scrub/TTL → Admin Settings (read-only rows route there); proposals queue → Libraries › Memory | memories org-scoped; governance org-level |
 | C09 Budget | builder inspector only (+ static defaults) | per-agent caps; costs read from catalog |
-| C10 Evaluation | SPLIT: datasets → reusable library entity (confirm scope in pass); runs/decisions → builder + detail | runs are per-version; datasets shared |
+| C10 Evaluation | SPLIT: datasets → Libraries › Datasets (org-scoped, verified); runs/decisions → builder + detail | runs are per-version; datasets shared |
 | C11 Templates | Templates library → installs INTO builder | registry shared; install row per-agent |
 | C12 Origins | start-screen overlays (in-builder) | entry modes, not destinations |
-| C13 Try | builder phase (in-builder) | test runs are per-draft |
-| C14 Ship | builder phase (in-builder) | publish acts on the draft |
-| C15 Operate | agent detail page (from Fleet) | post-publish surface per agent |
+| C13 Test run | builder phase (in-builder) | test runs are per-draft |
+| C14 Publish | builder phase (in-builder) | publish acts on the draft |
+| C15 Operate | agent detail page (from Agents) | post-publish surface per agent |
 
 ## Reuse stories (your AgentA example, generalized — one per library)
 
-- **Knowledge**: upload once (library or builder-inline — both land in the library with its `source_slug` address), pin from any agent. Rename is audited; old pins resolve visibly-unresolved next publish. "Used by N agents": NO engine read exists (verified — only FK references, no used-by query). Options: (a) client-side join over the fleet's versions (fine at fleet scale, note pagination), (b) defer. Decide in C05 pass.
+- **Knowledge**: upload once (library or builder-inline — both land in the library with its `source_slug` address), pin from any agent. Rename MUTATES `source_slug` (audited as `document.source_slug_renamed`, 409 `source_slug_taken` on collision; rules: 3–64 chars, lowercase/digits/hyphens, starts+ends alnum — `source-slug.ts:17`, `artifacts.service.ts:252-282`) — therefore rename is `governance`-scoped with blast radius in the confirmation, and old pins resolve visibly-unresolved next publish. "Used by N agents": NO ambient column (client-side version scans forbidden). Show single-entity count on the library DETAIL page only, sourced from `policy_snapshots` pins (published truth), labeled "N published agents — drafts not included". Credential-revoke confirmations add: drafts are also affected and are not counted (snapshots can't see them).
 - **Tools**: governed once (enable, credential, env/egress), bound per agent. Built-ins always present. Drift is the version story: pin hash vs catalog hash → re-pin.
 - **Models/credentials**: connected once, picked per agent. Compromise blast radius reads naturally from this split (one credential → all agents using it).
 - **Templates vs Clone** (guidance copy to write in C11/C12): template = curated, versioned, supported package (update signals, repair checklist). Clone = exact copy of YOUR agent at this moment (no update path, no checklist). Rule of thumb: starting something standard → template; iterating on your own work → clone/new draft.
 - **Instructions/brand**: NO shared entity — reuse is deterministic suggestions from org history + the reviewed static scaffold library (C02 binds). Never a new backend.
 - **Budgets/guardrails**: static reviewed defaults + template-carried values. NO preset-library entities without backend support — do not design them.
-- **Eval datasets**: likely org-reusable (template-seeded `template:<slug>@<version>`); confirm scope in C10 pass, then dataset picker mirrors the knowledge pattern.
-- **Memories**: org entities; proposals queue under Knowledge library Memory tab; per-agent scope stays in the builder.
+- **Eval datasets**: org-scoped and reusable (template-seeded `template:<slug>@<version>`); dataset picker mirrors the knowledge pattern (C10).
+- **Memories**: org entities; proposals queue inside Libraries › Memory; per-agent scope stays in the builder.
 
 ## Two-way creation (no dead ends, both directions)
 
@@ -104,13 +99,23 @@ address surfaced immediately.
 Drafts reference by name; publish pins exact versions/hashes. Same slug can mean different content
 across two agents' snapshots — so every inspector token shows both:
 
-| Component | Token |
-|---|---|
-| Knowledge | `source_slug` · pinned/resolved `document_version` · `embedding_model` · coverage |
-| Tools | catalog `name` · `schema_hash` prefix · effect class · effective approval |
-| Model | `provider/model` · catalog entry hash · availability reason (verbatim engine code) |
-| Evaluation | dataset id · **content hash the decision was made against** (gate is hash-keyed) |
-| Memory | scope · `visibility` · `expiresAt` (memory has NO retrieval_acl column — `visibility` governs) |
+| Component | Token | Layer |
+|---|---|---|
+| Knowledge | `source_slug` | **draft-writable** (`context_policy.knowledge_sources`) |
+| Knowledge | `retrieval_enabled`, `max_results` | **draft-writable** (`knowledge_policy`) — note the trap: slugs and retrieval knobs live in TWO different payload objects for one UI section |
+| Knowledge | resolving `document_version`, `embedding_model`, coverage | **resolved read-only** (publish-time pins / org `knowledge_config`) |
+| Tools | `name`, `access`, `approval`, `schema_hash` | **draft-writable** (`tool_policy.tools[]`) |
+| Tools | `effect_class`, `effectiveApproval`, enabled state | **catalog read-only — never in the payload** (`effect_class`/`when_to_use` round-tripped into a binding fail with 422 dotted paths) |
+| Model | `allowed_models[]`, `fallback_enabled`, `model_params` | **draft-writable** |
+| Model | entry hash, availability reason | **catalog read-only** |
+| Evaluation | dataset id | **eval-run parameter**, not definition |
+| Evaluation | content hash | **version row**, read-only |
+| Memory | `context_policy.memory_scope` (+ history/summary) | **draft-writable** |
+| Memory | `visibility`, `expires_at`, `valid_from/invalid_at/supersedes` | **library row** (`memory_items`) |
+
+**Rule: a token may DISPLAY resolved values; it may only SUBMIT draft-writable ones.**
+`rejectUnknownPayloadKeys` deep-diffs and 422s template-only extensions by exact key path
+(`validation.ts:201-211`) — the token is a view, never the submit shape.
 
 Correction logged: an earlier draft specified `retrieval_acl` for memory — wrong table
 (`memory_items`: scope_type organization|conversation|assistant|user, visibility default
@@ -136,7 +141,14 @@ publish auto-resolves slugs to current versions, so a button would invent capabi
 (`assistant active version already carries this payload`, `assistants.service.ts:1884-1889`);
 prompt-only edits always publish (manifest covers pins/bindings/refs, NOT prompt/params).
 Pre-empt both: `No changes to publish` state, never a surprise 409. (Same-content + drifted
-manifest = legitimate re-publish that re-pins the world — the button must stay live there.)
+manifest = legitimate re-publish that re-pins the world — the button must stay live there.
+DEFENDED 2026-09-17 against a review claiming otherwise: the publish path resolves the manifest
+BEFORE the guard (`insertPublishedVersion`: `resolveForPublish` at :1583 → `rejectNoOpPublish(hash,
+manifestHash)` at :1589), and the guard passes on manifest difference (`assistants.service.ts:1577-1589,
+1844-1858`). A claimed "step 2 guard vs step 5 resolution" ordering does not exist in this code.
+Consequence: identical payload + new document version re-publishes fine — the only gap is the
+*signal* (no "newer version available" indicator), already tracked as the C05 open verify. No engine
+patch needed; nothing smuggled.)
 
 ## User-facing vocabulary (LOCKED 2026-09-17 — nouns from the engine, verbs/descriptions ours)
 
@@ -156,7 +168,7 @@ Studio (as product word in copy), Engine Room, Fleet (as nav; internal codename 
 | Context | `context_policy` | |
 | Test run | `test-runs` route, `run_kind:'test'`, `assistant.test_run_started` | verb "test", noun "test run" |
 | Publish | `assistant.published`, `PUBLISHED` | |
-| Draft / Published / Retired (+ Version N) | version status enum | "Rolled back" is NOT a status — rollback births a new version; never use "edition/revision" |
+| Draft / Published / Retired (+ Version N) | version status enum | rollback births a NEW version (`rollback_of`); `ROLLED_BACK` is admissible only as historical residue (`schema.ts:65-67,286-290`) — keep a read-only render path labeled `Rolled back (historical)`, never a state users can reach; never use "edition/revision" |
 | Variant | rollout traffic splits ONLY | never for versions |
 | Conversation / Run / Test run | thread / one execution / `run_kind:'test'` | three words, three meanings |
 | Degraded | `publish_degraded_acknowledged` | always with explicit acknowledge |
@@ -175,9 +187,19 @@ ids that error is a dead end). Add to Operate: **Blocks** — org control blocks
 owner/admin (CRUD exists), platform template blocks read-only (staff-written; no org create UI).
 Agent detail permanently carries install/provisioning state (async provisioning can dead-letter after
 tab close). Remove `+New` from nav — primary New agent button on the Agents toolbar (+ palette);
-nav stays navigational. **Approvals is one queue** (`kind` filter: tool-call, memory-proposal,
-runtime; requester's context inline; builder deep-links carry `returnTo`). Role-gated items stay
-**visible with explanation + request path**. Third don't-build: **no org template authoring UI**
+nav stays navigational. **Approvals is one destination**: three verified systems feed it —
+runtime `approvals` (state-filtered list, cap 200, extend PENDING-only, APPROVED/DENIED with
+idempotent replay and 1–5 multi-approver chain), `memory_proposals` (own decision path), escalations
+(claim/assign/resolve/reply). There is NO `kind` dimension on the approvals read, so a kind filter
+ships ONLY if the pass proves an aggregation that keeps every option non-empty (open verify);
+otherwise separate destinations sharing one visual pattern. Builder "Request approval" deep-links
+carry `returnTo`. Role-gated items stay **visible with explanation + request path**.
+**Blocks compute status client-side**: no sweeper — ACTIVE means `expires_at IS NULL OR > now()`
+(`control-blocks.service.ts:14-18`), so the list renders Active / Expires-in-N / Expired against
+server time; targets are exactly assistant|version|tool|template|capability (`schema.ts:387-393`).
+Template-targeted blocks ALSO surface on the Templates card (`Install blocked — reason, expiry` +
+link to Blocks), because install refuses inside the TX (409) and click-to-fail is a dead end.
+Third don't-build: **no org template authoring UI**
 (registry is a global mirror written by the release job) — in-product answer is clone or
 export/import, stated, never a dead end.
 **Memory = own Libraries entry** (not a Knowledge tab): authorship, address, write gate
@@ -189,7 +211,7 @@ assistant browsable; conversation-scoped surfaces on the conversation/trace or n
 ## Used-by decision (LOCKED 2026-09-17)
 
 No ambient "N agents" column (lie-prone: drafts? retired? which hash? — plus a jsonb scan per
-render). Ship instead: single-entity count on the library DETAIL page only, honestly labeled
+render). Show instead: single-entity count on the library DETAIL page only, honestly labeled
 (**"N published agents — drafts not included"**); action-scoped blast-radius confirmations on the
 four destructive actions (revoke/delete credential, delete document, disable catalog tool, retire
 model). Later, if ever ambient: source from `policy_snapshots.knowledgePins`/`toolBindings`
@@ -197,8 +219,10 @@ model). Later, if ever ambient: source from `policy_snapshots.knowledgePins`/`to
 
 ## Open verifies (attached to their component passes, not this doc)
 
-- C05: used-by derivation (option a vs defer); pin "newer version available" signal — none found, do not design until proven.
-- C08: memory `user` scope (carried over); proposals-queue placement confirm (proposed: Knowledge library Memory tab).
-- C10: eval dataset scope (org vs per-agent) for the reusable-picker pattern.
+- C05: "newer version available" SIGNAL — none found (mechanism exists: identical payload + new doc version re-resolves pins → new manifestHash → legitimate re-publish; only the *indicator* is missing). Do not design a re-pin control; a read-only signal is the only open shape.
+- C08: memory `user` scope (carried over).
+- C10: CLOSED — `eval_datasets` org-scoped (`organizationId`, unique org+name; name ≤128, description ≤2048 — `eval.schema.ts:19-32`). Reusable-picker pattern unblocked.
 - C11: update-adoption mechanism (carried over); description edit route.
+- Approvals aggregation: THREE separate systems verified (`approvals` state-filtered list + extend PENDING-only + APPROVED/DENIED decisions with idempotent replay and 1–5 multi-approver chain; `memory_proposals` own decision path; escalations claim/assign/resolve/reply). NO `kind` dimension on the approvals read. Decide in pass: aggregate-if-coherent vs separate destinations — but ship NO filter option the reads can't serve.
+- C14: CLOSED — publish/rollback verified owner/admin-only (`assistants.controller.ts:173-175`); developer Publish renders explained + request path (binds in C14 SPEC + global contracts).
 - Cross: `min()` name rule for tools (carried over).

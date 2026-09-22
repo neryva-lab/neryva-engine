@@ -1,0 +1,114 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="nd5" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#0A0A0E"/>
+
+  <g transform="translate(-132,0)">
+  <!-- ===== page header ===== -->
+  <text x="296" y="52" font-size="26" font-weight="650" fill="#F5F5F7">Billing Support</text>
+  <text x="296" y="74" font-size="13" fill="#8E8E93">Handles billing questions with refund-policy voice</text>
+  <rect x="560" y="32" width="52" height="21" rx="10.5" fill="#30D158" opacity="0.14"/>
+  <text x="586" y="46" font-size="11" text-anchor="middle" fill="#30D158">Live</text>
+  <rect x="1290" y="28" width="126" height="36" rx="10" fill="#0A84FF"/>
+  <text x="1353" y="51" font-size="13" font-weight="600" text-anchor="middle" fill="#FFF">Open in builder</text>
+
+  <!-- ===== meta strip ===== -->
+  <g font-size="11">
+    <text x="296" y="108" fill="#636366">MODEL</text>
+    <text x="296" y="126" font-size="12" fill="#F5F5F7">Sonnet 4.5 · fallback on</text>
+    <text x="520" y="108" fill="#636366">KNOWLEDGE</text>
+    <text x="520" y="126" font-size="12" fill="#F5F5F7">refund-policy, faq-2026</text>
+    <text x="744" y="108" fill="#636366">COST CAP</text>
+    <text x="744" y="126" font-size="12" fill="#F5F5F7">2.00 USD / run</text>
+    <text x="968" y="108" fill="#636366">VERSIONS</text>
+    <text x="968" y="126" font-size="12" fill="#F5F5F7">v3 live · 1 draft open</text>
+  </g>
+
+  <!-- ===== neighbor above (dimmed) ===== -->
+  <g opacity="0.45">
+    <rect x="296" y="146" width="1120" height="52" rx="12" fill="#14141B" stroke="#26262F"/>
+    <text x="320" y="168" font-size="13" font-weight="600" fill="#F5F5F7">System instructions</text>
+    <text x="320" y="186" font-size="11" fill="#8E8E93">1,240 chars · 3 rules · Copy prompt</text>
+  </g>
+
+  <!-- ===== BRAIN panel (the dedicated section) ===== -->
+  <g filter="url(#nd5)"><rect x="296" y="210" width="1120" height="470" rx="14" fill="#0E0E13" stroke="#26262F"/></g>
+  <text x="320" y="244" font-size="15" font-weight="600" fill="#F5F5F7">Brain — model policy</text>
+  <text x="320" y="262" font-size="12" fill="#8E8E93">What serves this agent, in what order, at what cost. Edits live in the builder.</text>
+  <text x="1392" y="244" font-size="12" text-anchor="end" fill="#0A84FF">Edit in builder →</text>
+
+  <!-- resolved + fallback chain -->
+  <text x="320" y="292" font-size="10" font-weight="600" letter-spacing="0.8" fill="#636366">SERVING NOW · ACTIVE v3</text>
+  <g font-size="12">
+    <rect x="320" y="300" width="330" height="64" rx="11" fill="#0A0A0E" stroke="#30D158" stroke-opacity="0.45"/>
+    <circle cx="340" cy="322" r="4.5" fill="#30D158"/>
+    <text x="354" y="319" font-weight="600" fill="#F5F5F7">Claude Sonnet 4.5</text>
+    <text x="354" y="337" font-size="11" fill="#8E8E93">primary · $3/$15 per 1M</text>
+    <text x="634" y="332" font-size="16" fill="#0A84FF">→</text>
+    <rect x="662" y="300" width="330" height="64" rx="11" fill="#0A0A0E" stroke="#26262F"/>
+    <circle cx="682" cy="322" r="4.5" fill="#30D158"/>
+    <text x="696" y="319" font-weight="600" fill="#F5F5F7">Claude Haiku 4.5</text>
+    <text x="696" y="337" font-size="11" fill="#8E8E93">fallback · $1/$5 per 1M</text>
+    <rect x="1000" y="300" width="180" height="64" rx="11" fill="none" stroke="#3A3A3F" stroke-dasharray="4 4"/>
+    <text x="1090" y="326" font-size="12" text-anchor="middle" fill="#636366">GPT-5 EU</text>
+    <text x="1090" y="344" font-size="10" text-anchor="middle" fill="#FF9F0A">residency: excluded</text>
+  </g>
+  <text x="320" y="384" font-size="11" fill="#636366">Fallback serves availability in listed order — never a silent downgrade. Last fallback serve: 2d ago (visible in Observe).</text>
+
+  <!-- params + costs -->
+  <text x="320" y="414" font-size="10" font-weight="600" letter-spacing="0.8" fill="#636366">PARAMETERS · SCHOLAR PRESET</text>
+  <g font-size="12" fill="#F5F5F7">
+    <rect x="320" y="422" width="150" height="52" rx="10" fill="#0A0A0E" stroke="#26262F"/>
+    <text x="334" y="443" font-size="10" fill="#636366">TEMPERATURE</text>
+    <text x="334" y="461" font-weight="600">0.7</text>
+    <rect x="478" y="422" width="150" height="52" rx="10" fill="#0A0A0E" stroke="#26262F"/>
+    <text x="492" y="443" font-size="10" fill="#636366">TOP_P</text>
+    <text x="492" y="461" font-weight="600">1.0</text>
+    <rect x="636" y="422" width="150" height="52" rx="10" fill="#0A0A0E" stroke="#26262F"/>
+    <text x="650" y="443" font-size="10" fill="#636366">MAX OUTPUT</text>
+    <text x="650" y="461" font-weight="600">16,000</text>
+    <rect x="794" y="422" width="150" height="52" rx="10" fill="#0A0A0E" stroke="#26262F"/>
+    <text x="808" y="443" font-size="10" fill="#636366">REASONING</text>
+    <text x="808" y="461" font-weight="600">high</text>
+    <rect x="952" y="422" width="228" height="52" rx="10" fill="#0A0A0E" stroke="#26262F"/>
+    <text x="966" y="443" font-size="10" fill="#636366">OUTPUT SCHEMA</text>
+    <text x="966" y="461" font-weight="600">refund-verdict v2 ✓</text>
+  </g>
+
+  <!-- credentials + served reality -->
+  <text x="320" y="500" font-size="10" font-weight="600" letter-spacing="0.8" fill="#636366">CREDENTIALS · FINGERPRINTS ONLY</text>
+  <rect x="320" y="508" width="540" height="56" rx="11" fill="#0A0A0E" stroke="#26262F"/>
+  <circle cx="340" cy="530" r="4" fill="#30D158"/>
+  <text x="354" y="527" font-size="12" font-weight="600" fill="#F5F5F7">anthropic · prod key · ****9f2c</text>
+  <text x="354" y="545" font-size="11" fill="#8E8E93">rotated 12d ago · healthy</text>
+  <text x="836" y="536" font-size="11" text-anchor="end" fill="#0A84FF">Manage in Models →</text>
+  <rect x="320" y="572" width="540" height="56" rx="11" fill="#0A0A0E" stroke="#FF453A" stroke-opacity="0.4"/>
+  <circle cx="340" cy="594" r="4" fill="#FF453A"/>
+  <text x="354" y="591" font-size="12" font-weight="600" fill="#F5F5F7">deepseek · backup key · ****41ab</text>
+  <text x="354" y="609" font-size="11" fill="#FF453A">revoked as compromised 3d ago — DeepSeek Chat unusable (derived)</text>
+
+  <text x="892" y="500" font-size="10" font-weight="600" letter-spacing="0.8" fill="#636366">SERVED REALITY · LAST 50 RUNS</text>
+  <rect x="892" y="508" width="288" height="120" rx="11" fill="#0A0A0E" stroke="#26262F"/>
+  <text x="910" y="532" font-size="26" font-weight="650" fill="#F5F5F7">47 · 3</text>
+  <text x="910" y="550" font-size="11" fill="#8E8E93">primary serves · fallback serves</text>
+  <rect x="910" y="560" width="252" height="5" rx="2.5" fill="#26262F"/>
+  <rect x="910" y="560" width="237" height="5" rx="2.5" fill="#30D158"/>
+  <text x="910" y="582" font-size="11" fill="#8E8E93">last fallback 2d ago · est. $4.10</text>
+  <text x="910" y="600" font-size="11" fill="#0A84FF">Open in Observe →</text>
+
+  <text x="320" y="660" font-size="11" fill="#636366">Edits (reorder, params, profiles, keys) live in the builder Brain slot and the Models library — this panel never forks them.</text>
+
+  <!-- ===== neighbor below (dimmed) ===== -->
+  <g opacity="0.45">
+    <rect x="296" y="692" width="1120" height="52" rx="12" fill="#14141B" stroke="#26262F"/>
+    <text x="320" y="714" font-size="13" font-weight="600" fill="#F5F5F7">Versions</text>
+    <text x="320" y="732" font-size="11" fill="#8E8E93">Immutable drafts and published versions — publish to serve, rollback to recover.</text>
+  </g>
+  </g>
+</svg>

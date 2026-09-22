@@ -1,0 +1,85 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="bdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Returns Helper</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library</text>
+
+  <rect x="0" y="56" width="216" height="1164" fill="#0E0E13"/>
+  <path d="M216 56 V1220" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <circle cx="30" cy="116" r="5" fill="#0A84FF"/><text x="44" y="120" font-size="13" fill="#F5F5F7">Knowledge</text>
+  <circle cx="30" cy="146" r="5" fill="#A78BFA"/><text x="44" y="150" font-size="13" fill="#F5F5F7">Tools</text>
+  <circle cx="30" cy="176" r="5" fill="#FF9F0A"/><text x="44" y="180" font-size="13" fill="#F5F5F7">Memory</text>
+  <circle cx="30" cy="206" r="5" fill="#64D2FF"/><text x="44" y="210" font-size="13" fill="#F5F5F7">Budget</text>
+  <circle cx="30" cy="236" r="5" fill="#30D158"/><text x="44" y="240" font-size="13" font-weight="600" fill="#F5F5F7">Evaluator</text>
+  <rect x="14" y="222" width="188" height="30" rx="8" fill="#30D158" opacity="0.12"/>
+  <text x="176" y="241" font-size="11" fill="#8E8E93">E</text>
+
+  <rect x="216" y="56" width="824" height="1164" fill="#0A0A0E"/>
+  <rect x="216" y="56" width="824" height="1164" fill="url(#bdots)"/>
+  <g filter="url(#bnd)">
+    <rect x="480" y="430" width="300" height="150" rx="14" fill="#14141B" stroke="#30D158" stroke-width="1.5"/>
+    <circle cx="504" cy="462" r="6" fill="#FF9F0A"/>
+    <text x="518" y="467" font-size="14" font-weight="600" fill="#F5F5F7">Evaluator</text>
+    <text x="504" y="492" font-size="12" fill="#A1A1A6">Stale decision — re-run</text>
+    <text x="504" y="514" font-size="11" fill="#8E8E93">PASS on a41f9c… · draft now b77c1d…</text>
+    <text x="504" y="552" font-size="11" fill="#636366">E · Proof this agent behaves</text>
+  </g>
+
+  <rect x="1040" y="56" width="400" height="1164" fill="#101014"/>
+  <path d="M1040 56 V1220" stroke="#26262F"/>
+  <text x="1064" y="96" font-size="15" font-weight="600" fill="#F5F5F7">Evaluator</text>
+  <text x="1064" y="116" font-size="12" fill="#8E8E93">Stale decision — re-run</text>
+
+  <rect x="1064" y="132" width="352" height="64" rx="10" fill="#FF9F0A" opacity="0.10"/>
+  <text x="1080" y="154" font-size="12" font-weight="600" fill="#FF9F0A">Stale decision — re-run</text>
+  <text x="1080" y="172" font-size="11" fill="#A1A1A6">PASS on a41f9c… · draft now b77c1d…</text>
+  <text x="1080" y="188" font-size="11" fill="#0A84FF">Re-run with same dataset ↻</text>
+
+  <text x="1064" y="224" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">DATASET · SEEDED</text>
+  <text x="1064" y="246" font-size="13" fill="#F5F5F7">Seeded by support-concierge@3</text>
+  <text x="1064" y="264" font-size="11" fill="#8E8E93">template:support-concierge@3 · resolves automatically.</text>
+
+  <text x="1064" y="298" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">RUN · DRAFT-PINNED</text>
+  <rect x="1064" y="308" width="352" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1080" y="330" font-size="13" fill="#F5F5F7">v3 · DRAFT · attempts 2</text>
+  <rect x="1064" y="350" width="140" height="32" rx="9" fill="#30D158" opacity="0.16"/>
+  <text x="1080" y="370" font-size="13" font-weight="600" fill="#30D158">Evaluate version</text>
+
+  <text x="1064" y="410" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">REQUIRED CHECKS · TEMPLATE</text>
+  <text x="1064" y="432" font-size="12" fill="#F5F5F7">refund_policy_cited · tone_calm</text>
+  <text x="1064" y="450" font-size="12" fill="#A1A1A6">score may not drop more than 0.02 vs previous published</text>
+  <text x="1064" y="468" font-size="11" fill="#8E8E93">Only a fresh PASS on this hash publishes.</text>
+
+  <text x="1064" y="502" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">WATCHING</text>
+  <rect x="1064" y="512" width="352" height="40" rx="10" fill="#0A84FF" opacity="0.10"/>
+  <text x="1080" y="530" font-size="12" fill="#0A84FF">shadow — never gates · acme/sonnet moved</text>
+  <text x="1080" y="544" font-size="11" fill="#8E8E93">Drift pages owners — observation only.</text>
+
+  <text x="1064" y="586" font-size="12" fill="#0A84FF">Open Evaluations › · Open publish gates ›</text>
+  <text x="1064" y="606" font-size="11" fill="#8E8E93">Latest wins — a later PASS clears any earlier verdict.</text>
+
+  <rect x="1064" y="632" width="352" height="66" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1080" y="656" font-size="12" fill="#A1A1A6">Viewers see verdicts read-only. Owners,</text>
+  <text x="1080" y="672" font-size="12" fill="#A1A1A6">admins, developers can evaluate drafts.</text>
+
+  <text x="1064" y="1180" font-size="11" fill="#636366">No autosave — runs only · 409s render verbatim</text>
+</svg>

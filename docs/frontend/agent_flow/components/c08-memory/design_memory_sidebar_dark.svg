@@ -1,0 +1,93 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="mnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="mdots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#FFFFFF" opacity="0.055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <!-- top bar -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents</text>
+  <text x="100" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Billing Support</text>
+  <rect x="228" y="21" width="52" height="21" rx="10.5" fill="#0A84FF" opacity="0.16"/>
+  <text x="254" y="35" font-size="11" text-anchor="middle" fill="#0A84FF">Draft</text>
+  <circle cx="1124" cy="28" r="4" fill="#30D158"/>
+  <text x="1136" y="32" font-size="11" fill="#8E8E93">Saved</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Library</text>
+
+  <!-- left rail -->
+  <rect x="0" y="56" width="216" height="1164" fill="#0E0E13"/>
+  <path d="M216 56 V1220" stroke="#26262F"/>
+  <text x="20" y="88" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">COMPONENTS</text>
+  <circle cx="30" cy="116" r="5" fill="#0A84FF"/><text x="44" y="120" font-size="13" fill="#F5F5F7">Knowledge</text>
+  <circle cx="30" cy="146" r="5" fill="#A78BFA"/><text x="44" y="150" font-size="13" fill="#F5F5F7">Tools</text>
+  <circle cx="30" cy="176" r="5" fill="#FF9F0A"/><text x="44" y="180" font-size="13" font-weight="600" fill="#F5F5F7">Memory</text>
+  <rect x="14" y="162" width="188" height="30" rx="8" fill="#FF9F0A" opacity="0.12"/>
+  <text x="146" y="181" font-size="11" fill="#8E8E93">⇧M</text>
+
+  <!-- canvas satellite -->
+  <rect x="216" y="56" width="824" height="1164" fill="#0A0A0E"/>
+  <rect x="216" y="56" width="824" height="1164" fill="url(#mdots)"/>
+  <g filter="url(#mnd)">
+    <rect x="480" y="430" width="300" height="150" rx="14" fill="#14141B" stroke="#FF9F0A" stroke-width="1.5"/>
+    <circle cx="504" cy="462" r="6" fill="#30D158"/>
+    <text x="518" y="467" font-size="14" font-weight="600" fill="#F5F5F7">Memory</text>
+    <text x="504" y="492" font-size="12" fill="#A1A1A6">User · history 30 (serves ≤20)</text>
+    <text x="504" y="514" font-size="11" fill="#8E8E93">Only this person's own memories —</text>
+    <text x="504" y="528" font-size="11" fill="#8E8E93">never across accounts.</text>
+    <text x="504" y="552" font-size="11" fill="#636366">⇧M · What this agent remembers</text>
+  </g>
+
+  <!-- inspector -->
+  <rect x="1040" y="56" width="400" height="1164" fill="#101014"/>
+  <path d="M1040 56 V1220" stroke="#26262F"/>
+  <text x="1064" y="96" font-size="15" font-weight="600" fill="#F5F5F7">Memory</text>
+  <text x="1064" y="116" font-size="12" fill="#8E8E93">User · history 30 (serves ≤20)</text>
+
+  <text x="1064" y="150" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">SCOPE · PER-AGENT</text>
+  <g font-size="12">
+    <rect x="1064" y="160" width="80" height="30" rx="15" fill="#FF9F0A" opacity="0.9"/>
+    <text x="1104" y="179" text-anchor="middle" fill="#0A0A0E" font-weight="600">User</text>
+    <rect x="1150" y="160" width="112" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1206" y="179" text-anchor="middle" fill="#A1A1A6">Conversation</text>
+    <rect x="1064" y="196" width="118" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1123" y="215" text-anchor="middle" fill="#A1A1A6">Organization</text>
+    <rect x="1188" y="196" width="64" height="30" rx="15" fill="none" stroke="#3A3A42"/>
+    <text x="1220" y="215" text-anchor="middle" fill="#A1A1A6">None</text>
+  </g>
+  <text x="1064" y="248" font-size="12" fill="#A1A1A6">Only this person's own memories — never visible</text>
+  <text x="1064" y="264" font-size="12" fill="#A1A1A6">across accounts. The engine default.</text>
+
+  <text x="1064" y="298" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">HISTORY</text>
+  <rect x="1064" y="308" width="160" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1078" y="330" font-size="13" fill="#F5F5F7">−    30    ＋</text>
+  <text x="1064" y="356" font-size="11" fill="#8E8E93">Runs serve the 20 most recent — higher values are</text>
+  <text x="1064" y="370" font-size="11" fill="#8E8E93">stored, not served.</text>
+  <text x="1064" y="392" font-size="11" fill="#8E8E93">Older turns arrive as a rolling summary outside the window.</text>
+
+  <text x="1064" y="426" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">IN SCOPE · READ-ONLY</text>
+  <rect x="1064" y="436" width="352" height="64" rx="10" fill="#1C1C22" stroke="#26262F"/>
+  <text x="1080" y="460" font-size="12" fill="#F5F5F7">Org: ships on Fridays; freeze Thursdays…</text>
+  <text x="1080" y="478" font-size="11" fill="#8E8E93">organization · TTL 30 days · Open in library ›</text>
+  <text x="1064" y="518" font-size="11" fill="#8E8E93">User memories resolve per account at run time —</text>
+  <text x="1064" y="532" font-size="11" fill="#8E8E93">no preview here. Thread memories live on the chat.</text>
+
+  <text x="1064" y="566" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ORG DEFAULTS · READ-ONLY</text>
+  <text x="1064" y="590" font-size="12" fill="#A1A1A6">Scrub: Redact — PII scrubbed before embedding</text>
+  <text x="1064" y="608" font-size="12" fill="#A1A1A6">Default TTL: 30 days — applies when no expiry set</text>
+  <text x="1064" y="630" font-size="12" fill="#0A84FF">Purge memories in the library ›</text>
+
+  <rect x="1064" y="656" width="352" height="66" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1080" y="680" font-size="12" fill="#A1A1A6">Viewers see this read-only. Owners, admins,</text>
+  <text x="1080" y="696" font-size="12" fill="#A1A1A6">and developers can edit drafts.</text>
+
+  <text x="1064" y="1180" font-size="11" fill="#636366">Autosaves in 8s · full draft · 409 adopts · 412 merges</text>
+</svg>

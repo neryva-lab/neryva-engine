@@ -1,0 +1,89 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents · Returns Helper · Test-run</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Edit in builder →</text>
+
+  <rect x="38" y="88" width="824" height="1100" rx="14" fill="#101014" stroke="#26262F"/>
+  <text x="66" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Test-run</text>
+  <text x="66" y="150" font-size="12" fill="#8E8E93">Draft-pinned, never billable · ?try=3fa8 — reload restores</text>
+
+  <rect x="66" y="170" width="300" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="82" y="192" font-size="13" fill="#F5F5F7">v3 · DRAFT · a41f9c…</text>
+
+  <rect x="66" y="220" width="380" height="44" rx="10" fill="#FF9F0A" opacity="0.10"/>
+  <text x="82" y="238" font-size="12" fill="#FF9F0A">No usable model — connect a credential first.</text>
+  <text x="82" y="254" font-size="11" fill="#8E8E93">Blocks the run. Fix in Brain ›</text>
+
+  <rect x="66" y="282" width="280" height="52" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="82" y="302" font-size="11" fill="#8E8E93">You · 14:02</text>
+  <text x="82" y="320" font-size="13" fill="#F5F5F7">Where is my refund?</text>
+  <rect x="66" y="342" width="420" height="88" rx="10" fill="transparent" stroke="#3A3A42"/>
+  <text x="82" y="362" font-size="11" fill="#8E8E93">Returns Helper · 14:03</text>
+  <text x="82" y="380" font-size="13" fill="#F5F5F7">Refunds land 5–10 days after we receive</text>
+  <text x="82" y="398" font-size="13" fill="#F5F5F7">the return. [1]</text>
+  <rect x="82" y="406" width="230" height="22" rx="11" fill="#0A84FF" opacity="0.14"/>
+  <text x="94" y="421" font-size="11" fill="#0A84FF">[1] returns-policy · chunk 4 · 0.87</text>
+
+  <rect x="66" y="442" width="280" height="52" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="82" y="462" font-size="11" fill="#8E8E93">You · 14:05</text>
+  <text x="82" y="480" font-size="13" fill="#F5F5F7">And for gift orders?</text>
+  <rect x="66" y="502" width="200" height="30" rx="15" fill="#1C1C22" stroke="#3A3A42"/>
+  <circle cx="82" cy="517" r="3" fill="#8E8E93"/><circle cx="92" cy="517" r="3" fill="#8E8E93"/><circle cx="102" cy="517" r="3" fill="#8E8E93"/>
+  <text x="114" y="521" font-size="11" fill="#8E8E93">streaming… ⏹ Stop</text>
+
+  <rect x="66" y="548" width="420" height="24" rx="12" fill="transparent" stroke="none"/>
+  <rect x="66" y="548" width="170" height="24" rx="12" fill="#0A84FF" opacity="0.14"/>
+  <text x="78" y="564" font-size="11" fill="#0A84FF">Tool call · lookup_order</text>
+  <rect x="244" y="548" width="130" height="24" rx="12" fill="#8E8E93" opacity="0.14"/>
+  <text x="256" y="564" font-size="11" fill="#8E8E93">1,204 tokens</text>
+
+  <rect x="66" y="590" width="560" height="66" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="82" y="612" font-size="13" fill="#636366">Ask a follow-up… (1–8192)</text>
+  <text x="82" y="636" font-size="11" fill="#0A84FF">Send · Regenerate ↻</text>
+
+  <text x="66" y="690" font-size="11" fill="#8E8E93">Recorded in Audit ›</text>
+
+  <rect x="890" y="88" width="512" height="1100" rx="14" fill="#14141B" stroke="#3A3A42" filter="url(#bnd)"/>
+  <text x="918" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Trace</text>
+  <text x="918" y="150" font-size="12" fill="#8E8E93">What the run saw — not proof of why.</text>
+  <text x="1352" y="130" font-size="12" fill="#8E8E93">Esc ✕</text>
+
+  <text x="918" y="184" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">RETRIEVED · REPORTED ONLY</text>
+  <text x="918" y="206" font-size="12" fill="#F5F5F7">returns-policy · chunk 4 · 0.87</text>
+  <text x="918" y="224" font-size="11" fill="#8E8E93">Only hits the run reported. Nothing inferred.</text>
+
+  <text x="918" y="258" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">DIRECTIVE · FROM THE DRAFT</text>
+  <text x="918" y="280" font-size="12" fill="#A1A1A6">“You are Returns Helper. Answer from policy…”</text>
+  <text x="918" y="298" font-size="11" fill="#0A84FF">Edit in Purpose ›</text>
+
+  <text x="918" y="332" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">TOOL CALLS</text>
+  <text x="918" y="354" font-size="12" fill="#F5F5F7">lookup_order · approved · read · ok</text>
+  <text x="918" y="372" font-size="11" fill="#8E8E93">Second call ran shadow — simulated, gated nothing.</text>
+
+  <text x="918" y="406" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">GUARDRAILS</text>
+  <text x="918" y="428" font-size="12" fill="#F5F5F7">brand-safe · pass · blocking</text>
+  <text x="918" y="446" font-size="12" fill="#FF9F0A">pii-redact · flagged · logging — logged, not blocked.</text>
+
+  <text x="918" y="480" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">MODEL · TOKENS · COST</text>
+  <text x="918" y="502" font-size="12" fill="#F5F5F7">acme/sonnet · 1,204 tokens · reported by Studio</text>
+  <text x="918" y="520" font-size="11" fill="#8E8E93">Test runs write no bill row — estimates live in Budget.</text>
+
+  <text x="918" y="554" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">STOP LINES</text>
+  <rect x="918" y="564" width="456" height="52" rx="10" fill="#FF453A" opacity="0.10"/>
+  <text x="934" y="586" font-size="12" fill="#FF453A">FAILED · budget_exceeded_wall_clock (120s).</text>
+  <text x="934" y="602" font-size="11" fill="#8E8E93">Wall-clock stops fail closed. Cost lines report only.</text>
+
+  <text x="918" y="650" font-size="12" fill="#0A84FF">Re-ask ↻ · Adjust in builder →</text>
+  <text x="918" y="672" font-size="11" fill="#8E8E93">Draft intact — trying never edits the version.</text>
+</svg>

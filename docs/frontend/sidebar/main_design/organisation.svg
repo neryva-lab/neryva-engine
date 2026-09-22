@@ -1,0 +1,419 @@
+<svg width="1680" height="1320" viewBox="0 0 1680 1320" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="p" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.04"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="14" flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+    <filter id="q" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="5.5" refY="4" orient="auto">
+      <path d="M2,1.2 L5.8,4 L2,6.8" fill="none" stroke="#B9B9C0" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ab" markerWidth="8" markerHeight="8" refX="5.5" refY="4" orient="auto">
+      <path d="M2,1.2 L5.8,4 L2,6.8" fill="none" stroke="#0071E3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1680" height="1320" fill="#F5F5F7"/>
+
+  <!-- ================= HEADER ================= -->
+  <text x="48" y="54" font-size="26" font-weight="600" letter-spacing="-0.4" fill="#1D1D1F">Agent platform — information architecture</text>
+  <text x="48" y="80" font-size="14" fill="#6E6E73">Two planes. One sidebar. Fifteen components, no exceptions. Bridges are references, never copies.</text>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 01 · NAVIGATION                                        -->
+  <!-- ============================================================ -->
+  <rect x="48" y="112" width="372" height="560" rx="16" fill="#FFF" stroke="#E5E5EA" filter="url(#p)"/>
+  <text x="72" y="146" font-size="10" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">01 · NAVIGATION</text>
+  <text x="72" y="172" font-size="17" font-weight="600" fill="#1D1D1F">The sidebar</text>
+
+  <rect x="72" y="190" width="324" height="436" rx="12" fill="#FAFAFC" stroke="#E5E5EA"/>
+
+  <g font-size="9" font-weight="600" letter-spacing="0.8" fill="#A1A1A6">
+    <text x="88" y="212">BUILD</text>
+    <text x="88" y="286">LIBRARIES</text>
+    <text x="88" y="426">OPERATE</text>
+    <text x="88" y="544">ADMIN</text>
+  </g>
+  <g font-size="12" fill="#1D1D1F">
+    <text x="88" y="234">Agents</text>
+    <text x="88" y="256">Templates</text>
+    <text x="88" y="308">Knowledge</text>
+    <text x="88" y="330">Memory</text>
+    <text x="88" y="352">Tools</text>
+    <text x="88" y="374">Providers &amp; Models</text>
+    <text x="88" y="396">Datasets</text>
+    <text x="88" y="448">Channels</text>
+    <text x="88" y="470">Approvals</text>
+    <text x="88" y="492">Blocks</text>
+    <text x="88" y="514">Audit</text>
+    <text x="88" y="566">Members</text>
+    <text x="88" y="588">Billing &amp; usage</text>
+    <text x="88" y="610">Settings</text>
+  </g>
+  <g font-size="8.5" fill="#C7C7CC" text-anchor="end">
+    <text x="386" y="234">C15 · C01</text>
+    <text x="386" y="256">C11 · C12</text>
+    <text x="386" y="308">C05</text>
+    <text x="386" y="330">C08</text>
+    <text x="386" y="352">C06</text>
+    <text x="386" y="374">C04</text>
+    <text x="386" y="396">C10</text>
+    <text x="386" y="448">C14 · C15</text>
+    <text x="386" y="470">C06 · C08 · C13</text>
+    <text x="386" y="492">governance</text>
+    <text x="386" y="514">all</text>
+    <text x="386" y="610">C08 policy</text>
+  </g>
+  <!-- one queue note -->
+  <text x="196" y="470" font-size="8.5" fill="#A1A1A6">one queue · kind filter</text>
+
+  <text x="72" y="650" font-size="10.5" fill="#6E6E73">New agent = toolbar button on Agents (+ palette).</text>
+  <text x="72" y="665" font-size="10.5" fill="#A1A1A6">Never a nav item — nav stays navigational.</text>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 02 · THE TWO PLANES                                    -->
+  <!-- ============================================================ -->
+  <rect x="444" y="112" width="1188" height="560" rx="16" fill="#FFF" stroke="#E5E5EA" filter="url(#p)"/>
+  <text x="472" y="146" font-size="10" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">02 · THE TWO PLANES</text>
+  <text x="472" y="172" font-size="17" font-weight="600" fill="#1D1D1F">Library plane vs Agent plane</text>
+
+  <!-- LIBRARY BAND -->
+  <rect x="472" y="188" width="1132" height="150" rx="14" fill="#FAFAFC" stroke="#E5E5EA"/>
+  <text x="488" y="210" font-size="9.5" font-weight="600" letter-spacing="0.8" fill="#A1A1A6">LIBRARY PLANE</text>
+  <text x="580" y="210" font-size="9.5" fill="#A1A1A6">org-shared · governed · reusable — one row serves many agents</text>
+
+  <g filter="url(#q)" fill="#FFF" stroke="#E5E5EA">
+    <rect x="488"  y="222" width="175" height="100" rx="10"/>
+    <rect x="673"  y="222" width="175" height="100" rx="10"/>
+    <rect x="858"  y="222" width="175" height="100" rx="10"/>
+    <rect x="1043" y="222" width="175" height="100" rx="10"/>
+    <rect x="1228" y="222" width="175" height="100" rx="10"/>
+    <rect x="1413" y="222" width="175" height="100" rx="10"/>
+  </g>
+  <g font-size="12" font-weight="600" fill="#1D1D1F">
+    <text x="502" y="244">Knowledge</text>
+    <text x="687" y="244">Memory</text>
+    <text x="872" y="244">Tools</text>
+    <text x="1057" y="244">Providers &amp; Models</text>
+    <text x="1242" y="244">Datasets</text>
+    <text x="1427" y="244">Templates</text>
+  </g>
+  <g font-size="9" fill="#6E6E73">
+    <text x="502" y="262">Document · source slug</text>
+    <text x="687" y="262">memory item · scope</text>
+    <text x="872" y="262">catalog row · effect class</text>
+    <text x="1057" y="262">credential · model entry</text>
+    <text x="1242" y="262">dataset · case</text>
+    <text x="1427" y="262">slug@version</text>
+  </g>
+  <g font-size="8.5" fill="#A1A1A6" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="502" y="280">documents</text>
+    <text x="502" y="292">document_versions</text>
+    <text x="502" y="304">chunks · embeddings</text>
+    <text x="687" y="280">memory_items</text>
+    <text x="687" y="292">visibility · expires_at</text>
+    <text x="687" y="304">supersedes</text>
+    <text x="872" y="280">tool_catalog</text>
+    <text x="872" y="292">schema_hash</text>
+    <text x="872" y="304">approval · env · egress</text>
+    <text x="1057" y="280">provider_credentials</text>
+    <text x="1057" y="292">model_catalog</text>
+    <text x="1057" y="304">costs · enablements</text>
+    <text x="1242" y="280">eval_datasets</text>
+    <text x="1242" y="292">eval_cases</text>
+    <text x="1242" y="304">read-only browse</text>
+    <text x="1427" y="280">assistant_templates</text>
+    <text x="1427" y="292">global mirror · no RLS</text>
+    <text x="1427" y="304">release job writes only</text>
+  </g>
+
+  <!-- BRIDGES -->
+  <g stroke="#B9B9C0" stroke-width="1.4" fill="none" marker-end="url(#a)">
+    <path d="M560 344 V390"/>
+    <path d="M830 344 V390"/>
+    <path d="M1100 344 V390"/>
+    <path d="M1370 344 V390"/>
+  </g>
+  <g font-size="9.5" font-weight="600" fill="#1D1D1F">
+    <text x="572" y="360">knowledge pins</text>
+    <text x="842" y="360">tool bindings</text>
+    <text x="1112" y="360">model allowlist</text>
+    <text x="1382" y="360">template install</text>
+  </g>
+  <g font-size="9" fill="#6E6E73" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="572" y="376">source_slug → doc version</text>
+    <text x="842" y="376">name + schema_hash</text>
+    <text x="1112" y="376">catalog ref → entry hash</text>
+    <text x="1382" y="376">slug@version → provenance</text>
+  </g>
+
+  <!-- AGENT BAND -->
+  <rect x="472" y="398" width="1132" height="150" rx="14" fill="#F4F8FF" stroke="#DCE9FF"/>
+  <text x="488" y="420" font-size="9.5" font-weight="600" letter-spacing="0.8" fill="#0071E3">AGENT PLANE</text>
+  <text x="572" y="420" font-size="9.5" fill="#7FA8D8">per-assistant definition — one row-set per agent · drafted by makers, published by owners</text>
+
+  <g filter="url(#q)" fill="#FFF" stroke="#DCE9FF">
+    <rect x="488"  y="432" width="200" height="88" rx="10"/>
+    <rect x="712"  y="432" width="200" height="88" rx="10"/>
+    <rect x="936"  y="432" width="200" height="88" rx="10"/>
+    <rect x="1160" y="432" width="200" height="88" rx="10"/>
+    <rect x="1384" y="432" width="200" height="88" rx="10"/>
+  </g>
+  <g stroke="#B9CFEA" stroke-width="1.4" fill="none" marker-end="url(#a)">
+    <path d="M690 476 H708"/><path d="M914 476 H932"/><path d="M1138 476 H1156"/><path d="M1362 476 H1380"/>
+  </g>
+  <g font-size="12" font-weight="600" fill="#1D1D1F">
+    <text x="502" y="454">Assistants</text>
+    <text x="726" y="454">Versions</text>
+    <text x="950" y="454">Policy snapshots</text>
+    <text x="1174" y="454">Rollouts</text>
+    <text x="1398" y="454">Runs</text>
+  </g>
+  <g font-size="8.5" fill="#A1A1A6" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="502" y="470">assistants</text>
+    <text x="726" y="470">assistant_versions</text>
+    <text x="950" y="470">policy_snapshots</text>
+    <text x="1174" y="470">assistant_rollouts</text>
+    <text x="1398" y="470">run_manifests</text>
+  </g>
+  <g font-size="9" fill="#6E6E73">
+    <text x="502" y="488">stable identity</text>
+    <text x="502" y="502">active_version_id NULL</text>
+    <text x="502" y="514">until first publish</text>
+    <text x="726" y="488">v0 = DRAFT sentinel</text>
+    <text x="726" y="502">v1..N immutable</text>
+    <text x="726" y="514">status enum, never mutated</text>
+    <text x="950" y="488">slugs → doc versions</text>
+    <text x="950" y="502">names → schema hashes</text>
+    <text x="950" y="514">manifestHash</text>
+    <text x="1174" y="488">variants sum to 100</text>
+    <text x="1174" y="502">sticky per conversation</text>
+    <text x="1174" y="514">post-publish only</text>
+    <text x="1398" y="488">exactly what produced</text>
+    <text x="1398" y="502">this outcome</text>
+    <text x="1398" y="514">run_kind: test | live</text>
+  </g>
+  <text x="488" y="538" font-size="9" fill="#7FA8D8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">assistant_installs — copy provenance, never a live link · registry changes never touch an installed agent</text>
+
+  <!-- CONTROL BLOCKS SPINE -->
+  <rect x="472" y="562" width="1132" height="44" rx="12" fill="#FFF8EE" stroke="#FF9F0A" stroke-opacity="0.3"/>
+  <text x="492" y="580" font-size="10.5" font-weight="600" fill="#8A4B00">control_blocks — spans both planes</text>
+  <text x="492" y="596" font-size="9.5" fill="#8A4B00">targets: template · assistant · version · tool · capability — expiry evaluated at check time (no sweeper), so the UI must compute Active / Expired itself</text>
+
+  <text x="472" y="632" font-size="10.5" font-weight="600" fill="#1D1D1F">Reference tokens show BOTH layers:</text>
+  <text x="686" y="632" font-size="10.5" fill="#6E6E73">draft references by NAME (writable payload) · publish resolves to VERSION + HASH (read-only). Never write resolved values back —</text>
+  <text x="472" y="650" font-size="10.5" fill="#6E6E73">rejectUnknownPayloadKeys returns a 422 with exact key paths for effect_class, when_to_use, max_context_tokens, embedding_model, document_version.</text>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 03 · INSIDE THE BUILDER                                -->
+  <!-- ============================================================ -->
+  <rect x="48" y="696" width="760" height="536" rx="16" fill="#FFF" stroke="#E5E5EA" filter="url(#p)"/>
+  <text x="72" y="730" font-size="10" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">03 · INSIDE THE BUILDER</text>
+  <text x="72" y="756" font-size="17" font-weight="600" fill="#1D1D1F">The agent plane at work</text>
+
+  <!-- mini builder frame -->
+  <rect x="76" y="772" width="704" height="300" rx="12" fill="#FAFAFC" stroke="#E5E5EA"/>
+  <rect x="76" y="772" width="704" height="28" rx="12" fill="#FFF"/>
+  <path d="M76 800 H780" stroke="#E5E5EA"/>
+  <path d="M92 782 l-4 4 l4 4" fill="none" stroke="#6E6E73" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="102" y="790" font-size="9.5" fill="#6E6E73">Agents</text>
+  <text x="150" y="790" font-size="10" font-weight="600" fill="#1D1D1F">Billing Support</text>
+  <rect x="238" y="779" width="34" height="15" rx="7.5" fill="#F5F5F7" stroke="#E5E5EA"/>
+  <text x="255" y="790" font-size="8" text-anchor="middle" fill="#6E6E73">Draft</text>
+  <circle cx="726" cy="786" r="3" fill="#34C759"/>
+  <text x="764" y="790" font-size="9" text-anchor="end" fill="#A1A1A6">Saved</text>
+
+  <!-- rail -->
+  <rect x="76" y="800" width="150" height="272" fill="#FFF"/>
+  <path d="M226 800 V1072" stroke="#E5E5EA"/>
+  <text x="88" y="820" font-size="8" font-weight="600" letter-spacing="0.7" fill="#A1A1A6">CHECKLIST</text>
+  <rect x="80" y="864" width="142" height="18" rx="6" fill="#F0F0F3"/>
+  <g font-size="10" fill="#1D1D1F">
+    <text x="102" y="840">Instructions</text>
+    <text x="102" y="860">Model</text>
+    <text x="102" y="878" font-weight="600">Knowledge</text>
+    <text x="102" y="900">Tools</text>
+    <text x="102" y="920" fill="#6E6E73">Guardrails</text>
+    <text x="102" y="940" fill="#6E6E73">Context</text>
+    <text x="102" y="960" fill="#6E6E73">Memory</text>
+    <text x="102" y="980" fill="#6E6E73">Budget</text>
+    <text x="102" y="1000">Evaluation</text>
+    <text x="102" y="1020" fill="#6E6E73">Test run</text>
+    <text x="102" y="1040">Publish</text>
+  </g>
+  <g>
+    <circle cx="92" cy="836" r="3.5" fill="#34C759"/>
+    <circle cx="92" cy="856" r="3.5" fill="#FF9F0A"/>
+    <circle cx="92" cy="874" r="3.5" fill="#0071E3"/>
+    <circle cx="92" cy="896" r="3.5" fill="#FF9F0A"/>
+    <circle cx="92" cy="916" r="3.5" fill="#C7C7CC"/>
+    <circle cx="92" cy="936" r="3.5" fill="#C7C7CC"/>
+    <circle cx="92" cy="956" r="3.5" fill="#C7C7CC"/>
+    <circle cx="92" cy="976" r="3.5" fill="#C7C7CC"/>
+    <circle cx="92" cy="996" r="3.5" fill="#FF9F0A"/>
+    <circle cx="92" cy="1016" r="3.5" fill="#C7C7CC"/>
+    <circle cx="92" cy="1036" r="3.5" fill="#FF9F0A"/>
+  </g>
+  <text x="88" y="1062" font-size="8" fill="#C7C7CC">per-agent state · NOT navigation</text>
+
+  <!-- canvas nodes -->
+  <g stroke="#D1D1D6" stroke-width="1.2" fill="none" marker-end="url(#a)">
+    <path d="M376 852 V866"/><path d="M376 902 V916"/><path d="M376 952 V966"/><path d="M376 1002 V1016"/>
+    <path d="M316 884 H320"/>
+    <path d="M432 936 H436"/>
+  </g>
+  <g filter="url(#q)" fill="#FFF" stroke="#E5E5EA">
+    <rect x="324" y="822" width="104" height="30" rx="8"/>
+    <rect x="324" y="872" width="104" height="30" rx="8"/>
+    <rect x="324" y="922" width="104" height="30" rx="8"/>
+    <rect x="324" y="972" width="104" height="30" rx="8"/>
+    <rect x="324" y="1022" width="104" height="30" rx="8"/>
+    <rect x="440" y="922" width="72" height="30" rx="8"/>
+  </g>
+  <rect x="236" y="866" width="80" height="42" rx="14" fill="none" stroke="#0071E3" stroke-opacity="0.16" stroke-width="6"/>
+  <rect x="240" y="872" width="72" height="30" rx="8" fill="#FFF" stroke="#0071E3" stroke-width="1.4" filter="url(#q)"/>
+  <g font-size="9.5" font-weight="600" fill="#1D1D1F">
+    <text x="336" y="841">Instructions</text>
+    <text x="336" y="891">Context</text>
+    <text x="336" y="941">Model</text>
+    <text x="336" y="991">Test run</text>
+    <text x="336" y="1041">Publish</text>
+    <text x="250" y="891">Knowledge</text>
+    <text x="450" y="941">Tools</text>
+  </g>
+  <g>
+    <circle cx="418" cy="832" r="3" fill="#34C759"/>
+    <circle cx="418" cy="882" r="3" fill="#34C759"/>
+    <circle cx="418" cy="932" r="3" fill="#FF9F0A"/>
+    <circle cx="418" cy="982" r="3" fill="#C7C7CC"/>
+    <circle cx="418" cy="1032" r="3" fill="#FF9F0A"/>
+    <circle cx="304" cy="880" r="3" fill="#0071E3"/>
+    <circle cx="504" cy="932" r="3" fill="#FF9F0A"/>
+  </g>
+
+  <!-- inspector -->
+  <rect x="526" y="800" width="254" height="272" fill="#FFF"/>
+  <path d="M526 800 V1072" stroke="#E5E5EA"/>
+  <text x="542" y="824" font-size="12" font-weight="600" fill="#1D1D1F">Knowledge</text>
+  <text x="542" y="838" font-size="9" fill="#6E6E73">What it knows</text>
+  <text x="542" y="860" font-size="8" font-weight="600" letter-spacing="0.7" fill="#A1A1A6">REFERENCE TOKEN</text>
+  <rect x="542" y="868" width="222" height="64" rx="8" fill="#FAFAFC" stroke="#E5E5EA"/>
+  <text x="554" y="885" font-size="10" font-weight="600" fill="#1D1D1F" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">refund-policy</text>
+  <text x="554" y="900" font-size="8.5" fill="#6E6E73">draft layer · source_slug  (writable)</text>
+  <text x="554" y="914" font-size="8.5" fill="#0058B0">resolved · v3 · embed-3-large  (read-only)</text>
+  <text x="554" y="927" font-size="8.5" fill="#1E7A3C">coverage 100%</text>
+
+  <text x="542" y="950" font-size="8" font-weight="600" letter-spacing="0.7" fill="#A1A1A6">ATTACHED · 2</text>
+  <g filter="url(#q)" fill="#FFF" stroke="#E5E5EA">
+    <rect x="542" y="956" width="222" height="24" rx="7"/>
+    <rect x="542" y="984" width="222" height="24" rx="7"/>
+  </g>
+  <text x="554" y="972" font-size="9.5" fill="#1D1D1F">refund-policy.pdf</text>
+  <circle cx="700" cy="968" r="3" fill="#34C759"/>
+  <rect x="712" y="961" width="42" height="14" rx="7" fill="#F5F5F7"/>
+  <text x="733" y="971" font-size="7.5" text-anchor="middle" fill="#6E6E73">agent</text>
+  <text x="554" y="1000" font-size="9.5" fill="#1D1D1F">faq-2026.pdf</text>
+  <circle cx="700" cy="996" r="3" fill="#0071E3"/>
+  <rect x="712" y="989" width="42" height="14" rx="7" fill="#F5F5F7"/>
+  <text x="733" y="999" font-size="7.5" text-anchor="middle" fill="#6E6E73">agent</text>
+
+  <rect x="542" y="1014" width="222" height="28" rx="8" fill="#FFF8EE" stroke="#FF9F0A" stroke-opacity="0.32"/>
+  <text x="554" y="1032" font-size="9.5" font-weight="600" fill="#8A4B00">Upload new version</text>
+  <rect x="686" y="1020" width="68" height="16" rx="8" fill="#FF9F0A" fill-opacity="0.14"/>
+  <text x="720" y="1031" font-size="7.5" text-anchor="middle" fill="#8A4B00">ORG-WIDE</text>
+
+  <text x="542" y="1058" font-size="8" fill="#A1A1A6">Detaching never deletes the document.</text>
+
+  <!-- scope classes -->
+  <text x="76" y="1100" font-size="10" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">SCOPE CLASS — WHAT AN ACTION COSTS</text>
+  <g filter="url(#q)" fill="#FFF" stroke="#E5E5EA">
+    <rect x="76"  y="1110" width="224" height="66" rx="10"/>
+    <rect x="316" y="1110" width="224" height="66" rx="10" stroke="#FF9F0A" stroke-opacity="0.35"/>
+    <rect x="556" y="1110" width="224" height="66" rx="10" stroke="#FF453A" stroke-opacity="0.3"/>
+  </g>
+  <g font-size="11" font-weight="600" fill="#1D1D1F" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="92" y="1132">agent</text><text x="332" y="1132">org</text><text x="572" y="1132">governance</text>
+  </g>
+  <g font-size="9" fill="#6E6E73">
+    <text x="92" y="1150">writes this draft only</text>
+    <text x="92" y="1164">default styling · confirm only if destructive</text>
+    <text x="332" y="1150">writes a library row — affects every agent</text>
+    <text x="332" y="1164">marker + blast radius + “Recorded in Audit”</text>
+    <text x="572" y="1150">elevated role and/or second actor</text>
+    <text x="572" y="1164">denied = explanation + request path</text>
+  </g>
+  <text x="76" y="1200" font-size="10.5" font-weight="600" fill="#1D1D1F">Law: an org action may be initiated from the builder — but must never look like an agent action.</text>
+  <text x="76" y="1218" font-size="9.5" fill="#A1A1A6">Shared entities are governed on library pages, creatable inline when creation is prerequisite to attaching.</text>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 04 · PLACEMENT MATRIX                                  -->
+  <!-- ============================================================ -->
+  <rect x="832" y="696" width="800" height="536" rx="16" fill="#FFF" stroke="#E5E5EA" filter="url(#p)"/>
+  <text x="860" y="730" font-size="10" font-weight="600" letter-spacing="0.9" fill="#A1A1A6">04 · PLACEMENT</text>
+  <text x="860" y="756" font-size="17" font-weight="600" fill="#1D1D1F">Fifteen components, no exceptions</text>
+
+  <g font-size="8.5" font-weight="600" letter-spacing="0.7" fill="#A1A1A6">
+    <text x="860" y="784">ID</text><text x="906" y="784">COMPONENT</text><text x="1050" y="784">LIVES IN</text><text x="1604" y="784" text-anchor="end">SCOPE</text>
+  </g>
+  <path d="M860 792 H1604" stroke="#E5E5EA"/>
+
+  <g font-size="10">
+    <g fill="#A1A1A6" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9">
+      <text x="860" y="812">C01</text><text x="860" y="837">C02</text><text x="860" y="862">C03</text>
+      <text x="860" y="887">C04</text><text x="860" y="912">C05</text><text x="860" y="937">C06</text>
+      <text x="860" y="962">C07</text><text x="860" y="987">C08</text><text x="860" y="1012">C09</text>
+      <text x="860" y="1037">C10</text><text x="860" y="1062">C11</text><text x="860" y="1087">C12</text>
+      <text x="860" y="1112">C13</text><text x="860" y="1137">C14</text><text x="860" y="1162">C15</text>
+    </g>
+    <g fill="#1D1D1F" font-weight="600">
+      <text x="906" y="812">Identity</text><text x="906" y="837">Instructions</text><text x="906" y="862">Brand</text>
+      <text x="906" y="887">Model</text><text x="906" y="912">Knowledge</text><text x="906" y="937">Tools</text>
+      <text x="906" y="962">Guardrails</text><text x="906" y="987">Memory</text><text x="906" y="1012">Budget</text>
+      <text x="906" y="1037">Evaluation</text><text x="906" y="1062">Templates</text><text x="906" y="1087">Origins</text>
+      <text x="906" y="1112">Test run</text><text x="906" y="1137">Publish</text><text x="906" y="1162">Operate</text>
+    </g>
+    <g fill="#6E6E73">
+      <text x="1050" y="812">builder · Instructions step  +  Agents row</text>
+      <text x="1050" y="837">builder inspector only</text>
+      <text x="1050" y="862">builder inspector only</text>
+      <text x="1050" y="887" fill="#1D1D1F" font-weight="600">SPLIT · Providers &amp; Models ⇄ inspector</text>
+      <text x="1050" y="912" fill="#1D1D1F" font-weight="600">SPLIT · Knowledge library ⇄ inspector</text>
+      <text x="1050" y="937" fill="#1D1D1F" font-weight="600">SPLIT · Tools catalog ⇄ inspector</text>
+      <text x="1050" y="962">builder inspector only  +  static defaults</text>
+      <text x="1050" y="987" fill="#1D1D1F" font-weight="600">SPLIT · Memory library ⇄ inspector ⇄ Admin</text>
+      <text x="1050" y="1012">builder inspector only  +  static defaults</text>
+      <text x="1050" y="1037" fill="#1D1D1F" font-weight="600">SPLIT · Datasets ⇄ inspector + detail</text>
+      <text x="1050" y="1062">Templates library → installs into builder</text>
+      <text x="1050" y="1087">start-screen overlays, in-builder</text>
+      <text x="1050" y="1112">builder phase, in-builder</text>
+      <text x="1050" y="1137">builder phase, in-builder</text>
+      <text x="1050" y="1162">agent detail page, from Agents</text>
+    </g>
+    <g fill="#A1A1A6" font-size="9" text-anchor="end">
+      <text x="1604" y="812">agent</text><text x="1604" y="837">agent</text><text x="1604" y="862">agent</text>
+      <text x="1604" y="887" fill="#B25E00">agent + org</text><text x="1604" y="912" fill="#B25E00">agent + org</text>
+      <text x="1604" y="937" fill="#B25E00">agent + org</text><text x="1604" y="962">agent</text>
+      <text x="1604" y="987" fill="#C0392B">agent + org + gov</text><text x="1604" y="1012">agent</text>
+      <text x="1604" y="1037" fill="#B25E00">agent + org</text><text x="1604" y="1062">org</text>
+      <text x="1604" y="1087">agent</text><text x="1604" y="1112">agent</text>
+      <text x="1604" y="1137" fill="#C0392B">agent + gov</text><text x="1604" y="1162">agent</text>
+    </g>
+  </g>
+  <g stroke="#F0F0F3">
+    <path d="M860 821 H1604"/><path d="M860 846 H1604"/><path d="M860 871 H1604"/><path d="M860 896 H1604"/>
+    <path d="M860 921 H1604"/><path d="M860 946 H1604"/><path d="M860 971 H1604"/><path d="M860 996 H1604"/>
+    <path d="M860 1021 H1604"/><path d="M860 1046 H1604"/><path d="M860 1071 H1604"/><path d="M860 1096 H1604"/>
+    <path d="M860 1121 H1604"/><path d="M860 1146 H1604"/><path d="M860 1171 H1604"/>
+  </g>
+
+  <text x="860" y="1196" font-size="9.5" fill="#6E6E73">◐ SPLIT = governed on a library page · configured in the inspector · bridged by reference.</text>
+  <text x="860" y="1216" font-size="9.5" font-weight="600" fill="#1D1D1F">Don’t-builds: no guardrail/budget preset libraries · no instruction-snippet backend · no org template authoring UI.</text>
+
+  <!-- ================= FOOTER · VOCABULARY ================= -->
+  <rect x="48" y="1252" width="1584" height="52" rx="12" fill="#FFF" stroke="#E5E5EA" filter="url(#p)"/>
+  <text x="72" y="1274" font-size="10.5" font-weight="600" fill="#1D1D1F">VOCABULARY LOCK — nouns from the engine, verbs and descriptions ours. Warmth lives in sub-labels: Model “How it thinks.” · Knowledge “What it knows.” · Tools “What it can do.”</text>
+  <text x="72" y="1293" font-size="9.5" fill="#A1A1A6">Retired from all user-visible copy: Blueprint · Museum · Mirror · Brain · Hands · Purpose · Context assembly · Try · Ship · Spark · Artifact · Studio · Engine Room · Fleet — permitted as internal identifiers only.</text>
+</svg>

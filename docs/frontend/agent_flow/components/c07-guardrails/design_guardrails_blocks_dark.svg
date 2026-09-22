@@ -1,0 +1,119 @@
+<svg width="1440" height="1180" viewBox="0 0 1440 1180" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="1180" fill="#0A0A0E"/>
+
+  <!-- ===== top bar ===== -->
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Libraries</text>
+  <text x="104" y="39" font-size="15" font-weight="600" fill="#F5F5F7">Blocks</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#8E8E93">owner</text>
+
+  <!-- ===== header ===== -->
+  <text x="48" y="104" font-size="20" font-weight="600" fill="#F5F5F7">Blocks</text>
+  <text x="48" y="126" font-size="13" fill="#8E8E93">Kill switches with expiry — refused at check time across installs, publishes, releases, and runs. Expiry needs no worker.</text>
+  <rect x="48" y="142" width="120" height="34" rx="9" fill="#FF453A"/>
+  <text x="108" y="163" text-anchor="middle" font-size="13" font-weight="600" fill="#FFFFFF">Set block</text>
+
+  <!-- ===== filter bar (NEW) ===== -->
+  <g font-size="12">
+    <rect x="48" y="192" width="150" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="62" y="213" fill="#A1A1A6">Target: all</text>
+    <rect x="206" y="192" width="150" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="220" y="213" fill="#A1A1A6">Status: active</text>
+    <rect x="364" y="192" width="320" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="378" y="213" fill="#636366">Search name or reason…</text>
+  </g>
+
+  <!-- ===== table ===== -->
+  <g filter="url(#bnd)">
+    <rect x="48" y="242" width="1344" height="330" rx="12" fill="#14141B" stroke="#26262F"/>
+    <g font-size="11" font-weight="600" letter-spacing="0.7" fill="#8E8E93">
+      <text x="72" y="270">TARGET</text><text x="200" y="270">NAME</text><text x="430" y="270">REASON</text>
+      <text x="760" y="270">STATUS</text><text x="920" y="270">EXPIRES</text>
+      <text x="1060" y="270">SET BY</text><text x="1210" y="270">SET AT</text>
+    </g>
+    <path d="M48 284 H1392" stroke="#26262F"/>
+    <!-- row 1: active, expiring -->
+    <g font-size="13" fill="#F5F5F7">
+      <text x="72" y="316">tool</text><text x="200" y="316">refund-payment</text>
+      <text x="430" y="316" fill="#A1A1A6">Credential rotation until Friday</text>
+      <rect x="760" y="300" width="118" height="22" rx="11" fill="#FF9F0A" opacity="0.16"/>
+      <text x="819" y="315" text-anchor="middle" font-size="11" fill="#FF9F0A">Expires in 3 days</text>
+      <text x="920" y="316" fill="#A1A1A6">Fri, Jun 12</text>
+      <text x="1060" y="316" fill="#A1A1A6">ava@acme.co</text>
+      <text x="1210" y="316" fill="#A1A1A6">Jun 9</text>
+    </g>
+    <rect x="1300" y="300" width="68" height="28" rx="8" fill="none" stroke="#3A3A42"/>
+    <text x="1334" y="318" text-anchor="middle" font-size="12" fill="#A1A1A6">Clear</text>
+    <path d="M48 340 H1392" stroke="#1E1E25"/>
+    <!-- row 2: permanent -->
+    <g font-size="13" fill="#F5F5F7">
+      <text x="72" y="372">template</text><text x="200" y="372">support-starter</text>
+      <text x="430" y="372" fill="#A1A1A6">Legal hold — do not install</text>
+      <rect x="760" y="356" width="66" height="22" rx="11" fill="#FF453A" opacity="0.16"/>
+      <text x="793" y="371" text-anchor="middle" font-size="11" fill="#FF453A">Active</text>
+      <text x="920" y="372" fill="#A1A1A6">No expiry — permanent</text>
+      <text x="1060" y="372" fill="#A1A1A6">li@acme.co</text>
+      <text x="1210" y="372" fill="#A1A1A6">May 28</text>
+    </g>
+    <rect x="1300" y="356" width="68" height="28" rx="8" fill="none" stroke="#3A3A42"/>
+    <text x="1334" y="374" text-anchor="middle" font-size="12" fill="#A1A1A6">Clear</text>
+    <path d="M48 396 H1392" stroke="#1E1E25"/>
+    <!-- row 3: expired -->
+    <g font-size="13" fill="#636366">
+      <text x="72" y="428">capability</text><text x="200" y="428">web-browse</text>
+      <text x="430" y="428">Incident #4821 containment</text>
+      <rect x="760" y="412" width="66" height="22" rx="11" fill="#8E8E93" opacity="0.16"/>
+      <text x="793" y="427" text-anchor="middle" font-size="11" fill="#8E8E93">Expired</text>
+      <text x="920" y="428">expired</text>
+      <text x="1060" y="428">ava@acme.co</text>
+      <text x="1210" y="428">Apr 02</text>
+    </g>
+    <rect x="1300" y="412" width="68" height="28" rx="8" fill="none" stroke="#3A3A42"/>
+    <text x="1334" y="430" text-anchor="middle" font-size="12" fill="#A1A1A6">Clear</text>
+    <path d="M48 452 H1392" stroke="#1E1E25"/>
+    <text x="72" y="480" font-size="12" fill="#8E8E93">Expired rows refuse nothing — kept for the audit trail. Clearing is audited.</text>
+    <text x="72" y="500" font-size="12" fill="#8E8E93">There is no edit: clear a block and set it again — both steps audited.</text>
+    <text x="72" y="544" font-size="12" fill="#636366">Staff platform blocks live elsewhere — every row here is yours to clear (owners/admins).</text>
+  </g>
+
+  <!-- ===== create modal: datetime + permanent confirm ===== -->
+  <g filter="url(#bnd)">
+    <rect x="440" y="620" width="560" height="330" rx="14" fill="#14141B" stroke="#3A3A42"/>
+    <text x="472" y="660" font-size="15" font-weight="600" fill="#F5F5F7">Set control block</text>
+    <text x="472" y="682" font-size="12" fill="#8E8E93">Refuses acceptance, assignment, tool calls, context, credentials, installs.</text>
+    <rect x="472" y="700" width="240" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="486" y="721" font-size="12" fill="#A1A1A6">Target: template</text>
+    <rect x="472" y="744" width="496" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="486" y="765" font-size="12" fill="#F5F5F7">support-starter</text>
+    <rect x="472" y="788" width="496" height="34" rx="9" fill="#1C1C22" stroke="#3A3A42"/>
+    <text x="486" y="809" font-size="12" fill="#636366">Expires: pick date + time (must be future)</text>
+    <text x="472" y="846" font-size="12" fill="#FF9F0A">No expiry = permanent. You will confirm that separately.</text>
+    <rect x="768" y="892" width="200" height="36" rx="9" fill="#FF453A"/>
+    <text x="868" y="914" text-anchor="middle" font-size="13" font-weight="600" fill="#FFFFFF">Set block</text>
+  </g>
+
+  <!-- ===== detail GuardrailsPanel strip ===== -->
+  <text x="48" y="1000" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">AGENT DETAIL · READ-ONLY PANEL</text>
+  <g filter="url(#bnd)">
+    <rect x="48" y="1012" width="1344" height="130" rx="12" fill="#14141B" stroke="#26262F"/>
+    <text x="72" y="1042" font-size="14" font-weight="600" fill="#F5F5F7">Guardrails</text>
+    <rect x="170" y="1028" width="76" height="22" rx="11" fill="#30D158" opacity="0.16"/>
+    <text x="208" y="1043" text-anchor="middle" font-size="11" fill="#30D158">Blocking</text>
+    <text x="1330" y="1042" font-size="12" text-anchor="end" fill="#0A84FF">Edit in builder ›</text>
+    <circle cx="76" cy="1066" r="4" fill="#30D158"/>
+    <text x="88" y="1070" font-size="12" fill="#A1A1A6">Input: default — screened, refuses violating content</text>
+    <circle cx="76" cy="1090" r="4" fill="#30D158"/>
+    <text x="88" y="1094" font-size="12" fill="#A1A1A6">Output: brand-safe — screened, refuses violating content</text>
+    <circle cx="76" cy="1114" r="4" fill="#30D158"/>
+    <text x="88" y="1118" font-size="12" fill="#A1A1A6">PII redaction on — applies to new runs from publish</text>
+  </g>
+</svg>

@@ -1,0 +1,61 @@
+<svg width="1440" height="1220" viewBox="0 0 1440 1220" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, 'SF Pro Text', Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="bnd" x="-40%" y="-40%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="1220" fill="#0A0A0E"/>
+
+  <rect x="0" width="1440" height="56" fill="#14141B" opacity="0.96"/>
+  <path d="M0 56 H1440" stroke="#26262F"/>
+  <text x="38" y="39" font-size="13" fill="#A1A1A6">Agents · Returns Helper · Versions</text>
+  <text x="1416" y="39" font-size="13" text-anchor="end" fill="#0A84FF">Edit in builder →</text>
+
+  <rect x="38" y="88" width="824" height="1100" rx="14" fill="#101014" stroke="#26262F"/>
+  <text x="66" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Versions</text>
+  <text x="66" y="150" font-size="12" fill="#8E8E93">Immutable drafts and published versions — imports land highlighted, never silently</text>
+
+  <rect x="66" y="170" width="768" height="64" rx="10" fill="#0A84FF" opacity="0.10"/>
+  <text x="82" y="192" font-size="12" font-weight="600" fill="#0A84FF">Imported as draft — review then publish</text>
+  <text x="82" y="210" font-size="11" fill="#8E8E93">v0 · validated client-first · Recorded in Audit ›</text>
+
+  <rect x="66" y="248" width="768" height="64" rx="10" fill="transparent" stroke="#0A84FF" stroke-width="1.5"/>
+  <circle cx="86" cy="274" r="5" fill="#0A84FF"/>
+  <text x="98" y="270" font-size="13" font-weight="600" fill="#F5F5F7">v0 · a41f9c…</text>
+  <text x="98" y="288" font-size="11" fill="#8E8E93">DRAFT · just now · schema_version 2 · unwrapped .export</text>
+  <text x="640" y="280" font-size="12" fill="#0A84FF">Publish</text>
+
+  <rect x="66" y="324" width="768" height="56" rx="10" fill="transparent" stroke="#3A3A42"/>
+  <circle cx="86" cy="352" r="5" fill="#30D158"/>
+  <text x="98" y="348" font-size="13" fill="#F5F5F7">v2 · b77c1d… · active</text>
+  <text x="98" y="366" font-size="11" fill="#8E8E93">PUBLISHED · 11 Feb · export per version</text>
+
+  <rect x="890" y="88" width="512" height="1100" rx="14" fill="#14141B" stroke="#3A3A42" filter="url(#bnd)"/>
+  <text x="918" y="130" font-size="15" font-weight="600" fill="#F5F5F7">Import a definition</text>
+  <text x="1352" y="130" font-size="12" fill="#8E8E93">Esc ✕</text>
+
+  <rect x="918" y="152" width="120" height="30" rx="15" fill="#0A84FF" opacity="0.16"/>
+  <text x="978" y="171" font-size="12" text-anchor="middle" fill="#0A84FF">Paste</text>
+  <rect x="1044" y="152" width="120" height="30" rx="15" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="1104" y="171" font-size="12" text-anchor="middle" fill="#8E8E93">File</text>
+
+  <rect x="918" y="196" width="456" height="150" rx="10" fill="#1C1C22" stroke="#3A3A42"/>
+  <text x="934" y="218" font-size="12" fill="#636366">{ “schema_version”: 2, “instructions”: “…”, … }</text>
+  <text x="934" y="320" font-size="11" fill="#8E8E93">Drop a .json export or paste — parsed in your browser.</text>
+
+  <text x="918" y="380" font-size="11" font-weight="600" letter-spacing="0.9" fill="#8E8E93">ENVELOPE · schema_version 2</text>
+  <text x="918" y="402" font-size="12" fill="#30D158">✓ shape + contract caps pass — imports as a draft child</text>
+  <text x="918" y="420" font-size="11" fill="#8E8E93">Unwrapped .export — provenance stays in the file.</text>
+
+  <text x="918" y="454" font-size="11" font-weight="600" letter-spacing="0.9" fill="#FF453A">2 ERRORS · SEND BLOCKED</text>
+  <text x="918" y="476" font-size="12" fill="#F5F5F7">model_policy.allowed_models — needs 1–16 models</text>
+  <text x="918" y="494" font-size="12" fill="#F5F5F7">tools[3].name — lowercase, digits, underscores</text>
+  <text x="918" y="512" font-size="11" fill="#FF9F0A">budget.max_cost_micros — unknown key, stripped before send</text>
+  <text x="918" y="530" font-size="11" fill="#8E8E93">The engine re-validates everything — this is the pre-check.</text>
+
+  <text x="918" y="568" font-size="12" fill="#FFFFFF">Import as draft</text>
+  <text x="918" y="590" font-size="11" fill="#8E8E93">Same content twice = new draft; a draft already here 409s.</text>
+</svg>

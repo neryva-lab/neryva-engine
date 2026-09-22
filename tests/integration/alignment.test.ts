@@ -109,13 +109,22 @@ describeIfDb('alignment: shadow evals + degraded lifecycle (requires DATABASE_UR
   ) {
     const { sql } = await import('drizzle-orm');
     const datasetId = randomUUID();
+    // The publish gate is provenance-hash keyed: a decision only gates the
+    // content its provenance pins (evaluated_content_hash). Plant the pin so
+    // the decision is attributable to this version's content (for a
+    // PUBLISHED version the row hash is the immutable snapshot hash).
+    const hashRows = await db.withBypass((tx) =>
+      tx.execute(sql`select hash from assistant_versions where id = ${versionId}::uuid`),
+    );
+    const contentHash = (hashRows.rows[0] as { hash: string } | undefined)?.hash;
+    if (!contentHash) throw new Error(`insertEvalDecision: no version ${versionId}`);
     await db.withBypass(async (tx) => {
       await tx.execute(
         sql`insert into eval_datasets (id, organization_id, name, created_by) values (${datasetId}::uuid, ${orgId}::uuid, ${`align-${datasetId.slice(0, 8)}`}, 'test')`,
       );
       await tx.execute(sql`
-        insert into eval_runs (id, organization_id, dataset_id, assistant_version_id, state, attempts_per_case, started_by, decision, finished_at, is_shadow)
-        values (${randomUUID()}::uuid, ${orgId}::uuid, ${datasetId}::uuid, ${versionId}::uuid, 'completed', 1, 'test', ${decision}, now(), ${shadow})`);
+        insert into eval_runs (id, organization_id, dataset_id, assistant_version_id, state, attempts_per_case, started_by, decision, finished_at, is_shadow, provenance)
+        values (${randomUUID()}::uuid, ${orgId}::uuid, ${datasetId}::uuid, ${versionId}::uuid, 'completed', 1, 'test', ${decision}, now(), ${shadow}, ${JSON.stringify({ evaluated_content_hash: contentHash })}::jsonb)`);
     });
   }
 

@@ -216,10 +216,33 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           ENGINE_BASE_URL: http://localhost:3001
         run: pnpm run migrate
-      - name: integration + isolation suites
+      # The suites must NOT run as the neryva superuser: PostgreSQL superusers
+      # bypass RLS entirely (FORCE ROW LEVEL SECURITY does not apply to them),
+      # which would make every tenant-isolation assertion vacuous -- a passing
+      # suite that proves nothing. Migrations still run as the superuser above;
+      # the suites run as this least-privilege role instead.
+      - name: create least-privilege app role for suites
         env:
           DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
-          TEST_DATABASE_URL: postgresql://neryva:neryva@127.0.0.1:5432/neryva
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQLEOF'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neryva_app') THEN
+              CREATE ROLE neryva_app WITH LOGIN PASSWORD 'neryva_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+            END IF;
+          END $$;
+          GRANT CONNECT ON DATABASE neryva TO neryva_app;
+          GRANT USAGE ON SCHEMA public TO neryva_app;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO neryva_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO neryva_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE neryva IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO neryva_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE neryva IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO neryva_app;
+          SQLEOF
+      - name: integration + isolation suites
+        env:
+          DATABASE_URL: postgresql://neryva_app:neryva_app@127.0.0.1:5432/neryva
+          TEST_DATABASE_URL: postgresql://neryva_app:neryva_app@127.0.0.1:5432/neryva
           REDIS_URL: redis://127.0.0.1:6379
           ENGINE_BASE_URL: http://localhost:3001
         run: |

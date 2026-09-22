@@ -36,7 +36,8 @@ describeIfDb('outbox dispatcher (requires DATABASE_URL)', () => {
   const handled: string[] = [];
 
   beforeAll(async () => {
-    process.loadEnvFile('.env');
+    // Guarded like every other db-suite file: there is no .env in CI.
+    if (existsSync('.env')) process.loadEnvFile('.env');
     pool = makePool();
     const { OutboxDispatcher } = await import('../../src/common/infra/outbox/dispatcher');
     const { DbService } = await import('../../src/common/infra/db/db.service');

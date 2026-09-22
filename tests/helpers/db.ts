@@ -5,6 +5,12 @@ import { randomUUID } from 'node:crypto';
  * Shared integration/isolation test helpers. Tests gate on DATABASE_URL and
  * expect migrations applied (`pnpm run migrate`) — CI provides pgvector-capable
  * Postgres (pgvector/pgvector:pg16), local dev uses ops/docker-compose.yml.
+ *
+ * DATABASE_URL must connect as a LEAST-PRIVILEGE role (e.g. `neryva_app`),
+ * never as the `neryva` superuser: PostgreSQL superusers bypass RLS entirely
+ * (FORCE ROW LEVEL SECURITY does not apply to them), which would make every
+ * tenant-isolation assertion in these suites vacuous. CI creates the role in
+ * the db-suites job; see .github/workflows/ci.yml.
  */
 
 export const TEST_DATABASE_URL = process.env.DATABASE_URL;

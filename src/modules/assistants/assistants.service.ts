@@ -1386,13 +1386,16 @@ export class AssistantsService {
         throw ApiError.notFound('assistant version');
       }
       const existing = await tx
-        .select({ id: policySnapshots.id })
+        .select({ id: policySnapshots.id, hash: policySnapshots.hash })
         .from(policySnapshots)
         .where(eq(policySnapshots.assistantVersionId, versionId))
         .limit(1);
-      if (existing.length > 0) {
-        return;
+      if (existing.length > 0 && existing[0].hash === version.hash) {
+        return; // snapshot already reflects this exact content
       }
+      // Either no snapshot yet, or the draft was edited after the snapshot was
+      // taken (stale snapshot would make the eval execute old content while
+      // the gate attributes the decision to the new hash). Build/refresh below.
       const payload: AssistantPayload = {
         model_policy: version.modelPolicy as AssistantPayload['model_policy'],
         context_policy: version.contextPolicy as AssistantPayload['context_policy'],
@@ -1415,7 +1418,7 @@ export class AssistantsService {
         assistantId,
         validated.normalized,
       );
-      await tx.insert(policySnapshots).values({
+      const snapshotValues = {
         organizationId: orgId,
         assistantVersionId: versionId,
         snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
@@ -1434,7 +1437,17 @@ export class AssistantsService {
         modelRef: manifest.modelRef,
         templateRef: manifest.templateRef,
         manifestHash: manifest.manifestHash,
-      });
+      };
+      if (existing.length > 0) {
+        // Draft edited after the snapshot: refresh in place so the eval
+        // executes (and the provenance pins) the current content.
+        await tx
+          .update(policySnapshots)
+          .set(snapshotValues)
+          .where(eq(policySnapshots.id, existing[0].id));
+      } else {
+        await tx.insert(policySnapshots).values(snapshotValues);
+      }
     });
   }
 

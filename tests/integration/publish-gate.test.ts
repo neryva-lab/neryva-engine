@@ -73,8 +73,11 @@ describeIfDb('publish-gate negative matrix (requires DATABASE_URL)', () => {
     finishedAt: string;
     org?: string;
     datasetId?: string;
+    /** Content hash the eval executed against (pinned in provenance). Defaults to the version's live hash. */
+    evaluatedContentHash?: string;
   }): Promise<void> {
     const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
+    const { assistantVersions } = await import('../../src/modules/assistants/schema');
     let datasetId = input.datasetId;
     if (!datasetId) {
       const { evalDatasets } = await import('../../src/modules/knowledge/eval.schema');
@@ -82,6 +85,13 @@ describeIfDb('publish-gate negative matrix (requires DATABASE_URL)', () => {
       await db.withBypass((tx) =>
         tx.insert(evalDatasets).values({ id: datasetId as string, organizationId: input.org ?? orgId, name: `rel33-${datasetId}`, createdBy: 'rel33' }),
       );
+    }
+    let evaluatedContentHash = input.evaluatedContentHash;
+    if (!evaluatedContentHash) {
+      const rows = await db.withBypass((tx) =>
+        tx.select({ hash: assistantVersions.hash }).from(assistantVersions).where(sql`${assistantVersions.id} = ${input.versionId}::uuid`).limit(1),
+      );
+      evaluatedContentHash = rows[0]?.hash ?? null;
     }
     await db.withBypass((tx) =>
       tx.insert(evalRuns).values({
@@ -93,6 +103,7 @@ describeIfDb('publish-gate negative matrix (requires DATABASE_URL)', () => {
         decision: input.decision,
         finishedAt: input.finishedAt,
         startedBy: 'rel33',
+        provenance: { evaluated_content_hash: evaluatedContentHash },
       }),
     );
   }
@@ -174,6 +185,40 @@ describeIfDb('publish-gate negative matrix (requires DATABASE_URL)', () => {
     const refusal = await gate(live.assistantId, liveHash);
     expect(refusal?.gate).toBe('required_checks');
     expect(refusal?.message).toContain('absent');
+  });
+
+  it('refuses when the draft was edited after the PASS (in-place hash rewrite)', async () => {
+    // Regression: updateDraft rewrites the version row's hash in place. The
+    // gate must pin the decision to the content hash the eval EXECUTED against
+    // (provenance.evaluated_content_hash), not the row's live hash — otherwise
+    // a PASS earned by the pre-edit content would publish the edited content.
+    const preEditHash = `rel33-preedit-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const postEditHash = `rel33-postedit-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const { assistantId, versionId } = await plantAssistant(preEditHash);
+    const { assistantInstalls, assistantVersions } = await import('../../src/modules/assistants/schema');
+    await db.withBypass((tx) =>
+      tx.insert(assistantInstalls).values({ organizationId: orgId, slug, templateVersion: '1.0.0', assistantId }),
+    );
+    // PASS earned by the pre-edit content.
+    await plantDecision({
+      versionId, decision: 'PASS', finishedAt: new Date().toISOString(),
+      evaluatedContentHash: preEditHash,
+    });
+    // Simulate updateDraft: the same row now carries the edited content's hash.
+    await db.withBypass((tx) =>
+      tx.update(assistantVersions).set({ hash: postEditHash }).where(sql`${assistantVersions.id} = ${versionId}::uuid`),
+    );
+    // The gate for the EDITED content must refuse: no PASS exists for postEditHash.
+    const refusal = await gate(assistantId, postEditHash);
+    expect(refusal?.gate).toBe('required_checks');
+    expect(refusal?.message).toContain('absent');
+    expect(refusal?.details).toMatchObject({ latest_decision: null });
+    // And the pre-edit content (if it were still the live hash) would allow —
+    // proving the pin is on the evaluated hash, not the row.
+    await db.withBypass((tx) =>
+      tx.update(assistantVersions).set({ hash: preEditHash }).where(sql`${assistantVersions.id} = ${versionId}::uuid`),
+    );
+    await expect(gate(assistantId, preEditHash)).resolves.toBeNull();
   });
 
   it('refuses WARN, with or without a recorded approver', async () => {

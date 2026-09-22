@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { OutboxEvent } from '../common/infra/outbox/schema';
 import type { OutboxConsumer } from '../common/infra/outbox/consumer';
 import { DbService } from '../common/infra/db/db.service';
 import { EvalService } from '../modules/knowledge/eval.service';
 import { evalCases, evalCaseExecutions } from '../modules/knowledge/eval.schema';
+import { messages } from '../modules/conversations/schema';
 
 /**
  * Eval scoring — REL-2.2 (release_ledger.md). Consumes terminal run events
@@ -96,8 +97,17 @@ export class EvalScoringConsumer implements OutboxConsumer {
       if (!messageId) {
         return { state: 'failed' as const, score: 0, failureReason: 'run completed without a result message' };
       }
-      const msgRows = await tx.execute<{ content: unknown }>(sql`select content from messages where id = ${messageId}::uuid limit 1`);
-      const content = (msgRows.rows[0] as { content: unknown } | undefined)?.content;
+      // Typed select (not raw SQL): drizzle's jsonb mapping parses the stored
+      // value back to an object. A raw `select content ...` would return the
+      // driver's string form here because pg-types.ts overrides the jsonb
+      // (OID 3802) type parser — reading `.text` off that string silently
+      // scores every case 0.
+      const msgRows = await tx
+        .select({ content: messages.content })
+        .from(messages)
+        .where(eq(messages.id, messageId as string))
+        .limit(1);
+      const content = msgRows[0]?.content as unknown;
       const text = typeof (content as { text?: unknown } | null)?.text === 'string' ? String((content as { text?: unknown }).text) : '';
       const verdict = scoreLexical(expected, text);
       return {

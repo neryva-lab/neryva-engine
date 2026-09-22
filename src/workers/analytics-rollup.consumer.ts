@@ -80,7 +80,7 @@ export class AnalyticsRollupConsumer implements OutboxConsumer {
     await this.db.withBypass(async (tx) => {
       await tx.execute(sql`
         insert into analytics_rollups (id, organization_id, kind, period_start, scope, metrics)
-        select r.organization_id, 'conversation_outcomes', date_trunc('day', coalesce(r.finished_at, r.started_at))::date, '{}'::jsonb,
+        select gen_random_uuid(), r.organization_id, 'conversation_outcomes', date_trunc('day', coalesce(r.finished_at, r.started_at))::date, '{}'::jsonb,
           jsonb_build_object(
             'completed', count(*) filter (where r.state = 'COMPLETED'),
             'failed', count(*) filter (where r.state = 'FAILED'),

@@ -681,7 +681,7 @@ export class EvalService {
           model_policy: version.modelPolicy,
           context_policy: version.contextPolicy,
           tool_policy: version.toolPolicy,
-          knowledge_policy: version.knowledgePolicy,
+          knowledge_policy: version.knowledgePolicy ?? undefined,
           guardrail_policy: version.guardrailPolicy,
           instructions: version.instructions ?? undefined,
           model_params: version.modelParams ?? undefined,
@@ -742,18 +742,40 @@ export class EvalService {
               ) as { regression_no_worse_than?: unknown } | undefined
             )?.regression_no_worse_than;
       if (typeof regressionBound === 'number') {
-        const previous = await tx
-          .select({ id: assistantVersions.id })
+        // TPL-7.5: the candidate is compared against the release it would
+        // succeed. A DRAFT carries the version-0 sentinel, so a bound of
+        // `previous_version < evaluated_version` would be unsatisfiable and
+        // regression could never fire pre-publish; instead a draft is
+        // compared against the currently-published version (what is live).
+        // A post-publish eval keeps the original bound: the release this
+        // version succeeded.
+        const [currentPublished] = await tx
+          .select({ version: assistantVersions.version })
           .from(assistantVersions)
           .where(
             and(
               eq(assistantVersions.assistantId, version.assistantId),
               eq(assistantVersions.status, 'PUBLISHED'),
-              sql`${assistantVersions.version} < ${version.version}`,
             ),
           )
           .orderBy(desc(assistantVersions.version))
           .limit(1);
+        const previous = currentPublished
+          ? await tx
+              .select({ id: assistantVersions.id })
+              .from(assistantVersions)
+              .where(
+                and(
+                  eq(assistantVersions.assistantId, version.assistantId),
+                  eq(assistantVersions.status, 'PUBLISHED'),
+                  version.version === 0
+                    ? sql`${assistantVersions.version} <= ${currentPublished.version}`
+                    : sql`${assistantVersions.version} < ${version.version}`,
+                ),
+              )
+              .orderBy(desc(assistantVersions.version))
+              .limit(1)
+          : [];
         if (previous.length > 0) {
           const prevRuns = await tx
             .select({ score: evalRuns.score })
@@ -1043,6 +1065,12 @@ export class EvalService {
       tool_catalog_hash: canonicalHash(catalogRows.filter((r) => r.enabled)),
       knowledge_pins: (snapshot?.knowledgePins ?? null) as unknown,
       guardrail_ref: snapshot?.hash ?? null,
+      // The content hash the eval actually executed against (the policy
+      // snapshot's pinned hash). The publish gate matches on this — NOT the
+      // version row's live hash, which updateDraft rewrites in place. Without
+      // this pin, editing a draft after a PASS would retroactively attribute
+      // the old decision to the new content.
+      evaluated_content_hash: snapshot?.hash ?? null,
       compiler_version: input.parsed.compiler_version ?? null,
       environment: null,
       seed: input.parsed.seed ?? null,

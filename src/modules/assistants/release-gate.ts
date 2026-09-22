@@ -103,7 +103,13 @@ export async function evaluatePublishGate(
     join assistant_versions av on av.id = er.assistant_version_id
     where er.organization_id = ${orgId}::uuid
       and av.assistant_id = ${assistantId}::uuid
-      and av.hash = ${hash}
+      -- The decision must belong to THIS exact content. er.provenance pins
+      -- the content hash the eval executed against (policy snapshot hash at
+      -- completeRun). We deliberately do NOT match av.hash: drafts are mutable
+      -- rows and updateDraft rewrites the hash in place, so the live hash
+      -- would retroactively re-attribute an old PASS to edited content.
+      -- Pre-fix runs (no evaluated_content_hash) fail closed → re-evaluate.
+      and (er.provenance ->> 'evaluated_content_hash') = ${hash}
       and er.state = 'completed'
       and er.decision is not null
       -- P5: shadow evals OBSERVE drift; they never gate releases. A shadow

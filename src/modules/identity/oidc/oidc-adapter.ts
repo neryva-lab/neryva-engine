@@ -5,7 +5,7 @@ import { DbService } from '../../../common/infra/db/db.service';
 import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents, SessionRevokedEvent, TokenRefreshReuseEvent } from '../../../common/events/event-bus';
 import { tokenRefreshReuseTotal } from '../../../common/observability/metrics';
-import { envelopeDecrypt, envelopeEncrypt } from '../../../common/infra/crypto/envelope';
+import { envelopeDecrypt } from '../../../common/infra/crypto/envelope';
 import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPayloads } from '../schema';
 
 /**

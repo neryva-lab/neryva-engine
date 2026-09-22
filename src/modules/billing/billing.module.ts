@@ -45,7 +45,7 @@ import { AssistantsModule } from '../assistants/assistants.module';
 // CJS load-cycle TDZ.
 @Module({
   imports: [forwardRef(() => ConsoleModule), forwardRef(() => AssistantsModule), OrganizationsModule, NotificationsModule],
-  controllers: [MeteringController, UsageController, BillingController, PriceCatalogController, StripeWebhookController],
+  controllers: [MeteringController, UsageController, BillingController, BillingExtensionController, PriceCatalogController, StripeWebhookController],
   providers: [
     SpendIngestService,
     UsageLedgerService,

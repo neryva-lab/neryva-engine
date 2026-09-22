@@ -119,7 +119,6 @@ export class BillingController {
   async checkout(
     @Param('orgId') orgId: string,
     @Param('invoiceId') invoiceId: string,
-    @CurrentPrincipal() principal: L1Principal,
   ) {
     const invoice = await this.invoices.get(orgId, invoiceId);
     if (invoice.status === 'paid' || invoice.status === 'void') {

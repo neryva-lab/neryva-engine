@@ -5,7 +5,6 @@ import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { NotificationsService } from '../notifications/notifications.service';
 import { billingBudgets, billingCredits, billingCreditApplications, billingAdjustments, billingInvoiceLines } from './billing-extension.schema';
-import { billingInvoices } from './schema';
 
 /**
  * The credits + budgets + line-items engine (gaps B-2/B-3/B-5/B-7):

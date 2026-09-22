@@ -168,7 +168,6 @@ async function bootstrap(): Promise<void> {
 }
 
 void bootstrap().catch((err: unknown) => {
-  // eslint-disable-next-line no-console
   console.error('engine failed to boot', err);
   process.exit(1);
 });

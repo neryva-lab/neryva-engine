@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Logger } from '@nestjs/common';
-import { env, isProduction } from '../../common/config/env';
+import { isProduction } from '../../common/config/env';
 
 /**
  * SSRF protection for customer webhook targets (the class of attack where

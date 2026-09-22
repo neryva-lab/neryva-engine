@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';

@@ -20,7 +20,6 @@ export class RedisService implements OnModuleDestroy {
     });
     this.client.on('error', (err) => {
       // Logged, never thrown: a Redis blip must not take the process down.
-      // eslint-disable-next-line no-console
       console.error('[redis] connection error', err.message);
     });
   }

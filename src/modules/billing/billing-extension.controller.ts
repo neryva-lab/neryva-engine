@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
 import { sql } from 'drizzle-orm';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
@@ -13,7 +13,7 @@ import { ManifestRegistryService } from '../console/manifest-registry.service';
 import { billingAdjustments } from './billing-extension.schema';
 import { BillingCreditsService } from './billing-credits.service';
 import { billingInvoiceLines } from './billing-extension.schema';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 /**
  * The billing extensions surface (gaps B-2/B-3/B-5/B-6/B-7): credits &

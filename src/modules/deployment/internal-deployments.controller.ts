@@ -1,4 +1,4 @@
-import { Controller, Get, Headers, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Headers, Param } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal, RequireScopes } from '../../common/auth/decorators';
 import { L3Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';

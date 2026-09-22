@@ -1,7 +1,7 @@
 import { SetMetadata, UseInterceptors, applyDecorators } from '@nestjs/common';
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
-import { Observable, tap } from 'rxjs';
+import { Observable } from 'rxjs';
 import { map, catchError, mergeMap } from 'rxjs/operators';
 import { createHash } from 'node:crypto';
 import { RedisService } from '../infra/redis.service';
@@ -80,11 +80,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
       throw new ApiError(409, 'idempotency_in_flight', 'A request with this Idempotency-Key is currently in flight');
     }
 
-    let statusCode = response.statusCode;
     return next.handle().pipe(
-      tap(() => {
-        statusCode = response.statusCode;
-      }),
       map((body) => ({ captured: true, body, statusCode: response.statusCode })),
       mergeMap(async ({ body, statusCode: capturedStatus }) => {
         await this.redis.raw.set(redisKey, JSON.stringify({ fingerprint, status: capturedStatus, body }), 'PX', ttlMs);

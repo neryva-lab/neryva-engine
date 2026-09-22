@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { ApiError } from '../../common/http/api-error';
 import { ConfigScope } from './config-publish.schema';
 
 /**

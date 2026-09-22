@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query, Sse, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal, RequireScopes } from '../../common/auth/decorators';
 import { L2Principal } from '../../common/auth/principal';
-import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
+import { OrgRolesGuard } from '../../common/policy/org-roles.guard';
 import { Idempotent } from '../../common/http/idempotency';
 import { ApiError } from '../../common/http/api-error';
 import { assertUuid } from '../knowledge/assert';

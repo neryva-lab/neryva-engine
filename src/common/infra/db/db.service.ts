@@ -52,7 +52,6 @@ export class DbService implements OnModuleDestroy {
       // (see `applySessionTimeouts`) to bound slow-query and lock-held behavior.
     });
     this.pool.on('error', (err) => {
-      // eslint-disable-next-line no-console
       console.error('[db] idle client error', err.message);
     });
     this.db = drizzle(this.pool);

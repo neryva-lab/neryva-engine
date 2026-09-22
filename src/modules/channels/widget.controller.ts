@@ -150,7 +150,6 @@ export class WidgetController {
       return;
     }
     const conversationId = await this.widget.sessionConversationId(ctx);
-    const idempotency = request.headers['idempotency-key'];
     await this.conversations.recordFeedback({
       orgId: account.organizationId,
       conversationId,

@@ -393,7 +393,7 @@ export class EscalationsService {
       throw ApiError.validation({ text: 'must not be empty' });
     }
     return this.db.withOrg(input.orgId, async (tx) => {
-      const escalation = await this.lockOpenEscalation(tx, input.orgId, input.conversationId, input.escalationId);
+      await this.lockOpenEscalation(tx, input.orgId, input.conversationId, input.escalationId);
       const convRows = await tx
         .select()
         .from(conversations)

@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { assertUuid } from './assert';

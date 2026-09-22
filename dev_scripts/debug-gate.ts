@@ -37,10 +37,10 @@ async function main() {
     console.log('inserted assistant', assistantId, 'install');
   });
 
-  const refusal = await db.withOrg(orgId, (tx) => evaluatePublishGate(tx as any, orgId, assistantId, hash));
+  const refusal = await db.withOrg(orgId, (tx) => evaluatePublishGate(tx, orgId, assistantId, hash));
   console.log('refusal', refusal);
 
-  await db.withOrg(orgId, async (tx: any) => {
+  await db.withOrg(orgId, async (tx) => {
     const rows = await tx.execute(sql`select t.release_policy from assistant_installs i join assistant_templates t on t.slug = i.slug and t.version = i.template_version where i.assistant_id = ${assistantId}::uuid limit 1`);
     console.log('raw policy rows', rows.rows);
   });

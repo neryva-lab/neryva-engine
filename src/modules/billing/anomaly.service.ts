@@ -3,7 +3,6 @@ import { sql } from 'drizzle-orm';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus } from '../../common/events/event-bus';
-import { spendEvents } from './schema';
 
 /**
  * Per-product cost-anomaly detection (B-5): for every (org × product) ledger

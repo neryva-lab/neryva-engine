@@ -52,7 +52,7 @@ export class LoginInteractionController {
   @Post(':uid/email')
   @HttpCode(200)
   async submitEmail(@Param('uid') uid: string, @Body() body: { email?: string }, @Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
-    await this.assertInteraction(req, reply, uid);
+    await this.assertInteraction(req, reply);
     let email: string;
     try {
       email = normalizeEmail(String(body.email ?? ''));
@@ -95,7 +95,7 @@ export class LoginInteractionController {
   @RateLimit({ name: 'login-verify', capacity: 10, refillPerSecond: 0.1, scope: 'ip' })
   @Post(':uid/verify')
   async verifyCode(@Param('uid') uid: string, @Body() body: { email?: string; code?: string }, @Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
-    const interaction = await this.assertInteraction(req, reply, uid);
+    const interaction = await this.assertInteraction(req, reply);
     let email: string;
     try {
       email = normalizeEmail(String(body.email ?? ''));
@@ -139,7 +139,7 @@ export class LoginInteractionController {
   @RateLimit({ name: 'login-password', capacity: 10, refillPerSecond: 0.05, scope: 'ip' })
   @Post(':uid/password')
   async verifyPassword(@Param('uid') uid: string, @Body() body: { email?: string; password?: string }, @Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
-    const interaction = await this.assertInteraction(req, reply, uid);
+    const interaction = await this.assertInteraction(req, reply);
     const email = normalizeEmail(String(body.email ?? ''));
     const password = String(body.password ?? '');
     const account = await this.accounts.findByEmail(email);
@@ -187,7 +187,7 @@ export class LoginInteractionController {
     @Req() req: FastifyRequest,
     @Res() reply: FastifyReply,
   ): Promise<void> {
-    const interaction = await this.assertInteraction(req, reply, uid);
+    const interaction = await this.assertInteraction(req, reply);
     let email: string;
     try {
       email = normalizeEmail(String(body.email ?? ''));
@@ -235,7 +235,6 @@ export class LoginInteractionController {
   private async assertInteraction(
     req: FastifyRequest,
     reply: FastifyReply,
-    uid: string,
   ): Promise<{ returnTo?: string; params?: { scope?: string; client_id?: string } }> {
     const provider = this.provider();
     const details = (await provider.interactionDetails(req.raw as never, reply.raw as never)) as unknown as {

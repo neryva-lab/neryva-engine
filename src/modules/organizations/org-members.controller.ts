@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
-import { IsEmail, IsIn, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
+import { IsEmail, IsIn, IsInt, IsOptional, Length, Max, Min } from 'class-validator';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';

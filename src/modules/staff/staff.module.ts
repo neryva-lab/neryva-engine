@@ -17,7 +17,6 @@ export class StaffBoot implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     const swept = await this.impersonation.sweepExpiredSessions();
     if (swept > 0) {
-      // eslint-disable-next-line no-console
       console.log(`[staff] swept ${swept} expired impersonation session(s)`);
     }
   }

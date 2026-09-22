@@ -1,4 +1,4 @@
-import { bigint, index, integer, jsonb, numeric, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { index, integer, jsonb, numeric, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 
 /**
  * Phase 8 persistence (drizzle/0027_billing_ledger.sql). The usage ledger is

@@ -107,7 +107,6 @@ export class StudioController {
       this.usage.overview(orgId, { product: 'agent_studio' }),
       this.quota.usageSnapshot(orgId, 'agent_studio'),
     ]);
-    const projectById = new Map(projectRows.map((p) => [p.id, p]));
     const sliceByProject = new Map(
       (slices.products[0]?.projects ?? []).map((slice) => [slice.project_id ?? '', slice]),
     );

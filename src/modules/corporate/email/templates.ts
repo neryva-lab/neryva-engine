@@ -59,7 +59,7 @@ export const Templates: Record<string, EmailTemplate> = {
   },
 
   'identity.password-reset': {
-    subject: (v) => 'Reset your Neryva password',
+    subject: (_v) => 'Reset your Neryva password',
     text: (v) => render('Reset your Neryva password (link expires in {ttl_minutes} minutes):\n{reset_url}\n\nIf you did not request a reset, ignore this email — your password is unchanged.\n', v),
     html: (v) =>
       wrapHtml(

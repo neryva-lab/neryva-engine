@@ -183,7 +183,12 @@ export const policySnapshots = pgTable(
       .defaultNow(),
   },
   (t) => [
-    uniqueIndex('uq_policy_snapshots_version').on(t.assistantVersionId),
+    // Content-addressed + immutable (drizzle/0069): one row per
+    // (version, content hash). A draft edit INSERTS a new row; existing rows
+    // are never mutated, so runs referencing a snapshot id always see the
+    // content they were dispatched against. "Current" = the row whose hash
+    // matches the version row's live hash.
+    uniqueIndex('uq_policy_snapshots_version_hash').on(t.assistantVersionId, t.hash),
     index('ix_policy_snapshots_org_created').on(t.organizationId, t.createdAt),
   ],
 );

@@ -545,7 +545,7 @@ export class ConversationsService {
     const rows = await tx.execute(sql`
       select av.id as version_id, ps.id as snapshot_id
       from assistant_versions av
-      join policy_snapshots ps on ps.assistant_version_id = av.id
+      join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
       where av.id = ${versionId}::uuid
         ${allowDraft ? sql`` : sql`and av.status = 'PUBLISHED'`}
       limit 1
@@ -718,7 +718,7 @@ export class ConversationsService {
           sql`
           select av.id as version_id, ps.id as snapshot_id
           from assistant_versions av
-          join policy_snapshots ps on ps.assistant_version_id = av.id
+          join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
           where av.id = ${versionId}::uuid and av.status = 'PUBLISHED'
           limit 1
         `,
@@ -783,7 +783,7 @@ export class ConversationsService {
       select av.id as version_id, ps.id as snapshot_id
       from assistants a
       join assistant_versions av on av.id = a.active_version_id
-      join policy_snapshots ps on ps.assistant_version_id = av.id
+      join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
       where a.id = ${assistantId}::uuid
       limit 1
     `);

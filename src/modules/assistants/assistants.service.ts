@@ -971,7 +971,11 @@ export class AssistantsService {
     assertUuid(versionId);
     return this.db.withOrg(orgId, async (tx) => {
       const version = await tx
-        .select({ id: assistantVersions.id, assistantId: assistantVersions.assistantId })
+        .select({
+          id: assistantVersions.id,
+          assistantId: assistantVersions.assistantId,
+          hash: assistantVersions.hash,
+        })
         .from(assistantVersions)
         .where(
           and(eq(assistantVersions.id, versionId), eq(assistantVersions.assistantId, assistantId)),
@@ -980,10 +984,18 @@ export class AssistantsService {
       if (version.length === 0) {
         return null;
       }
+      // Content-addressed (drizzle/0069): "the version's snapshot" is the row
+      // matching the version's LIVE hash — older rows are immutable history
+      // for runs dispatched against them.
       const rows = await tx
         .select()
         .from(policySnapshots)
-        .where(eq(policySnapshots.assistantVersionId, versionId))
+        .where(
+          and(
+            eq(policySnapshots.assistantVersionId, versionId),
+            eq(policySnapshots.hash, version[0].hash),
+          ),
+        )
         .limit(1);
       return rows[0] ?? null;
     });
@@ -1385,17 +1397,27 @@ export class AssistantsService {
       if (!version || version.assistantId !== assistantId) {
         throw ApiError.notFound('assistant version');
       }
+      // Content-addressed + immutable (drizzle/0069): one row per
+      // (version, content hash). A draft edited after the snapshot was taken
+      // INSERTS a new row — never mutates the existing one. In-place refresh
+      // was the in-flight edit race: an eval dispatched against H1 completed
+      // after the refresh and pinned H2 in its provenance, and in-flight
+      // runs re-reading the snapshot by id silently switched content
+      // mid-run. Runs reference their snapshot row by id and always see the
+      // content they were dispatched against.
       const existing = await tx
-        .select({ id: policySnapshots.id, hash: policySnapshots.hash })
+        .select({ id: policySnapshots.id })
         .from(policySnapshots)
-        .where(eq(policySnapshots.assistantVersionId, versionId))
+        .where(
+          and(
+            eq(policySnapshots.assistantVersionId, versionId),
+            eq(policySnapshots.hash, version.hash),
+          ),
+        )
         .limit(1);
-      if (existing.length > 0 && existing[0].hash === version.hash) {
+      if (existing.length > 0) {
         return; // snapshot already reflects this exact content
       }
-      // Either no snapshot yet, or the draft was edited after the snapshot was
-      // taken (stale snapshot would make the eval execute old content while
-      // the gate attributes the decision to the new hash). Build/refresh below.
       const payload: AssistantPayload = {
         model_policy: version.modelPolicy as AssistantPayload['model_policy'],
         context_policy: version.contextPolicy as AssistantPayload['context_policy'],
@@ -1438,16 +1460,13 @@ export class AssistantsService {
         templateRef: manifest.templateRef,
         manifestHash: manifest.manifestHash,
       };
-      if (existing.length > 0) {
-        // Draft edited after the snapshot: refresh in place so the eval
-        // executes (and the provenance pins) the current content.
-        await tx
-          .update(policySnapshots)
-          .set(snapshotValues)
-          .where(eq(policySnapshots.id, existing[0].id));
-      } else {
-        await tx.insert(policySnapshots).values(snapshotValues);
-      }
+      // Immutable rows: a new content hash always INSERTS. The unique key is
+      // (assistant_version_id, hash) — concurrent inserts of the same
+      // content resolve via on-conflict-do-nothing below.
+      await tx
+        .insert(policySnapshots)
+        .values(snapshotValues)
+        .onConflictDoNothing({ target: [policySnapshots.assistantVersionId, policySnapshots.hash] });
     });
   }
 
@@ -1547,13 +1566,26 @@ export class AssistantsService {
     if (!acknowledged) {
       return;
     }
-    const snapRows = await this.db.withOrg(orgId, (tx) =>
-      tx
+    const snapRows = await this.db.withOrg(orgId, async (tx) => {
+      // The COMMITTED snapshot: the row matching the version's live hash
+      // (content-addressed, drizzle/0069 — older rows are immutable history).
+      const vRows = await tx
+        .select({ hash: assistantVersions.hash })
+        .from(assistantVersions)
+        .where(and(eq(assistantVersions.id, versionId), eq(assistantVersions.organizationId, orgId)))
+        .limit(1);
+      if (vRows.length === 0) return [];
+      return tx
         .select({ knowledgePins: policySnapshots.knowledgePins })
         .from(policySnapshots)
-        .where(eq(policySnapshots.assistantVersionId, versionId))
-        .limit(1),
-    );
+        .where(
+          and(
+            eq(policySnapshots.assistantVersionId, versionId),
+            eq(policySnapshots.hash, vRows[0].hash),
+          ),
+        )
+        .limit(1);
+    });
     const pins = { knowledgePins: (snapRows[0]?.knowledgePins ?? []) as never };
     const slugs = unresolvedPinSlugs(pins);
     // P0: the bypass may have covered indexing gaps rather than (or as well
@@ -1880,7 +1912,7 @@ export class AssistantsService {
       select av.hash as active_hash, ps.manifest_hash as active_manifest_hash
       from assistants a
       left join assistant_versions av on av.id = a.active_version_id
-      left join policy_snapshots ps on ps.assistant_version_id = av.id
+      left join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
       where a.id = ${assistantId}::uuid
       limit 1
     `);

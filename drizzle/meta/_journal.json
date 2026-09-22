@@ -477,6 +477,13 @@
                         "when":  1789619400000,
                         "tag":  "0068_incident_lineage",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  68,
+                        "version":  6,
+                        "when":  1789623000000,
+                        "tag":  "0069_policy_snapshots_content_addressed",
+                        "breakpoints":  true
                     }
                 ]
 }

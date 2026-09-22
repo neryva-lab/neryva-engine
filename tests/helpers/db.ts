@@ -365,6 +365,21 @@ export async function buildAssistantsService(
 export async function buildConversationsService(
   db: import('../../src/common/infra/db/db.service').DbService,
 ): Promise<import('../../src/modules/conversations/conversations.service').ConversationsService> {
+  const { service } = await buildConversationsServiceWithResources(db);
+  return service;
+}
+
+/**
+ * Same graph as buildConversationsService, but also returns the RedisService
+ * so long-lived evidence scripts can close it explicitly and let the process
+ * exit naturally (no process.exit).
+ */
+export async function buildConversationsServiceWithResources(
+  db: import('../../src/common/infra/db/db.service').DbService,
+): Promise<{
+  service: import('../../src/modules/conversations/conversations.service').ConversationsService;
+  redis: import('../../src/common/infra/redis.service').RedisService;
+}> {
   const { AuditService } = await import('../../src/common/audit/audit.service');
   const { RetentionPurgeService } =
     await import('../../src/modules/lifecycle/retention-purge.service');
@@ -390,5 +405,5 @@ export async function buildConversationsService(
   const events = new EventBus();
   const entitlements = new EntitlementsService(db, audit, events);
   const quota = new QuotaService(redis, db, entitlements);
-  return new ConversationsService(db, audit, purge, escalations, quota);
+  return { service: new ConversationsService(db, audit, purge, escalations, quota), redis };
 }

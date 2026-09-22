@@ -11,7 +11,11 @@ import { types } from 'pg';
  */
 const keepAsString = (value: string) => value;
 
-// 1184 = timestamptz, 1114 = timestamp, 3802 = timestamptz array
+// 1184 = timestamptz, 1114 = timestamp, 3802 = jsonb (NOT timestamptz
+// array — timestamptz[] is 1185). The 3802 override below therefore makes
+// raw driver reads of JSONB come back as strings; drizzle's typed jsonb
+// columns still JSON.parse them, but any `tx.execute(sql`select ...jsonb...`)`
+// must be written as a typed select instead (see eval-scoring.consumer).
 types.setTypeParser(1184, keepAsString);
 types.setTypeParser(1114, keepAsString);
 types.setTypeParser(3802, keepAsString);

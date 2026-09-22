@@ -1,0 +1,24 @@
+-- 0069 — Content-addressed policy snapshots (in-flight edit race fix).
+--
+-- Root cause: policy_snapshots carried ONE MUTABLE row per version
+-- (uq_policy_snapshots_version). ensureVersionSnapshot refreshed that row
+-- in place when a draft was edited, so:
+--   1. an eval run dispatched against content H1 completed after the
+--      refresh and pinned evaluated_content_hash=H2 in its provenance
+--      (completion-time read of mutable state — proven live 2026-09-22);
+--   2. in-flight conversation runs re-reading the snapshot by id
+--      (GetAuthorizedRunContext) silently switched to H2's content
+--      mid-run — mixed-content execution.
+--
+-- Fix: snapshots are content-addressed and IMMUTABLE. The unique key becomes
+-- (assistant_version_id, hash); a draft edit INSERTS a new row, never
+-- mutates an existing one. Runs keep referencing their snapshot row by id
+-- and always see the content they were dispatched against. Readers that
+-- want "the version's current snapshot" join on ps.hash = av.hash.
+--
+-- Data safety: the old key was unique on assistant_version_id alone, so
+-- every existing (assistant_version_id, hash) pair is trivially unique —
+-- the new index builds without conflicts or data loss. No rows are
+-- rewritten; old snapshots stay addressable by id for run history.
+DROP INDEX IF EXISTS "uq_policy_snapshots_version";
+CREATE UNIQUE INDEX "uq_policy_snapshots_version_hash" ON "policy_snapshots" ("assistant_version_id", "hash");

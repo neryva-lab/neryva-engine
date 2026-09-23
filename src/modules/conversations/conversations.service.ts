@@ -2367,7 +2367,22 @@ export class ConversationsService {
       // missing — cancelRun leaked RESERVED rows until the 15-minute TTL),
       // and the advisory Redis hold drops after the commit (best-effort).
       await this.settleRunQuota(tx, run.id, false);
-      return updated[0];
+
+      // A2-64 — a canceled run's pending approvals must not linger in the
+      // queue: mark them EXPIRED (terminal, undecidable — the same bucket
+      // the approval-expiry sweep uses) in the SAME transaction as the
+      // cancel, so the queue never shows decidable work for a dead run.
+      const orphaned = await tx
+        .update(approvals)
+        .set({
+          state: 'EXPIRED',
+          decidedAt: new Date().toISOString(),
+          decisionActorId: `system:run-canceled:${input.actor}`,
+        })
+        .where(and(eq(approvals.runId, run.id), eq(approvals.state, 'PENDING')))
+        .returning({ id: approvals.id });
+
+      return { canceledRow: updated[0], orphanedApprovalIds: orphaned.map((r) => r.id) };
     });
     await this.audit.add({
       action: 'run.canceled',
@@ -2376,12 +2391,15 @@ export class ConversationsService {
       actorType: 'account',
       actorId: input.actor,
       tenantId: input.orgId,
-      details: { reason: input.reason ?? 'canceled_by_principal' },
+      details: {
+        reason: input.reason ?? 'canceled_by_principal',
+        expired_approval_ids: canceled.orphanedApprovalIds,
+      },
     });
-    if (canceled.runKind === 'standard') {
+    if (canceled.canceledRow.runKind === 'standard') {
       await this.releaseRunQuotaHold(input.orgId);
     }
-    return canceled;
+    return canceled.canceledRow;
   }
 
   /**

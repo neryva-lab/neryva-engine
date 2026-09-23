@@ -37,11 +37,19 @@ import { providerCredentials } from '../assistants/provider-credentials.schema';
 
 /** Wire enum (numeric string) → semantic SSE event names. */
 const SSE_EVENT_NAMES: Record<string, string> = {
+  '1': 'lifecycle', // EVENT_TYPE_RUN_LIFECYCLE
   '2': 'delta', // EVENT_TYPE_ASSISTANT_CHUNK — token-stream channel
+  '3': 'tool-call', // EVENT_TYPE_TOOL_CALL
+  '4': 'tool-result', // EVENT_TYPE_TOOL_RESULT
   '5': 'retrieval', // EVENT_TYPE_RETRIEVAL
   '6': 'approval', // EVENT_TYPE_APPROVAL
-  '11': 'terminal',
-  '12': 'thinking', // EVENT_TYPE_THINKING (FL-3.6) // EVENT_TYPE_TERMINAL
+  '7': 'memory', // EVENT_TYPE_MEMORY
+  '8': 'checkpoint', // EVENT_TYPE_CHECKPOINT
+  '9': 'policy', // EVENT_TYPE_POLICY
+  '10': 'usage', // EVENT_TYPE_USAGE
+  '11': 'terminal', // EVENT_TYPE_TERMINAL
+  '12': 'thinking', // EVENT_TYPE_THINKING (FL-3.6)
+  '13': 'media', // EVENT_TYPE_MEDIA (FL-3.2)
 };
 
 /**
@@ -2546,7 +2554,7 @@ export class ConversationsService {
           .withOrg(orgId, async (tx) => {
             const runRows = await tx.select().from(runs).where(eq(runs.id, runId)).limit(1);
             if (runRows.length === 0) {
-              subscriber.next({ event: 'error', data: 'not_found' });
+              subscriber.next({ type: 'error', data: 'not_found' });
               finish();
               return;
             }
@@ -2565,7 +2573,10 @@ export class ConversationsService {
               const eventName = SSE_EVENT_NAMES[e.eventType] ?? e.eventType;
               subscriber.next({
                 id: String(e.engineSequence),
-                event: eventName,
+                // NestJS SseStream serializes `message.type` as the `event:`
+                // line — `event` is silently ignored (A2-63: the `delta`
+                // taxonomy never reached the wire because of this).
+                type: eventName,
                 data: e.payload ?? {},
               });
             }
@@ -2587,10 +2598,10 @@ export class ConversationsService {
   }
 }
 
-/** SSE frame (Nest @Sse message shape). */
+/** SSE frame (Nest @Sse message shape — SseStream reads `type`, not `event`). */
 export interface SseMessage {
   id?: string;
-  event?: string;
+  type?: string;
   data: unknown;
   retry?: number;
 }

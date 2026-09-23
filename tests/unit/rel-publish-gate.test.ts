@@ -36,15 +36,28 @@ describe('decideRequiredChecks (REL-3.2 rule)', () => {
     const refusal = decideRequiredChecks(['smoke'], 'BLOCK');
     expect(refusal?.gate).toBe('required_checks');
   });
+
+  it('refuses FAIL through the required-checks rule too (A2-80: only PASS publishes)', () => {
+    const refusal = decideRequiredChecks(['smoke'], 'FAIL');
+    expect(refusal?.gate).toBe('required_checks');
+    expect(refusal?.message).toContain('FAIL');
+  });
 });
 
-describe('decideBlockedContent (TPL-6.1 rule)', () => {
-  it('refuses only BLOCK; everything else passes this rule', () => {
+describe('decideBlockedContent (TPL-6.1 rule + A2-80 FAIL)', () => {
+  it('refuses BLOCK and FAIL; everything else passes this rule', () => {
     expect(decideBlockedContent('BLOCK')?.gate).toBe('blocked_content');
+    expect(decideBlockedContent('FAIL')?.gate).toBe('failed_content');
     expect(decideBlockedContent('PASS')).toBeNull();
     expect(decideBlockedContent('WARN')).toBeNull();
     expect(decideBlockedContent(null)).toBeNull();
     expect(decideBlockedContent(undefined)).toBeNull();
+  });
+
+  it('names the failing cases as the fix for FAIL', () => {
+    const refusal = decideBlockedContent('FAIL');
+    expect(refusal?.message).toContain('FAIL');
+    expect(refusal?.message).toContain('failing cases');
   });
 });
 

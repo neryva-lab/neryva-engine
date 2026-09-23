@@ -1,496 +1,503 @@
 {
-    "version":  "7",
-    "dialect":  "postgresql",
-    "entries":  [
-                    {
-                        "idx":  0,
-                        "version":  "6",
-                        "when":  1761232000000,
-                        "tag":  "0001_engine_core",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  1,
-                        "version":  "6",
-                        "when":  1761232100000,
-                        "tag":  "0002_org_furniture",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  2,
-                        "version":  "6",
-                        "when":  1761232200000,
-                        "tag":  "0003_corporate_public",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  3,
-                        "version":  "6",
-                        "when":  1761232300000,
-                        "tag":  "0004_billing_metering",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  4,
-                        "version":  "6",
-                        "when":  1761232400000,
-                        "tag":  "0005_product_deployment",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  5,
-                        "version":  "6",
-                        "when":  1761232500000,
-                        "tag":  "0006_agent_studio_keys",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  6,
-                        "version":  "6",
-                        "when":  1761232600000,
-                        "tag":  "0007_satellite_surfaces",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  7,
-                        "version":  "6",
-                        "when":  1761232700000,
-                        "tag":  "0008_accounts_created_via",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  8,
-                        "version":  "6",
-                        "when":  1761232800000,
-                        "tag":  "0009_org_furniture_dense",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  9,
-                        "version":  "6",
-                        "when":  1761233500000,
-                        "tag":  "0010_identity_lifecycle",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  10,
-                        "version":  "6",
-                        "when":  1761233600000,
-                        "tag":  "0011_platform_services",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  11,
-                        "version":  "6",
-                        "when":  1761233700000,
-                        "tag":  "0012_org_lifecycle",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  12,
-                        "version":  "6",
-                        "when":  1761233800000,
-                        "tag":  "0019_console_surface",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  13,
-                        "version":  "6",
-                        "when":  1761234000000,
-                        "tag":  "0013_corporate_depth",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  14,
-                        "version":  "6",
-                        "when":  1761234050000,
-                        "tag":  "0014_billing_money",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  15,
-                        "version":  "6",
-                        "when":  1761234100000,
-                        "tag":  "0015_satellites_dense",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  16,
-                        "version":  "6",
-                        "when":  1761235500000,
-                        "tag":  "0016_config_publish_depth",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  17,
-                        "version":  "6",
-                        "when":  1761236600000,
-                        "tag":  "0017_deployment_dense",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  18,
-                        "version":  "6",
-                        "when":  1761237700000,
-                        "tag":  "0018_account_deletion",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  19,
-                        "version":  "6",
-                        "when":  1761240000000,
-                        "tag":  "0020_assistants",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  20,
-                        "version":  "6",
-                        "when":  1761241000000,
-                        "tag":  "0021_policy_snapshots",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  21,
-                        "version":  "6",
-                        "when":  1761242000000,
-                        "tag":  "0022_conversations",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  22,
-                        "version":  "6",
-                        "when":  1761242100000,
-                        "tag":  "0023_async_foundation",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  23,
-                        "version":  "6",
-                        "when":  1761243000000,
-                        "tag":  "0024_mcp_authority",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  24,
-                        "version":  "6",
-                        "when":  1761244000000,
-                        "tag":  "0025_outbox_dispatch",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  25,
-                        "version":  "6",
-                        "when":  1761245000000,
-                        "tag":  "0026_knowledge",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  26,
-                        "version":  "6",
-                        "when":  1761246000000,
-                        "tag":  "0027_billing_ledger",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  27,
-                        "version":  "6",
-                        "when":  1761246100000,
-                        "tag":  "0028_lifecycle",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  28,
-                        "version":  "6",
-                        "when":  1761246200000,
-                        "tag":  "0029_run_event_identity",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  29,
-                        "version":  "6",
-                        "when":  1761246300000,
-                        "tag":  "0030_channels",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  30,
-                        "version":  "6",
-                        "when":  1761246300001,
-                        "tag":  "0031_assistant_instructions",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  31,
-                        "version":  "6",
-                        "when":  1761246300002,
-                        "tag":  "0032_tool_catalog",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  32,
-                        "version":  "6",
-                        "when":  1761246300003,
-                        "tag":  "0033_conversation_summaries",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  33,
-                        "version":  "6",
-                        "when":  1761246300004,
-                        "tag":  "0034_message_feedback",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  34,
-                        "version":  "6",
-                        "when":  1761246300005,
-                        "tag":  "0035_artifact_message_purpose",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  35,
-                        "version":  "6",
-                        "when":  1761246300006,
-                        "tag":  "0036_assistant_budget_policy",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  36,
-                        "version":  "6",
-                        "when":  1761246300007,
-                        "tag":  "0037_escalations",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  37,
-                        "version":  "6",
-                        "when":  1761246300008,
-                        "tag":  "0038_hybrid_retrieval",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  38,
-                        "version":  "6",
-                        "when":  1761246300009,
-                        "tag":  "0039_connectors",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  39,
-                        "version":  "6",
-                        "when":  1761246300010,
-                        "tag":  "0040_parity_tables",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  40,
-                        "version":  "6",
-                        "when":  1761246300011,
-                        "tag":  "0041_memory_temporal",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  41,
-                        "version":  "6",
-                        "when":  1761246300012,
-                        "tag":  "0042_fl3_frontier",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  42,
-                        "version":  "6",
-                        "when":  1761246300013,
-                        "tag":  "0043_platform_staff",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  43,
-                        "version":  "6",
-                        "when":  1761246300014,
-                        "tag":  "0044_org_owner_invariant",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  44,
-                        "version":  "6",
-                        "when":  1761246300015,
-                        "tag":  "0045_org_kind",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  45,
-                        "version":  "6",
-                        "when":  1761246300016,
-                        "tag":  "0046_credentials_expand",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  46,
-                        "version":  "6",
-                        "when":  1761246300017,
-                        "tag":  "0047_credentials_contract",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  47,
-                        "version":  "6",
-                        "when":  1761246300018,
-                        "tag":  "0048_assistant_templates",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  48,
-                        "version":  "6",
-                        "when":  1761246300019,
-                        "tag":  "0049_release_governance",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  49,
-                        "version":  "6",
-                        "when":  1789257600000,
-                        "tag":  "0050_provider_credentials",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  50,
-                        "version":  "6",
-                        "when":  1789257600001,
-                        "tag":  "0051_model_catalog",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  51,
-                        "version":  "6",
-                        "when":  1789257600002,
-                        "tag":  "0052_eval_executions_and_run_kind",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  52,
-                        "version":  "6",
-                        "when":  1789257600003,
-                        "tag":  "0053_model_cost_catalog",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  53,
-                        "version":  "6",
-                        "when":  1789257600004,
-                        "tag":  "0054_template_platform_blocks",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  54,
-                        "version":  "6",
-                        "when":  1789257600005,
-                        "tag":  "0055_agents_catalog_seed",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  55,
-                        "version":  "6",
-                        "when":  1789257600006,
-                        "tag":  "0056_advanced_approvals",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  56,
-                        "version":  "6",
-                        "when":  1789257600007,
-                        "tag":  "0057_enterprise_knowledge_p0",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  57,
-                        "version":  "6",
-                        "when":  1789257600008,
-                        "tag":  "0058_rollout_pause_reason",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  58,
-                        "version":  "6",
-                        "when":  1789482523490,
-                        "tag":  "0059_legacy_standalone",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  59,
-                        "version":  "6",
-                        "when":  1789496866901,
-                        "tag":  "0060_rls_empty_tenant_guard",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  60,
-                        "version":  "6",
-                        "when":  1789581448126,
-                        "tag":  "0061_account_onboarding",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  61,
-                        "version":  6,
-                        "when":  1789599865505,
-                        "tag":  "0062_rollout_id_default",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  62,
-                        "version":  6,
-                        "when":  1789601720715,
-                        "tag":  "0063_assistant_brand",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  63,
-                        "version":  6,
-                        "when":  1789605000000,
-                        "tag":  "0064_embedding_model_scope",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  64,
-                        "version":  6,
-                        "when":  1789608600000,
-                        "tag":  "0065_cached_input_rate",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  65,
-                        "version":  6,
-                        "when":  1789612200000,
-                        "tag":  "0066_tool_perimeter",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  66,
-                        "version":  6,
-                        "when":  1789615800000,
-                        "tag":  "0067_shadow_evals_degraded_lifecycle",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  67,
-                        "version":  6,
-                        "when":  1789619400000,
-                        "tag":  "0068_incident_lineage",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  68,
-                        "version":  6,
-                        "when":  1789623000000,
-                        "tag":  "0069_policy_snapshots_content_addressed",
-                        "breakpoints":  true
-                    },
-                    {
-                        "idx":  69,
-                        "version":  6,
-                        "when":  1790107435000,
-                        "tag":  "0070_eval_runs_policy_snapshot_pin",
-                        "breakpoints":  true
-                    }
-                ]
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1761232000000,
+      "tag": "0001_engine_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1761232100000,
+      "tag": "0002_org_furniture",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1761232200000,
+      "tag": "0003_corporate_public",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1761232300000,
+      "tag": "0004_billing_metering",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1761232400000,
+      "tag": "0005_product_deployment",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1761232500000,
+      "tag": "0006_agent_studio_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1761232600000,
+      "tag": "0007_satellite_surfaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1761232700000,
+      "tag": "0008_accounts_created_via",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1761232800000,
+      "tag": "0009_org_furniture_dense",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1761233500000,
+      "tag": "0010_identity_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1761233600000,
+      "tag": "0011_platform_services",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1761233700000,
+      "tag": "0012_org_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1761233800000,
+      "tag": "0019_console_surface",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1761234000000,
+      "tag": "0013_corporate_depth",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1761234050000,
+      "tag": "0014_billing_money",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1761234100000,
+      "tag": "0015_satellites_dense",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1761235500000,
+      "tag": "0016_config_publish_depth",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1761236600000,
+      "tag": "0017_deployment_dense",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1761237700000,
+      "tag": "0018_account_deletion",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1761240000000,
+      "tag": "0020_assistants",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1761241000000,
+      "tag": "0021_policy_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1761242000000,
+      "tag": "0022_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1761242100000,
+      "tag": "0023_async_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1761243000000,
+      "tag": "0024_mcp_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1761244000000,
+      "tag": "0025_outbox_dispatch",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1761245000000,
+      "tag": "0026_knowledge",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1761246000000,
+      "tag": "0027_billing_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1761246100000,
+      "tag": "0028_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1761246200000,
+      "tag": "0029_run_event_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1761246300000,
+      "tag": "0030_channels",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1761246300001,
+      "tag": "0031_assistant_instructions",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1761246300002,
+      "tag": "0032_tool_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1761246300003,
+      "tag": "0033_conversation_summaries",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1761246300004,
+      "tag": "0034_message_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1761246300005,
+      "tag": "0035_artifact_message_purpose",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1761246300006,
+      "tag": "0036_assistant_budget_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1761246300007,
+      "tag": "0037_escalations",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1761246300008,
+      "tag": "0038_hybrid_retrieval",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1761246300009,
+      "tag": "0039_connectors",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1761246300010,
+      "tag": "0040_parity_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1761246300011,
+      "tag": "0041_memory_temporal",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1761246300012,
+      "tag": "0042_fl3_frontier",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1761246300013,
+      "tag": "0043_platform_staff",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1761246300014,
+      "tag": "0044_org_owner_invariant",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1761246300015,
+      "tag": "0045_org_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1761246300016,
+      "tag": "0046_credentials_expand",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1761246300017,
+      "tag": "0047_credentials_contract",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1761246300018,
+      "tag": "0048_assistant_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1761246300019,
+      "tag": "0049_release_governance",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1789257600000,
+      "tag": "0050_provider_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1789257600001,
+      "tag": "0051_model_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "6",
+      "when": 1789257600002,
+      "tag": "0052_eval_executions_and_run_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "6",
+      "when": 1789257600003,
+      "tag": "0053_model_cost_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "6",
+      "when": 1789257600004,
+      "tag": "0054_template_platform_blocks",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "6",
+      "when": 1789257600005,
+      "tag": "0055_agents_catalog_seed",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "6",
+      "when": 1789257600006,
+      "tag": "0056_advanced_approvals",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1789257600007,
+      "tag": "0057_enterprise_knowledge_p0",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "6",
+      "when": 1789257600008,
+      "tag": "0058_rollout_pause_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1789482523490,
+      "tag": "0059_legacy_standalone",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1789496866901,
+      "tag": "0060_rls_empty_tenant_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1789581448126,
+      "tag": "0061_account_onboarding",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": 6,
+      "when": 1789599865505,
+      "tag": "0062_rollout_id_default",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": 6,
+      "when": 1789601720715,
+      "tag": "0063_assistant_brand",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": 6,
+      "when": 1789605000000,
+      "tag": "0064_embedding_model_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": 6,
+      "when": 1789608600000,
+      "tag": "0065_cached_input_rate",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": 6,
+      "when": 1789612200000,
+      "tag": "0066_tool_perimeter",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": 6,
+      "when": 1789615800000,
+      "tag": "0067_shadow_evals_degraded_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": 6,
+      "when": 1789619400000,
+      "tag": "0068_incident_lineage",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": 6,
+      "when": 1789623000000,
+      "tag": "0069_policy_snapshots_content_addressed",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": 6,
+      "when": 1790107435000,
+      "tag": "0070_eval_runs_policy_snapshot_pin",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": 6,
+      "when": 1790185074853,
+      "tag": "0071_eval_decision_fail",
+      "breakpoints": true
+    }
+  ]
 }

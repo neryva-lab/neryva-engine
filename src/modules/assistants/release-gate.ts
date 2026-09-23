@@ -19,12 +19,17 @@ import { ApiError } from '../../common/http/api-error';
  */
 
 export interface GateRefusal {
-  gate: 'blocked_content' | 'required_checks';
+  gate: 'blocked_content' | 'failed_content' | 'required_checks';
   message: string;
   details: Record<string, unknown>;
 }
 
-/** BLOCK rule (TPL-6.1): the latest completed decision must not be BLOCK. */
+/**
+ * BLOCK/FAIL rule (TPL-6.1 + A2-80): the latest completed decision must not
+ * be BLOCK or FAIL. A FAIL verdict means the content's own cases failed —
+ * publishing it would ship what the eval just disproved. A later PASS on
+ * the same content hash clears either (latest wins).
+ */
 export function decideBlockedContent(
   latestDecision: string | null | undefined,
 ): GateRefusal | null {
@@ -33,6 +38,14 @@ export function decideBlockedContent(
       gate: 'blocked_content',
       message:
         'the latest evaluation of this content decided BLOCK — resolve the critical failures and re-evaluate before publishing',
+      details: {},
+    };
+  }
+  if (latestDecision === 'FAIL') {
+    return {
+      gate: 'failed_content',
+      message:
+        'the latest evaluation of this content decided FAIL — fix the failing cases and re-evaluate before publishing',
       details: {},
     };
   }

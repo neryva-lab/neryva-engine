@@ -354,6 +354,92 @@ describeIfDb('eval-gate fixes (requires DATABASE_URL)', () => {
     expect(result.provenance.block_reasons ?? []).toEqual([]);
   });
 
+  it('completeRun: failing cases decide FAIL, never PASS (A2-80)', async () => {
+    const { assistantInstalls } = await import('../../src/modules/assistants/schema');
+    const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
+    const assistantId = await plantAssistant(`egf-faildec-${assistantIds.length}`);
+    const hash = `egf-faildec-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const versionId = await plantVersion({ assistantId, version: 0, status: 'DRAFT', hash });
+    const datasetId = await plantDataset();
+    const runId = randomUUID();
+    await db.withBypass(async (tx) => {
+      await tx.insert(assistantInstalls).values({ organizationId: orgId, slug, templateVersion: '1.0.0', assistantId });
+      await tx.insert(evalRuns).values({
+        id: runId,
+        organizationId: orgId,
+        datasetId,
+        assistantVersionId: versionId,
+        state: 'running',
+        startedBy: actor,
+      });
+    });
+    const result = (await evals.completeRun({
+      orgId,
+      evalRunId: runId,
+      results: {
+        cases: [
+          {
+            case_id: 'c1',
+            attempt: 1,
+            passed: false,
+            score: 0,
+            failure_reason: 'missing expected text: london',
+            response_excerpt: 'The answer is paris.',
+          },
+        ],
+      },
+      actor,
+    })) as { decision: string; score: string };
+    // Pre-fix: no block reasons and no warnings → PASS beside score 0.0000.
+    expect(result.decision).toBe('FAIL');
+    expect(result.score).toBe('0.0000');
+  });
+
+  it('completeRun: BLOCK outranks FAIL when a critical failure and failing cases coincide', async () => {
+    const { assistantInstalls, assistantTemplates } = await import('../../src/modules/assistants/schema');
+    const { evalRuns } = await import('../../src/modules/knowledge/eval.schema');
+    const critSlug = `egf-crit-${randomUUID().slice(0, 8)}`;
+    await db.withBypass((tx) =>
+      tx.insert(assistantTemplates).values({
+        slug: critSlug,
+        version: '1.0.0',
+        status: 'stable',
+        family: 'test',
+        definition: {},
+        releasePolicy: { critical_failures: ['pii_leak'] },
+        hash: '0'.repeat(64),
+        minEngineSchema: 1,
+      }),
+    );
+    const assistantId = await plantAssistant(`egf-critdec-${assistantIds.length}`);
+    const hash = `egf-critdec-${randomUUID().slice(0, 8)}`.padEnd(64, '0');
+    const versionId = await plantVersion({ assistantId, version: 0, status: 'DRAFT', hash });
+    const datasetId = await plantDataset();
+    const runId = randomUUID();
+    await db.withBypass(async (tx) => {
+      await tx.insert(assistantInstalls).values({ organizationId: orgId, slug: critSlug, templateVersion: '1.0.0', assistantId });
+      await tx.insert(evalRuns).values({
+        id: runId,
+        organizationId: orgId,
+        datasetId,
+        assistantVersionId: versionId,
+        state: 'running',
+        startedBy: actor,
+      });
+    });
+    const result = (await evals.completeRun({
+      orgId,
+      evalRunId: runId,
+      results: {
+        cases: [{ case_id: 'c1', attempt: 1, passed: false, score: 0, failure_reason: 'missing expected text: london' }],
+        critical_failures: ['pii_leak'],
+      },
+      actor,
+    })) as { decision: string; provenance: { block_reasons?: string[] } };
+    expect(result.decision).toBe('BLOCK');
+    expect(result.provenance.block_reasons ?? []).toContain('critical failure: pii_leak');
+  });
+
   it('eval scoring: the typed JSONB read scores message content (no string-form misread)', async () => {
     const { conversations, messages } = await import('../../src/modules/conversations/schema');
     const { evalCases, evalDatasets } = await import('../../src/modules/knowledge/eval.schema');

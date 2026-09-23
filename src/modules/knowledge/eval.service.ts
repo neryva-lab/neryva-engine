@@ -900,7 +900,15 @@ export class EvalService {
           warnings.push(`threshold ${name} ${value} below bar ${bar}`);
         }
       }
-      const decision = blockReasons.length > 0 ? 'BLOCK' : warnings.length > 0 ? 'WARN' : 'PASS';
+      // A2-80: the verdict MUST reflect case outcomes — a run that failed
+      // cases is FAIL, never PASS. PASS means "shippable"; a green PASS on a
+      // 0.0000 run is the exact lie the console rendered (score 0.0000 +
+      // "Failing cases · 1" beside a PASS pill). Precedence is
+      // BLOCK > FAIL > WARN > PASS: safety-critical BLOCK outranks a quality
+      // FAIL; FAIL outranks an advisory WARN.
+      const failedCases = total - passed;
+      const decision =
+        blockReasons.length > 0 ? 'BLOCK' : failedCases > 0 ? 'FAIL' : warnings.length > 0 ? 'WARN' : 'PASS';
 
       // ── Provenance (TPL-7.4 — everything a replayer needs, no scalars alone) ──
       const provenance = await this.assembleProvenance(tx, input.orgId, {
@@ -952,6 +960,7 @@ export class EvalService {
           eval_run_id: input.evalRunId,
           decision,
           score: Number(score.toFixed(4)),
+          failed_cases: failedCases,
           ...(template ? { template_slug: template.slug, template_version: template.version } : {}),
           block_reasons: blockReasons,
           warnings,

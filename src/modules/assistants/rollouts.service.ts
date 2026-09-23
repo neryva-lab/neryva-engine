@@ -120,16 +120,18 @@ export class RolloutsService {
             version_id: v.version_id,
           });
         }
-        // Eval gate (TPL-8.3): a version whose latest completed evaluation
-        // decided BLOCK cannot be promoted to any pointer.
+        // Eval gate (TPL-8.3 + A2-80): a version whose latest completed
+        // evaluation decided BLOCK or FAIL cannot be promoted to any pointer.
+        // A FAIL means the version's own cases failed — promoting it would
+        // serve disproven content.
         const runs = await tx
           .select({ decision: evalRuns.decision })
           .from(evalRuns)
           .where(and(eq(evalRuns.organizationId, input.orgId), eq(evalRuns.assistantVersionId, v.version_id), eq(evalRuns.state, 'completed')))
           .orderBy(desc(evalRuns.finishedAt))
           .limit(1);
-        if (runs.length > 0 && runs[0].decision === 'BLOCK') {
-          throw ApiError.conflict(`version ${v.version_id} is BLOCKed by evaluation — resolve and re-evaluate before promoting`, {
+        if (runs.length > 0 && (runs[0].decision === 'BLOCK' || runs[0].decision === 'FAIL')) {
+          throw ApiError.conflict(`version ${v.version_id} decided ${runs[0].decision} in its latest evaluation — resolve and re-evaluate before promoting`, {
             version_id: v.version_id,
           });
         }

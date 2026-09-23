@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decideBlockedContent, decideRequiredChecks, throwGateRefusal } from '../../src/modules/assistants/release-gate';
+import { unknownPlatformModels } from '../../src/modules/assistants/model-catalog.service';
 
 /**
  * REL-3.3 unit lane — the pure publish-gate rules. The DB-backed wiring
@@ -63,5 +64,28 @@ describe('throwGateRefusal (publish-path error contract)', () => {
       message: 'needs PASS',
       details: { assistant_id: 'assistant-1', required_checks: ['smoke'], latest_decision: null },
     });
+  });
+});
+
+describe('unknownPlatformModels (A2-40 platform-existence rule)', () => {
+  const platform = new Set(['openai/gpt-4o-mini', 'openai/gpt-4o']);
+
+  it('passes refs that exist in the active platform catalog', () => {
+    expect(unknownPlatformModels(['openai/gpt-4o-mini'], platform)).toEqual([]);
+  });
+
+  it('names every provider/model ref missing from the platform catalog', () => {
+    expect(unknownPlatformModels(['openai/no-such-model-xyz', 'openai/gpt-4o-mini', 'acme/ghost-1'], platform)).toEqual([
+      'openai/no-such-model-xyz',
+      'acme/ghost-1',
+    ]);
+  });
+
+  it('leaves bare refs without a provider slash unjudged (legacy alias posture)', () => {
+    expect(unknownPlatformModels(['neryva-core-1'], platform)).toEqual([]);
+  });
+
+  it('returns empty for an empty allowed list', () => {
+    expect(unknownPlatformModels([], platform)).toEqual([]);
   });
 });

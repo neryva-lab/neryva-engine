@@ -39,6 +39,7 @@ import { toolCatalog } from './tool-catalog.schema';
 import { BUILT_IN_TOOLS } from './tool-catalog.service';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { normalizeResidency, modelServesResidency, Residency } from './residency';
+import { ModelCatalogService, unknownPlatformModels } from './model-catalog.service';
 
 /**
  * Assistants domain — Phase 3.1-3.3
@@ -67,6 +68,7 @@ export class AssistantsService {
     private readonly manifests: ManifestResolutionService,
     private readonly evals: EvalService,
     private readonly conversations: ConversationsService,
+    private readonly modelCatalog: ModelCatalogService,
   ) {}
 
   // ── Assistants (identity) ────────────────────────────────────────────────
@@ -1251,13 +1253,37 @@ export class AssistantsService {
   }
 
   /**
-   * Capability-registry check (ledger 3.3): when the org has a published
-   * `model_catalog` config, every `allowed_models` entry must reference an
-   * ENABLED `provider/model` pair from that catalog. No published catalog =
-   * catalog governance not opted into for this org — structural validation
-   * only. Invalid refs must be rejected BEFORE `PUBLISHED` (Phase 3 exit gate).
+   * Capability-registry check (ledger 3.3) — two layers:
+   *
+   * Layer 1 — PLATFORM existence (A2-40, NON-advisory): every `allowed_models`
+   * entry with a `provider/model` shape must reference an ACTIVE pair in the
+   * platform `model_catalog_entries` table — the same table the console's own
+   * readiness check reads via GET /console/org/:orgId/models. A model the
+   * platform has never heard of can never be served, so publishing it is
+   * always wrong. An empty platform catalog (unseeded rig) skips this layer —
+   * there is nothing to judge against — and bare refs without a provider
+   * slash predate the catalog and keep the old structural-only posture.
+   *
+   * Layer 2 — ORG governance (advisory): when the org has a published
+   * `model_catalog` config, every entry must also be ENABLED there. No
+   * published catalog = governance not opted into for this org — structural
+   * validation only. Invalid refs must be rejected BEFORE `PUBLISHED`
+   * (Phase 3 exit gate).
    */
   private async rejectUnknownModels(orgId: string, payload: AssistantPayload): Promise<void> {
+    // Fail CLOSED: if the platform catalog cannot be read, publish refuses
+    // rather than skipping existence validation (A2-40 is non-advisory).
+    const platformRefs = new Set(
+      (await this.modelCatalog.listEntries('active')).map((e) => `${e.provider}/${e.modelId}`),
+    );
+    if (platformRefs.size > 0) {
+      const bogus = unknownPlatformModels(payload.model_policy.allowed_models, platformRefs);
+      if (bogus.length > 0) {
+        throw ApiError.validation({
+          model_policy: `allowed_models not present in the platform model catalog: ${bogus.join(', ')} — choose a model from the model list`,
+        });
+      }
+    }
     const loadCatalog = async (): Promise<{
       models: Array<{ provider: string; model: string; enabled: boolean; regions?: string[] }>;
     } | null> => {

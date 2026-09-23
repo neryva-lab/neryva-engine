@@ -52,8 +52,18 @@ export function partitionModelGaps(
   return { notInPlatform, noKey, governanceOnly };
 }
 
-export interface ModelAvailabilityRow {
-  provider: string;
+/**
+ * A2-40 — pure publish-gate rule, exported for unit tests. Given the
+ * assistant's `allowed_models` refs and the active platform catalog (as
+ * `provider/model` strings), return the refs that name no model the platform
+ * has ever heard of. Bare refs without a provider slash predate the catalog
+ * and keep the old structural-only posture (not judged here).
+ */
+export function unknownPlatformModels(allowed: string[], platformRefs: Set<string>): string[] {
+  return allowed.filter((ref) => ref.includes('/') && !platformRefs.has(ref));
+}
+
+export interface ModelAvailabilityRow {  provider: string;
   model_id: string;
   display_name: string;
   context_window_tokens: number | null;

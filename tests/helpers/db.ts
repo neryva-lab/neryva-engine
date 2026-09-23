@@ -322,6 +322,10 @@ export async function withBypassRaw<T>(
  * - evals (dep 6): WIRED REAL since R-2 (draft evaluation) — evaluateVersion
  *   calls EvalService.startRun (db + outbox only; retrieval/ports untouched
  *   by that path, so retrieval stays undefined like templates above).
+ * - modelCatalog (dep 8): stubbed with an EMPTY active catalog — the A2-40
+ *   platform layer skips when the platform catalog is empty, so publish flows
+ *   behave exactly as before in this rig. Suites exercising the platform
+ *   refusal need the real service with seeded entries.
  */
 export function stubConfigPublish(): never {
   return { latest: async () => null } as never;
@@ -359,6 +363,7 @@ export async function buildAssistantsService(
     manifests,
     evals,
     undefined as never,
+    { listEntries: async () => [] } as never,
   );
 }
 

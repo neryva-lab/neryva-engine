@@ -105,6 +105,11 @@ export class ConversationsController {
     @Query('limit') limit?: string,
     @Query('include_superseded') includeSuperseded?: string,
   ) {
+    // A deleted conversation reads as gone (getConversation returns null for it).
+    const conversation = await this.conversations.getConversation(orgId, conversationId);
+    if (!conversation) {
+      throw ApiError.notFound('conversation');
+    }
     const page = await this.conversations.listMessages(orgId, conversationId, {
       afterSequence: after ? Number(after) : undefined,
       limit: limit ? Number(limit) : undefined,

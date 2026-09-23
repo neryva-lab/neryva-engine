@@ -1,4 +1,4 @@
-import { ArrayMaxSize, IsArray, IsNumber, IsObject, IsOptional, IsString, IsUUID, Length, MaxLength } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsNumber, IsObject, IsOptional, IsString, IsUUID, Length, MaxLength } from 'class-validator';
 
 export class CreateConversationDto {
   @IsString()
@@ -62,8 +62,13 @@ export class CancelRunDto {
 }
 
 export class UpdateConversationStatusDto {
-  @IsString()
-  status!: 'active' | 'archived';
+  /**
+   * User-facing lifecycle: 'deleted' is the soft-delete (the row is kept for
+   * audit/retention; lists hide it and direct reads 404). Hard purge stays
+   * with the retention-purge service.
+   */
+  @IsIn(['active', 'archived', 'deleted'])
+  status!: 'active' | 'archived' | 'deleted';
 
   @IsOptional()
   @IsNumber()

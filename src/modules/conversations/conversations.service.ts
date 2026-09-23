@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
 import { Observable } from 'rxjs';
@@ -171,7 +171,9 @@ export class ConversationsService {
     const rows = await this.db.withOrg(orgId, (tx) =>
       tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1),
     );
-    return rows[0] ?? null;
+    const row = rows[0] ?? null;
+    // Soft-delete: a deleted conversation reads as gone everywhere.
+    return row && row.status === 'deleted' ? null : row;
   }
 
   async listConversations(
@@ -180,7 +182,8 @@ export class ConversationsService {
   ): Promise<Conversation[]> {
     assertUuid(orgId, 'orgId');
     const limit = clampLimit(opts?.limit);
-    const conditions = [eq(conversations.organizationId, orgId)];
+    // Soft-deleted conversations never appear in lists (see setConversationStatus).
+    const conditions = [eq(conversations.organizationId, orgId), ne(conversations.status, 'deleted')];
     if (opts?.assistantId) {
       assertUuid(opts.assistantId, 'assistantId');
       conditions.push(eq(conversations.assistantId, opts.assistantId));
@@ -198,7 +201,7 @@ export class ConversationsService {
   async setConversationStatus(
     orgId: string,
     conversationId: string,
-    status: 'active' | 'archived',
+    status: 'active' | 'archived' | 'deleted',
     expectedVersion?: number,
   ): Promise<Conversation> {
     assertUuid(orgId, 'orgId');

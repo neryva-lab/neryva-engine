@@ -164,16 +164,16 @@ export class SocialLoginService {
     if (provider.key === 'microsoft') {
       return this.completeMicrosoft(provider, code, state);
     }
-    // Google
-    const tokenResponse = await this.tokenExchange(provider, code, state, 'https://oauth2.googleapis.com/token');
+    // Google (P1-10: endpoints overridable via env for test/enterprise IdPs)
+    const tokenResponse = await this.tokenExchange(provider, code, state, provider.tokenUrl);
     const idToken = tokenResponse.id_token as string | undefined;
     if (!idToken) {
       throw new Error('IdP did not return an id_token');
     }
     const claims = await verifyIdToken(idToken, {
-      issuer: 'https://accounts.google.com',
+      issuer: provider.issuer,
       audience: provider.clientId,
-      jwksUrl: 'https://www.googleapis.com/oauth2/v3/certs',
+      jwksUrl: provider.jwksUrl,
       nonce: state.nonce,
     });
     return {
@@ -298,7 +298,7 @@ export class SocialLoginService {
       code,
       redirect_uri: callbackUrlFor('github'),
     });
-    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+    const tokenResponse = await fetch(provider.tokenUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body,

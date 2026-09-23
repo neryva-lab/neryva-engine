@@ -294,6 +294,12 @@ const envSchema = z.object({
   //   {ENGINE_BASE_URL}/login/social/callback/{provider}
   IDENTITY_SOCIAL_GOOGLE_CLIENT_ID: z.string().optional().default(''),
   IDENTITY_SOCIAL_GOOGLE_CLIENT_SECRET: z.string().optional().default(''),
+  // P1-10: federation endpoint overrides (test/staging/enterprise IdPs).
+  // Unset (or empty) ⇒ the Google production endpoints below. http(s) only.
+  IDENTITY_SOCIAL_GOOGLE_AUTHORIZE_URL: optionalUrl(),
+  IDENTITY_SOCIAL_GOOGLE_TOKEN_URL: optionalUrl(),
+  IDENTITY_SOCIAL_GOOGLE_JWKS_URL: optionalUrl(),
+  IDENTITY_SOCIAL_GOOGLE_ISSUER: z.string().optional().default(''),
   IDENTITY_SOCIAL_GITHUB_CLIENT_ID: z.string().optional().default(''),
   IDENTITY_SOCIAL_GITHUB_CLIENT_SECRET: z.string().optional().default(''),
   IDENTITY_SOCIAL_APPLE_CLIENT_ID: z.string().optional().default(''),

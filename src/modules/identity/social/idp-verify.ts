@@ -14,11 +14,27 @@ import { env } from '../../../common/config/env';
 const ALLOWED_ALGS = new Set(['RS256', 'ES256']);
 const JWKS_TTL_MS = 60 * 60 * 1000;
 const REFETCH_COOLDOWN_MS = 30_000;
+/**
+ * Unknown-kid refetch bounds. An unknown kid on a fresh cache means the IdP
+ * has likely rotated its signing keys, so we refetch once and retry — but a
+ * flood of unknown kids must not turn into a JWKS-fetch loop against the
+ * IdP: each unknown kid triggers at most one refetch per
+ * UNKNOWN_KID_REFETCH_COOLDOWN_MS (negative cache), and unknown-kid
+ * refetches for one IdP are floored at UNKNOWN_KID_GLOBAL_FLOOR_MS apart
+ * (bounds floods of distinct kids).
+ */
+const UNKNOWN_KID_REFETCH_COOLDOWN_MS = 60_000;
+const UNKNOWN_KID_GLOBAL_FLOOR_MS = 10_000;
+const UNKNOWN_KID_NEGATIVE_CACHE_MAX = 256;
 
 interface CachedKeys {
   keys: Map<string, KeyObject>;
   fetchedAt: number;
   lastErrorAt: number;
+  /** kid -> timestamp of the last on-demand refetch that kid triggered. */
+  unknownKidRefetchAt: Map<string, number>;
+  /** Timestamp of the last unknown-kid-triggered refetch for this IdP. */
+  lastUnknownKidRefetchAt: number;
 }
 
 const jwksCache = new Map<string, CachedKeys>();
@@ -114,6 +130,27 @@ async function resolveKey(jwksUrl: string, alg: string, kid: string | undefined)
   const fresh = cached && now - cached.fetchedAt < JWKS_TTL_MS;
   if (!fresh && (!cached || now - cached.lastErrorAt > REFETCH_COOLDOWN_MS)) {
     await fetchJwks(jwksUrl);
+  } else if (kid && cached && fresh) {
+    // Unknown kid on a FRESH cache: the IdP has likely rotated its signing
+    // keys since the last fetch (the documented "refetched on unknown kid"
+    // behavior). Refetch once and retry the lookup exactly once before
+    // failing closed; the per-kid negative cache and the global per-IdP
+    // floor bound the refetch rate.
+    const perKid = cached.unknownKidRefetchAt.get(kid) ?? 0;
+    if (
+      now - perKid > UNKNOWN_KID_REFETCH_COOLDOWN_MS &&
+      now - cached.lastUnknownKidRefetchAt > UNKNOWN_KID_GLOBAL_FLOOR_MS
+    ) {
+      cached.unknownKidRefetchAt.set(kid, now);
+      cached.lastUnknownKidRefetchAt = now;
+      pruneUnknownKidRefetchAt(cached.unknownKidRefetchAt, now);
+      try {
+        await fetchJwks(jwksUrl);
+      } catch {
+        // Fall through to the fail-closed error below — the audit row stays
+        // "no matching IdP key for kid=…" either way.
+      }
+    }
   }
   const keys = jwksCache.get(jwksUrl)?.keys;
   if (kid && keys?.has(kid)) {
@@ -128,7 +165,29 @@ async function resolveKey(jwksUrl: string, alg: string, kid: string | undefined)
   throw new Error(`no matching IdP key for kid=${kid ?? '<none>'}`);
 }
 
+/** Keep the unknown-kid negative cache bounded. */
+function pruneUnknownKidRefetchAt(m: Map<string, number>, now: number): void {
+  if (m.size <= UNKNOWN_KID_NEGATIVE_CACHE_MAX) {
+    return;
+  }
+  for (const [k, ts] of m) {
+    if (now - ts > UNKNOWN_KID_REFETCH_COOLDOWN_MS) {
+      m.delete(k);
+    }
+    if (m.size <= UNKNOWN_KID_NEGATIVE_CACHE_MAX / 2) {
+      break;
+    }
+  }
+}
+
 async function fetchJwks(jwksUrl: string): Promise<void> {
+  const previous = jwksCache.get(jwksUrl);
+  // The unknown-kid negative cache belongs to the IdP, not to one fetch —
+  // carry it across refetches so rotation-time bounds survive rotation.
+  const carried = {
+    unknownKidRefetchAt: previous?.unknownKidRefetchAt ?? new Map<string, number>(),
+    lastUnknownKidRefetchAt: previous?.lastUnknownKidRefetchAt ?? 0,
+  };
   try {
     const response = await fetch(jwksUrl, { signal: AbortSignal.timeout(5000), headers: { accept: 'application/json' } });
     if (!response.ok) {
@@ -149,11 +208,15 @@ async function fetchJwks(jwksUrl: string): Promise<void> {
     if (keys.size === 0) {
       throw new Error('jwks endpoint returned no usable keys');
     }
-    jwksCache.set(jwksUrl, { keys, fetchedAt: Date.now(), lastErrorAt: 0 });
+    jwksCache.set(jwksUrl, { keys, fetchedAt: Date.now(), lastErrorAt: 0, ...carried });
   } catch (err) {
     logger.warn(`jwks fetch failed for ${jwksUrl}: ${(err as Error).message}`);
-    const previous = jwksCache.get(jwksUrl);
-    jwksCache.set(jwksUrl, { keys: previous?.keys ?? new Map(), fetchedAt: previous?.fetchedAt ?? 0, lastErrorAt: Date.now() });
+    jwksCache.set(jwksUrl, {
+      keys: previous?.keys ?? new Map(),
+      fetchedAt: previous?.fetchedAt ?? 0,
+      lastErrorAt: Date.now(),
+      ...carried,
+    });
     throw err;
   }
 }

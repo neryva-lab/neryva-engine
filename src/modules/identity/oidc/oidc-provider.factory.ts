@@ -144,17 +144,34 @@ export class OidcProviderFactory {
         short: { signed: true, httpOnly: true, sameSite: 'lax', secure: env.NODE_ENV === 'production' },
       },
 
-      // First-party OP: browsers always call same-origin (dev the website
-      // via the Vite proxy, prod the public origin via the edge), so the
-      // only Origin ever legitimate here is the issuer's own — which by
-      // invariant IS the browser-facing origin. The stock default denies
-      // every Origin-bearing request, which breaks ALL browser token calls
-      // (fetch always sends Origin on POSTs; curl sends none, which is why
-      // server-side QA never caught it). Origin-less callers (curl,
-      // service clients) skip this check inside the provider.
-      clientBasedCORS: (_ctx: unknown, origin: string): boolean => {
+      // First-party OP: the browser calls the token endpoint from the
+      // console's origin, which is NOT necessarily the issuer's own origin —
+      // in dev the website is the Vite server on :3000 proxying /engine to the
+      // OP on :3001, and in split-domain prod the console and the OP have
+      // different hosts. The stock oidc-provider default denies every
+      // Origin-bearing request, which breaks ALL browser token calls (fetch
+      // always sends Origin on POSTs; curl sends none, which is why
+      // server-side QA never caught it). Origin-less callers (curl, service
+      // clients) skip this check inside the provider.
+      //
+      // Allowed origins: the issuer's own (same-origin deployments) plus the
+      // origins of the calling client's registered redirect URIs — a redirect
+      // URI is already a trust anchor for that client (the OP delivers
+      // authorization codes there), so this is the stock semantic, not a
+      // loosening.
+      clientBasedCORS: (_ctx: unknown, origin: string, client?: { redirectUris?: string[] }): boolean => {
         try {
-          return origin === new URL(env.IDENTITY_ISSUER).origin;
+          if (origin === new URL(env.IDENTITY_ISSUER).origin) {
+            return true;
+          }
+          const uris = client?.redirectUris ?? [];
+          return uris.some((uri: string) => {
+            try {
+              return new URL(uri).origin === origin;
+            } catch {
+              return false;
+            }
+          });
         } catch {
           return false;
         }

@@ -1,9 +1,11 @@
 import { and, eq } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
+import { Injectable, HttpStatus } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
-import { ApiError } from '../../common/http/api-error';
+import { ApiError, ERROR_CODES } from '../../common/http/api-error';
+import { ManifestRegistryService } from '../console/manifest-registry.service';
 import { env } from '../../common/config/env';
 import { EntitlementState } from '../../common/auth/ports';
 import { productEntitlements } from './schema';
@@ -74,6 +76,7 @@ export class EntitlementsService {
     private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly events: EventBus,
+    private readonly moduleRef: ModuleRef,
   ) {}
 
   async getState(orgId: string, product: string): Promise<EntitlementState> {
@@ -105,6 +108,26 @@ export class EntitlementsService {
    * silent extension; extending trials is a billing-side act.
    */
   async startTrial(input: { orgId: string; product: string; days?: number; actorId: string }): Promise<EntitlementView> {
+    // Trial-stage gate (P1-11, defense in depth for D1-04): the console no
+    // longer offers trial CTAs for pre-GA products, but a direct API call
+    // must not mint trial rows for them either. Mirrors resolveCta's
+    // coming_soon rule (manifest.schema.ts): registered/building/shadow are
+    // pre-GA. The registry is resolved lazily via ModuleRef (strict: false)
+    // because the organizations/console module pair is already circular —
+    // a static import of ConsoleModule breaks engine boot (P1-11). Unknown
+    // product keys keep legacy behavior: the manifests are the console's
+    // product source of truth, not the entitlement ledger's.
+    const stage = this.moduleRef
+      .get(ManifestRegistryService, { strict: false })
+      .get(input.product)?.stage;
+    if (stage === 'registered' || stage === 'building' || stage === 'shadow' || stage === 'deprecated') {
+      throw new ApiError(
+        HttpStatus.PRECONDITION_FAILED,
+        ERROR_CODES.PRECONDITION_FAILED,
+        `product "${input.product}" is not generally available (stage: ${stage}) — trials cannot start for pre-GA products`,
+        { product: input.product, stage },
+      );
+    }
     const current = await this.getState(input.orgId, input.product);
     if (current !== 'none') {
       throw ApiError.conflict(`product "${input.product}" already has an entitlement (state: ${current}) — trials start once`);

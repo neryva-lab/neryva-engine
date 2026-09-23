@@ -6,7 +6,7 @@ import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents, SessionRevokedEvent, TokenRefreshReuseEvent } from '../../../common/events/event-bus';
 import { tokenRefreshReuseTotal } from '../../../common/observability/metrics';
 import { envelopeDecrypt } from '../../../common/infra/crypto/envelope';
-import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPayloads } from '../schema';
+import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPayloads, accounts } from '../schema';
 
 /**
  * oidc-provider persistence adapter. Model dispatch:
@@ -124,6 +124,15 @@ export class OidcDrizzleAdapter {
             const base: Payload = { grantId: row.grantId ?? undefined, ...(full[0]?.payload as Payload | undefined) };
             if (row.consumedAt) {
               base.consumed = true;
+            }
+            // Account-level kill-switch (logout / revoke-all): a refresh
+            // token minted before the account's sessionsRevokedAt is dead,
+            // even though the OP row itself looks usable. Without this,
+            // logout's revoke-all leaves refresh tokens minting access
+            // tokens until their own expiry.
+            const tokenAccountId = typeof base.accountId === 'string' ? base.accountId : undefined;
+            if (tokenAccountId && !(await self.isTokenNewerThanRevocation(tokenAccountId, row.createdAt))) {
+              return undefined;
             }
             return base;
           }
@@ -263,6 +272,25 @@ export class OidcDrizzleAdapter {
   }
 
   // ── Refresh rotation + the reuse tripwire ────────────────────────────────
+
+  /**
+   * True when the token was minted after the account's latest
+   * sessions-revoked-at (logout / revoke-all kill-switch). Tokens minted
+   * before the kill-switch are dead — mirrors isSessionActive's rule for
+   * access tokens, applied here to the OP's refresh_token grant path.
+   */
+  private async isTokenNewerThanRevocation(accountId: string, tokenCreatedAt: string): Promise<boolean> {
+    const rows = await this.db.root
+      .select({ sessionsRevokedAt: accounts.sessionsRevokedAt })
+      .from(accounts)
+      .where(eq(accounts.id, accountId))
+      .limit(1);
+    const revokedAt = rows[0]?.sessionsRevokedAt;
+    if (!revokedAt) {
+      return true;
+    }
+    return Date.parse(tokenCreatedAt) > Date.parse(revokedAt);
+  }
 
   private async upsertRefreshToken(id: string, payload: Payload, expiresAt: string): Promise<void> {
     const familyId = extractFamilyId(payload);

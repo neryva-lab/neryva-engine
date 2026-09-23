@@ -1842,10 +1842,11 @@ export class ConversationsService {
       const rows = stateFilter
         ? await base.where(eq(approvals.state, state)).orderBy(desc(approvals.createdAt)).limit(200)
         : await base.orderBy(desc(approvals.createdAt)).limit(200);
-      const now = new Date().toISOString();
+      const nowMs = Date.now();
       return rows.map((r) => ({
         ...r,
-        expired: r.state === 'PENDING' && r.expiresAt !== null && r.expiresAt < now,
+        expired:
+          r.state === 'PENDING' && r.expiresAt !== null && new Date(r.expiresAt).getTime() < nowMs,
       }));
     });
   }

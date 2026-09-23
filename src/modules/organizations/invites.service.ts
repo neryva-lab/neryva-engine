@@ -293,11 +293,17 @@ export class InvitesService {
     });
 
     // Single-use guard: the claim only lands on a still-unclaimed row.
-    const claimed = await this.db.root
-      .update(orgInvites)
-      .set({ acceptedAt: new Date().toISOString() })
-      .where(and(eq(orgInvites.id, invite.id), isNull(orgInvites.acceptedAt), isNull(orgInvites.revokedAt)))
-      .returning({ id: orgInvites.id });
+    // Org-scoped via withOrg (NOT this.db.root): org_invites has RLS FORCED,
+    // so an unscoped UPDATE matches 0 rows and redeem would 409 even though
+    // the membership already landed. The caller is a member of invite.orgId
+    // by this point, so the tenant context admits the row.
+    const claimed = await this.db.withOrg(invite.orgId, (tx) =>
+      tx
+        .update(orgInvites)
+        .set({ acceptedAt: new Date().toISOString() })
+        .where(and(eq(orgInvites.id, invite.id), isNull(orgInvites.acceptedAt), isNull(orgInvites.revokedAt)))
+        .returning({ id: orgInvites.id }),
+    );
     if (claimed.length !== 1) {
       throw ApiError.conflict('Invitation is no longer usable');
     }

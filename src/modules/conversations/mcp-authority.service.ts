@@ -1139,6 +1139,16 @@ export class McpAuthorityService {
         });
       }
 
+      // Wave 4 GAP 1: a still-PENDING approval whose expires_at has passed
+      // must fail closed — it can no longer be decided. The sweep worker
+      // will terminalize it; the decision API refuses loudly here.
+      if (approval.expiresAt && new Date(approval.expiresAt) <= new Date()) {
+        throw ApiError.conflict('approval expired', {
+          approval_id: approval.id,
+          expires_at: approval.expiresAt,
+        });
+      }
+
       const foundRun = await tx
         .select()
         .from(runs)
@@ -1342,6 +1352,195 @@ export class McpAuthorityService {
       replay: outcome.replay,
     };
   }
+
+  /**
+   * sweepExpiredApprovals — Wave 4 workstream 3 (GAP 1).
+   *
+   * Approvals have a 15-minute expiry but nothing transitioned stale PENDING
+   * approvals to EXPIRED — they sat PENDING forever, the run stayed parked,
+   * and the quota hold was stranded. This sweep fails closed:
+   *
+   * - Claims overdue PENDING approvals (expires_at <= now) with
+   *   FOR UPDATE SKIP LOCKED (safe under concurrent sweep replicas).
+   * - Each claimed approval → EXPIRED (audited).
+   * - The run → CANCELED with terminal_reason = 'approval_expired' (only if
+   *   still non-terminal; already-terminal runs are left alone).
+   * - Durable RESERVED quota for the run → RELEASED; Redis advisory hold
+   *   released after commit.
+   * - One transactional `run.canceled` outbox event per terminalized run.
+   * - Sibling PENDING approvals on a terminalized run also expire.
+   *
+   * Idempotent: re-running on an already-swept org is a no-op (claims only
+   * fire on still-PENDING rows).
+   */
+  async sweepExpiredApprovals(input: {
+    orgId: string;
+    batchSize?: number;
+  }): Promise<{
+    sweptApprovals: Array<{ approvalId: string; runId: string; runTerminalized: boolean }>;
+    canceledRuns: Array<{ runId: string }>;
+  }> {
+    const batchSize = Math.min(1000, Math.max(1, input.batchSize ?? 200));
+    const sweptApprovals: Array<{ approvalId: string; runId: string; runTerminalized: boolean }> = [];
+    const canceledRuns: Array<{ runId: string }> = [];
+    const canceledRunIds = new Set<string>();
+
+    // Claim overdue PENDING approvals. FOR UPDATE SKIP LOCKED makes
+    // concurrent sweep replicas safe — a row claimed by one is skipped by
+    // the other.
+    const claimed = await this.db.withBypass((tx) =>
+      tx.execute(sql`
+        select id, run_id
+        from approvals
+        where organization_id = ${input.orgId}::uuid
+          and state = 'PENDING'
+          and expires_at <= now()
+        order by expires_at asc
+        limit ${batchSize}
+        for update skip locked
+      `),
+    );
+
+    for (const row of claimed.rows as Array<{ id: string; run_id: string }>) {
+      const approvalId = row.id;
+      const runId = row.run_id;
+      const decisionId = `sweep-${approvalId.slice(0, 8)}`;
+
+      await this.db.withBypass(async (tx) => {
+        // Re-check still-PENDING inside the TX (a decision may have landed
+        // between claim and here).
+        const stillPending = await tx.execute(sql`
+          select id from approvals
+          where id = ${approvalId}::uuid and state = 'PENDING'
+          for update
+        `);
+        if (stillPending.rows.length === 0) return;
+
+        // Approval → EXPIRED.
+        await tx.execute(sql`
+          update approvals
+          set state = 'EXPIRED',
+              decided_at = now(),
+              decision_actor_id = 'system:approval-expiry-sweep'
+          where id = ${approvalId}::uuid
+        `);
+        await this.auditSafe({
+          action: 'approval.expired',
+          resourceType: 'approval',
+          resourceId: approvalId,
+          tenantId: input.orgId,
+          details: {
+            run_id: runId,
+            decision_id: decisionId,
+            reason: 'approval past expires_at with no decision',
+            actor: 'system:approval-expiry-sweep',
+          },
+        });
+        let runTerminalized = false;
+        sweptApprovals.push({ approvalId, runId, runTerminalized });
+
+        // Run → CANCELED only if still non-terminal. Already-terminal runs
+        // (completed/failed/canceled by another path) are left alone, but
+        // their sibling PENDING approvals still expire below.
+        const runRows = (await tx.execute(sql`
+          select id, state from runs where id = ${runId}::uuid for update
+        `)).rows as Array<{ id: string; state: string }>;
+        const run = runRows[0];
+        const terminalStates = ['COMPLETED', 'FAILED', 'CANCELED'];
+        if (run && !terminalStates.includes(run.state)) {
+          await tx.execute(sql`
+            update runs
+            set state = 'CANCELED',
+                terminal_reason = 'approval_expired',
+                finished_at = now()
+            where id = ${runId}::uuid
+          `);
+          // Durable quota: RESERVED → RELEASED.
+          await tx.execute(sql`
+            update quota_reservations
+            set state = 'RELEASED'
+            where run_id = ${runId}::uuid and state = 'RESERVED'
+          `);
+          // Transactional outbox event (invariant 7).
+          // partitionKey: the run's conversation (matches run.failed above).
+          const runRow = runRows[0] as unknown as { conversationId?: string };
+          await recordOutboxEvent(tx, {
+            aggregateType: 'run',
+            aggregateId: runId,
+            organizationId: input.orgId,
+            eventType: 'run.canceled',
+            partitionKey: runRow.conversationId ?? runId,
+            payload: {
+              run_id: runId,
+              reason: 'approval_expired',
+              approval_id: approvalId,
+            },
+          });
+          await this.auditSafe({
+            action: 'run.canceled',
+            resourceType: 'run',
+            resourceId: runId,
+            tenantId: input.orgId,
+            details: {
+              approval_id: approvalId,
+              reason: 'approval expired with no decision',
+              actor: 'system:approval-expiry-sweep',
+            },
+          });
+          runTerminalized = true;
+          // Update the already-pushed entry.
+          sweptApprovals[sweptApprovals.length - 1].runTerminalized = true;
+          if (!canceledRunIds.has(runId)) {
+            canceledRunIds.add(runId);
+            canceledRuns.push({ runId });
+          }
+        }
+
+        // Sibling PENDING approvals on this run also expire (they can never
+        // be decided once the run is terminal).
+        const siblings = (await tx.execute(sql`
+          select id from approvals
+          where run_id = ${runId}::uuid
+            and state = 'PENDING'
+            and id != ${approvalId}::uuid
+          for update
+        `)).rows as Array<{ id: string }>;
+        for (const sib of siblings) {
+          await tx.execute(sql`
+            update approvals
+            set state = 'EXPIRED',
+                decided_at = now(),
+                decision_actor_id = 'system:approval-expiry-sweep'
+            where id = ${sib.id}::uuid
+          `);
+          await this.auditSafe({
+            action: 'approval.expired',
+            resourceType: 'approval',
+            resourceId: sib.id,
+            tenantId: input.orgId,
+            details: {
+              run_id: runId,
+              decision_id: `sweep-${sib.id.slice(0, 8)}`,
+              reason: 'sibling approval on terminalized run',
+              actor: 'system:approval-expiry-sweep',
+            },
+          });
+          sweptApprovals.push({ approvalId: sib.id, runId, runTerminalized });
+        }
+      });
+
+      // Redis advisory hold release after commit (best-effort; the durable
+      // reservation is already RELEASED above).
+      try {
+        await this.releaseRunQuotaHold(input.orgId);
+      } catch {
+        // Best-effort: the durable state is already settled.
+      }
+    }
+
+    return { sweptApprovals, canceledRuns };
+  }
+
 
   // ── Memory proposals (5.9) — proposals are NOT truth ────────────────────
 

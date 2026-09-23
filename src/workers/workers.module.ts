@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { OutboxDispatcherWorker } from './outbox-dispatcher.worker';
+import { ApprovalExpirySweepWorker } from './approval-expiry-sweep.worker';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
 import { TemplateProvisioningConsumer } from './template-provisioning.consumer';
 import { RunCancelConsumer } from './run-cancel.consumer';
@@ -8,6 +9,7 @@ import { MemoryProposerConsumer } from './memory-proposer.consumer';
 import { LlmJudgeConsumer } from './llm-judge.consumer';
 import { AnalyticsRollupConsumer } from './analytics-rollup.consumer';
 import { ModuleFlags } from '../common/config/feature-flags';
+import { env } from '../common/config/env';
 import { ChannelsModule } from '../modules/channels/channels.module';
 import { BillingModule } from '../modules/billing/billing.module';
 import { WebhooksModule } from '../modules/webhooks/webhooks.module';
@@ -71,6 +73,12 @@ import { AssistantsModule } from '../modules/assistants/assistants.module';
     ...(ModuleFlags.knowledge ? [EvalScoringConsumer] : []),
     // Human-loop notifications (REL-5.2): approval/escalation fan-out.
     ...(ModuleFlags.notifications ? [HumanLoopNotifyConsumer] : []),
+    // Approval-expiry sweep (Wave 4 GAP 1): only when conversations are on and
+    // both the outbox dispatcher and the sweep itself are enabled. The sweep
+    // writes run.canceled outbox events that only the dispatcher delivers.
+    ...(ModuleFlags.conversations && env.WORKERS__OUTBOX_ENABLED && env.WORKERS__APPROVAL_EXPIRY_ENABLED
+      ? [ApprovalExpirySweepWorker]
+      : []),
     OutboxDispatcherWorker,
     AcceptedRunSweepWorker,
     // Run watchdog resolves conversations (accept/retry bookkeeping).

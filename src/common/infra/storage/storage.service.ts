@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { env } from '../../config/env';
+import { ApiError } from '../../http/api-error';
 
 /**
  * S3-compatible object storage with presigned uploads/downloads (ADR-008):
@@ -27,11 +28,13 @@ export class StorageService {
     return Boolean(env.S3_BUCKET && env.S3_REGION && env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY);
   }
 
-  /** Assert configured — controllers translate this into a clean 503. */
+  /** Assert configured — throws typed 503 (service_unavailable) naming the backend. */
   requireAvailable(): void {
     if (!this.available) {
       StorageService.logger.error('object storage requested but S3_* env is not configured');
-      throw new Error('object storage is not configured (S3_BUCKET/S3_REGION/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY)');
+      // A2-22: a typed 503, not a generic Error (which surfaced as a 500
+      // "Internal error" with no actionable message).
+      throw ApiError.unavailable('object storage');
     }
   }
 

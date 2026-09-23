@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
@@ -32,6 +32,7 @@ import {
   unresolvedPinSlugs,
 } from './manifest-resolution.service';
 import { ConversationsService } from '../conversations/conversations.service';
+import { runs } from '../conversations/schema';
 import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
 import { documents } from '../knowledge/schema';
 import { EvalService } from '../knowledge/eval.service';
@@ -50,7 +51,9 @@ import { ModelCatalogService, unknownPlatformModels } from './model-catalog.serv
  * lock (same pattern as `src/modules/config-publish/config-publish.service.ts:92`).
  *
  * In-flight runs remain pinned to the `assistant_version_id` they were
- * created with — tested in Phase 4.4. This service does not know runs.
+ * created with — tested in Phase 4.4. discardDraft owns the draft-pinned
+ * test runs (deleted in the same transaction; see A2-21), but nothing else
+ * in this service mutates runs.
  */
 @Injectable()
 export class AssistantsService {
@@ -500,9 +503,23 @@ export class AssistantsService {
 
   /**
    * Abandon a DRAFT (audited). Published history is untouched — only the
-   * unshipped draft row is removed. Drafts carry no durable references
-   * (snapshots/manifests exist for published versions only), so removal is
-   * a single-row delete.
+   * unshipped draft row is removed.
+   *
+   * The builder's Try console pins test runs (`runs.assistant_version_id`)
+   * to the draft, and that FK has no ON DELETE CASCADE — so discarding a
+   * tried draft deletes its test runs first, in the same transaction. The
+   * migration-declared cascades then clean run_events / approvals /
+   * tool_effects / checkpoints / memory_proposals / run_manifests /
+   * run_judgments (escalations SET NULL). Test runs are run_kind='test':
+   * never billable and excluded from usage-ledger entries by design
+   * (REL-2.2/REL-2.4), and usage_ledger_entries.run_id carries no FK to
+   * runs at all — the append-only ledger is untouched and never rewritten.
+   *
+   * Two durable references refuse the discard instead of being deleted:
+   * eval_runs (release provenance — deleting it would erase the evidence
+   * the publish gate relied on) and any non-test run pinned to the draft
+   * (production history must never vanish silently). Both refuse with a
+   * typed 409 naming the blocking row.
    */
   async discardDraft(input: {
     orgId: string;
@@ -523,9 +540,48 @@ export class AssistantsService {
         { status: current.status },
       );
     }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.delete(assistantVersions).where(eq(assistantVersions.id, input.versionId)),
-    );
+    await this.db.withOrg(input.orgId, async (tx) => {
+      const evalProbe = await tx
+        .select({ id: evalRuns.id })
+        .from(evalRuns)
+        .where(
+          and(
+            eq(evalRuns.organizationId, input.orgId),
+            eq(evalRuns.assistantVersionId, input.versionId),
+          ),
+        )
+        .limit(1);
+      if (evalProbe.length > 0) {
+        throw ApiError.conflict(
+          'draft cannot be discarded: it has evaluation runs (durable release provenance)',
+          { assistant_version_id: input.versionId, eval_run_id: evalProbe[0].id },
+        );
+      }
+      const nonTestProbe = await tx
+        .select({ id: runs.id })
+        .from(runs)
+        .where(
+          and(
+            eq(runs.organizationId, input.orgId),
+            eq(runs.assistantVersionId, input.versionId),
+            ne(runs.runKind, 'test'),
+          ),
+        )
+        .limit(1);
+      if (nonTestProbe.length > 0) {
+        throw ApiError.conflict('draft cannot be discarded: non-test runs are pinned to this version', {
+          assistant_version_id: input.versionId,
+          run_id: nonTestProbe[0].id,
+        });
+      }
+      // A2-21: the builder's Try console leaves test runs pinned to the
+      // draft; delete them here (same TX) instead of letting the FK explode
+      // into a 500.
+      await tx
+        .delete(runs)
+        .where(and(eq(runs.organizationId, input.orgId), eq(runs.assistantVersionId, input.versionId)));
+      await tx.delete(assistantVersions).where(eq(assistantVersions.id, input.versionId));
+    });
     await this.audit.add({
       action: 'assistant.version_draft_discarded',
       resourceType: 'assistant_version',

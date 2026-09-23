@@ -300,7 +300,10 @@ export class LoginInteractionController {
       login: { accountId, remember: true },
       consent: { grantId },
     });
-    reply.redirect(interaction.returnTo ?? '/', 302);
+    // The provider already ended the raw response with the resume redirect
+    // above — sending anything else here writes to an ended stream and
+    // intermittently 500s with FST_ERR_REP_ALREADY_SENT (P1-05). The
+    // interaction's own returnTo is the only redirect the client needs.
   }
 
   private page(title: string, message: string, uid: string, email = '', mode: 'email' | 'code' | 'mfa' = 'email', firstFactor: 'password' | 'email_code' = 'password'): string {

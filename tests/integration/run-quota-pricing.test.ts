@@ -15,10 +15,11 @@ import { TEST_DATABASE_URL } from '../helpers/db';
  *  2. A successful run commits the durable reservation and writes a
  *     usage-ledger entry priced from the model-cost catalog (per-model
  *     micros); an unpriced model lands a cost-NULL entry (never invented).
- *  3. cancelRun and the budget-watchdog FAILED path release the durable
+ *  3. cancelRun, the budget-watchdog FAILED path, the workflow-driven
+ *     authority.failRun path, and approval-denial all release the durable
  *     reservation AND the Redis hold — the proof query shows zero
- *     RESERVED rows for terminal runs (cancelRun previously leaked them
- *     until the 15-minute TTL).
+ *     RESERVED rows for terminal runs (failRun and decideApproval/DENIED
+ *     previously leaked the Redis hold; proved by wave-4 failure injection).
  *  4. Two concurrent runs racing the last quota unit admit exactly one
  *     winner (the Redis Lua check-and-increment is atomic).
  *  5. A durable-wall refusal AFTER the Redis hold was taken drops the hold
@@ -37,9 +38,12 @@ if (existsSync('.env')) process.loadEnvFile('.env');
 process.env.NODE_ENV = 'test';
 
 async function pgReachable(): Promise<boolean> {
-  if (!TEST_DATABASE_URL) return false;
+  // Read at call time: the module-load const can be stale under vitest's
+  // module runner (dual evaluation), which silently gates the whole suite.
+  const url = process.env.TEST_DATABASE_URL ?? TEST_DATABASE_URL;
+  if (!url) return false;
   const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 1, connectionTimeoutMillis: 2000 });
+  const pool = new Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 2000 });
   try {
     await pool.query('select 1');
     return true;
@@ -74,6 +78,7 @@ describeIfDb('wave2.3 run quota + pricing (requires DATABASE_URL + redis)', () =
   let redis: import('../../src/common/infra/redis.service').RedisService;
   let assistants: import('../../src/modules/assistants/assistants.service').AssistantsService;
   let conversations: import('../../src/modules/conversations/conversations.service').ConversationsService;
+  let authority: import('../../src/modules/conversations/mcp-authority.service').McpAuthorityService;
   let modelCost: import('../../src/modules/assistants/model-cost.service').ModelCostService;
   const orgIds: string[] = [];
   const actor = 'w2q-test';
@@ -143,6 +148,29 @@ describeIfDb('wave2.3 run quota + pricing (requires DATABASE_URL + redis)', () =
     modelCost = new ModelCostService(db, audit);
     assistants = await buildAssistantsService(db);
     conversations = await buildConversationsService(db);
+
+    // McpAuthorityService — the execution plane's terminal authority
+    // (failRun, decideApproval). Wire the real quota graph; retrieval and
+    // object storage are stubbed because neither terminal path touches them.
+    const { RetentionPurgeService } = await import(
+      '../../src/modules/lifecycle/retention-purge.service'
+    );
+    const { EscalationsService } = await import(
+      '../../src/modules/conversations/escalations.service'
+    );
+    const { EntitlementsService } = await import(
+      '../../src/modules/organizations/entitlements.service'
+    );
+    const { EventBus } = await import('../../src/common/events/event-bus');
+    const { QuotaService } = await import('../../src/modules/billing/quota.service');
+    const { McpAuthorityService } = await import(
+      '../../src/modules/conversations/mcp-authority.service'
+    );
+    const purge = new RetentionPurgeService(db, {} as never, audit);
+    const escalations = new EscalationsService(db, audit);
+    const entitlements = new EntitlementsService(db, audit, new EventBus());
+    const quota = new QuotaService(redis, db, entitlements);
+    authority = new McpAuthorityService(db, audit, {} as never, purge, {} as never, escalations, quota);
 
     // Seed the catalog fixture via the documented staff path (upsertPoint =
     // POST internal/staff/model-cost). Deliberately round numbers — a math
@@ -374,6 +402,103 @@ describeIfDb('wave2.3 run quota + pricing (requires DATABASE_URL + redis)', () =
       actor: 'w2q-watchdog',
     });
     expect(failed.terminal).toBe(true);
+
+    expect((await reservationRows(orgId)).map((r) => r.state)).toEqual(['RELEASED']);
+    expect(await redisEvents(orgId)).toBe(0);
+    expect(await orphanedHolds(orgId)).toBe(0);
+  });
+
+  it('workflow-path failRun releases the durable reservation and the Redis hold', async () => {
+    const { orgId, assistantId } = await setup();
+    await seedEntitlement(orgId, { monthly_events: 100 });
+
+    const conv = await newConversation(orgId, assistantId);
+    const accepted = await conversations.acceptMessage({
+      orgId,
+      principalId: actor,
+      conversationId: conv,
+      content: { text: 'doomed' },
+    });
+    expect(await redisEvents(orgId)).toBe(1);
+    expect((await reservationRows(orgId)).map((r) => r.state)).toEqual(['RESERVED']);
+
+    // This is the exact call the runtime-control workflow makes when the
+    // model activity exhausts its retries (wave-4 injection: the provider
+    // refused the connection mid-run). Pre-fix it released the durable
+    // reservation but leaked the advisory Redis hold (+1 per FAILED run).
+    const failed = await authority.failRun({
+      orgId,
+      runId: accepted.run_id as string,
+      errorCode: 'provider_error',
+      errorMessage: 'connection refused',
+    });
+    expect(failed.state).toBe('FAILED');
+
+    expect((await reservationRows(orgId)).map((r) => r.state)).toEqual(['RELEASED']);
+    expect(await redisEvents(orgId)).toBe(0);
+    expect(await orphanedHolds(orgId)).toBe(0);
+
+    // Idempotent replay must NOT release another run's hold: take a fresh
+    // hold on the same org counter, replay the FAILED transition, and prove
+    // the second run's hold survives.
+    const conv2 = await newConversation(orgId, assistantId);
+    await conversations.acceptMessage({
+      orgId,
+      principalId: actor,
+      conversationId: conv2,
+      content: { text: 'innocent' },
+    });
+    expect(await redisEvents(orgId)).toBe(1);
+    const replayed = await authority.failRun({
+      orgId,
+      runId: accepted.run_id as string,
+      errorCode: 'provider_error',
+      errorMessage: 'connection refused',
+    });
+    expect(replayed.state).toBe('FAILED');
+    expect(await redisEvents(orgId)).toBe(1);
+  });
+
+  it('approval denial releases the durable reservation and the Redis hold', async () => {
+    const { orgId, assistantId } = await setup();
+    await seedEntitlement(orgId, { monthly_events: 100 });
+
+    const conv = await newConversation(orgId, assistantId);
+    const accepted = await conversations.acceptMessage({
+      orgId,
+      principalId: actor,
+      conversationId: conv,
+      content: { text: 'risky' },
+    });
+    expect(await redisEvents(orgId)).toBe(1);
+    // Approvals park runs that are already executing (same precedent as the
+    // watchdog test — move the run to RUNNING first).
+    await db.withBypass((tx) =>
+      tx.execute(sql`update runs set state = 'RUNNING' where id = ${accepted.run_id}::uuid`),
+    );
+
+    const { approvalId } = await authority.createApprovalRequest({
+      orgId,
+      runId: accepted.run_id as string,
+      approvalRef: `w2q-denial-${randomUUID()}`,
+      summary: 'test denial',
+      expiresAt: new Date(Date.now() + 3600_000),
+      callerScope: 'w2q-test',
+      createdBy: 'w2q-author',
+    });
+
+    // Pre-fix, denial left the RESERVED row AND the Redis hold behind — the
+    // run's quota was never returned on the canceled path.
+    const decided = await authority.decideApproval({
+      orgId,
+      runId: accepted.run_id as string,
+      approvalId,
+      decision: 'DENIED',
+      actor: 'w2q-approver',
+      reason: 'w2q-test denial',
+    });
+    expect(decided.state).toBe('DENIED');
+    expect(decided.runState).toBe('CANCELED');
 
     expect((await reservationRows(orgId)).map((r) => r.state)).toEqual(['RELEASED']);
     expect(await redisEvents(orgId)).toBe(0);

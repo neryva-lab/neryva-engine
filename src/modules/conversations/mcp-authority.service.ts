@@ -33,6 +33,7 @@ import { modelCatalogEntries } from '../assistants/model-catalog.schema';
 import { approvals, checkpoints, memoryProposals, toolEffects, runIdempotency } from './mcp.schema';
 import { assertRunTransition, isRunState, isTerminalRun } from './state-machine';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
+import { QuotaService } from '../billing/quota.service';
 import { EscalationsService } from './escalations.service';
 import { issueCapability } from '../../common/auth/capability-token';
 import { qualifyModelAliases } from '../../common/model-aliases';
@@ -60,7 +61,38 @@ export class McpAuthorityService {
     private readonly purge: RetentionPurgeService,
     private readonly retrieval: RetrievalService,
     private readonly escalations: EscalationsService,
+    private readonly quota: QuotaService,
   ) {}
+
+  /**
+   * Drop the advisory Redis quota hold (W2.4 — the advisory plane mirrors
+   * the durable reservation; a terminal run that never consumed a billable
+   * event must return its hold). Best-effort: the spend ledger and the
+   * durable reservation stay the billing truth, so a Redis hiccup here
+   * must never fail the terminal transition — failures are logged (a
+   * persistent Redis outage would otherwise hide counter drift until the
+   * hourly reconcile notices). Caller must gate on `flipped` (only the
+   * call that actually transitioned the run releases) so idempotent
+   * replays never double-release the shared org counter.
+   */
+  private async releaseRunQuotaHold(orgId: string): Promise<void> {
+    try {
+      await this.quota.release({
+        orgId,
+        product: 'agents',
+        units: 1,
+        estimatedCostUsd: 0,
+      });
+    } catch (err) {
+      // Advisory only — the hourly reconcile + TTL backstop resync the
+      // counter; never fail the terminal transition over it.
+      McpAuthorityService.logger.warn(
+        `quota hold release failed (advisory, reconciled hourly): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 
   // ── Lease fencing (5.4) ─────────────────────────────────────────────────
 
@@ -214,7 +246,7 @@ export class McpAuthorityService {
     expectedVersion?: number;
     leaseEpoch?: number;
   }): Promise<Run> {
-    return this.db.withOrg(input.orgId, async (tx) => {
+    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
       const found = await tx
         .select()
         .from(runs)
@@ -226,7 +258,7 @@ export class McpAuthorityService {
       }
       const run = found[0];
       if (run.state === 'FAILED') {
-        return run; // idempotent replay
+        return { run, flipped: false }; // idempotent replay
       }
       this.assertLeaseFencing(run, input.leaseEpoch);
       if (input.expectedVersion !== undefined && input.expectedVersion !== run.version) {
@@ -296,8 +328,16 @@ export class McpAuthorityService {
           error_code: input.errorCode,
         },
       });
-      return updated[0];
+      return { run: updated[0], flipped: true };
     });
+    // W2.4 — the durable reservation released in-TX (REL-4.4); the advisory
+    // Redis hold was never released here (proved by wave-4 failure injection:
+    // the org events counter leaked +1 per FAILED run). Release after commit,
+    // only when this call flipped the run — replays must not double-release.
+    if (outcome.flipped && outcome.run.runKind === 'standard') {
+      await this.releaseRunQuotaHold(input.orgId);
+    }
+    return outcome.run;
   }
 
   // ── AppendRunEvents (5.6) ───────────────────────────────────────────────
@@ -1037,7 +1077,7 @@ export class McpAuthorityService {
     runState: string;
     replay: boolean;
   }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
+    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
       const foundApproval = await tx
         .select()
         .from(approvals)
@@ -1090,6 +1130,7 @@ export class McpAuthorityService {
             state: approval.state as 'APPROVED' | 'DENIED',
             runState: runRows[0]?.state ?? 'UNKNOWN',
             replay: true,
+            runKind: runRows[0]?.runKind ?? 'standard',
           };
         }
         throw ApiError.conflict('approval already decided', {
@@ -1149,6 +1190,7 @@ export class McpAuthorityService {
               state: 'PENDING' as const,
               runState: run.state,
               replay: false,
+              runKind: run.runKind,
             };
           }
           // Threshold reached — fall through to the single-approver transition below,
@@ -1203,7 +1245,13 @@ export class McpAuthorityService {
             received: required > 1 ? required : 1,
           },
         });
-        return { approvalId: approval.id, state: 'APPROVED', runState: 'RUNNING', replay: false };
+        return {
+          approvalId: approval.id,
+          state: 'APPROVED' as const,
+          runState: 'RUNNING',
+          replay: false,
+          runKind: run.runKind,
+        };
       }
 
       // DENIED — any DENIED short-circuits the chain (even for multi-approver).
@@ -1240,6 +1288,16 @@ export class McpAuthorityService {
           updatedAt: now,
         })
         .where(eq(runs.id, run.id));
+      // W2.4 — a denied run never runs: release its durable quota reservation
+      // in the SAME transaction (the wall must not count it). Advisory-hold
+      // release happens after commit, below.
+      if (run.runKind === 'standard') {
+        await tx.execute(sql`
+          update quota_reservations
+          set state = 'RELEASED', released_at = now()
+          where run_id = ${run.id}::uuid and state = 'RESERVED'
+        `);
+      }
       await recordOutboxEvent(tx, {
         aggregateType: 'run',
         aggregateId: run.id,
@@ -1259,8 +1317,30 @@ export class McpAuthorityService {
         tenantId: input.orgId,
         details: { run_id: run.id, decision: 'DENIED', actor: input.actor },
       });
-      return { approvalId: approval.id, state: 'DENIED', runState: 'CANCELED', replay: false };
+      return {
+        approvalId: approval.id,
+        state: 'DENIED' as const,
+        runState: 'CANCELED',
+        replay: false,
+        runKind: run.runKind,
+      };
     });
+    // W2.4 — the denial path previously leaked both the durable reservation
+    // and the advisory Redis hold (proved by wave-4 approval-denial injection:
+    // a DENIED run left its quota hold behind). The durable release above
+    // rides the TX; the advisory release runs after commit.
+    if (!outcome.replay && outcome.runState === 'CANCELED' && outcome.runKind === 'standard') {
+      await this.releaseRunQuotaHold(input.orgId);
+    }
+    // runKind is internal quota-plane routing — strip it so the HTTP
+    // response carries exactly the declared shape (TS types do not strip
+    // extra runtime properties).
+    return {
+      approvalId: outcome.approvalId,
+      state: outcome.state,
+      runState: outcome.runState,
+      replay: outcome.replay,
+    };
   }
 
   // ── Memory proposals (5.9) — proposals are NOT truth ────────────────────

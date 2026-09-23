@@ -117,5 +117,15 @@ export class PinoNestLogger implements LoggerService {
 }
 
 function stringify(message: unknown): string {
-  return typeof message === 'string' ? message : JSON.stringify(message);
+  if (typeof message === 'string') return message;
+  if (message instanceof Error) {
+    // An Error's payload (message, stack, cause) lives on non-enumerable
+    // props — plain JSON.stringify renders the whole error as '{}'. Nest's
+    // own ExceptionHandler passes the raw error object here, so without this
+    // every bootstrap/DI failure logs as an empty object with no message.
+    const ownProps = Object.keys(message);
+    const extra = ownProps.length > 0 ? ` ${JSON.stringify(message)}` : '';
+    return `${message.stack ?? message.message}${extra}`;
+  }
+  return JSON.stringify(message);
 }

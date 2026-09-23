@@ -11,11 +11,17 @@ import { claimInbox, completeInbox, failInbox, PermanentConsumerError, type Outb
  * with `FOR UPDATE SKIP LOCKED`; NATS/Debezium stay behind measurement
  * (ledger 11.1). The pinned state machine:
  *   PENDING -> CLAIMED -> PUBLISHED
- *                   |          ^-- all consumers done (or none registered)
+ *                   |          ^-- all registered consumers done
  *                   +-> RETRY_WAIT (retryable failure, exp backoff + jitter)
  *                   +-> DEAD_LETTER (attempt threshold)
  * A CLAIMED row whose worker crashed is recovered to PENDING after the
  * reclaim timeout (claimed_at, drizzle/0025_outbox_dispatch.sql).
+ *
+ * Claiming is scoped to the event types registered on THIS dispatcher
+ * instance: events for types no consumer here handles are never claimed and
+ * stay PENDING for whichever dispatcher does handle them. A dispatcher with
+ * no consumers claims nothing at all (fail closed — an undeliverable row is
+ * never marked PUBLISHED).
  *
  * Consumers are in-process (single monolith, ADR-001): the publisher fans an
  * event out to every registered consumer, each deduplicating through
@@ -91,18 +97,31 @@ export class OutboxDispatcher {
     return result;
   }
 
-  /** Claim a bounded batch, oldest first (per-tenant fairness via FIFO). */
+  /** Claim a bounded batch, oldest first (per-tenant fairness via FIFO).
+   *
+   * Scoped to the event types registered on this dispatcher instance:
+   * events for types no consumer here handles are never claimed and stay
+   * PENDING for whichever dispatcher does handle them. An empty claimable
+   * set (no consumers at all) claims nothing — fail closed.
+   */
   private async claimBatch(): Promise<OutboxEvent[]> {
+    const claimableTypes = this.claimableEventTypes();
+    if (claimableTypes !== null && claimableTypes.length === 0) {
+      await this.db.withBypass((tx) => this.updateOldestAge(tx));
+      return [];
+    }
+    const filters = [
+      inArray(outboxEvents.status, ['PENDING', 'RETRY_WAIT']),
+      lte(outboxEvents.nextAttemptAt, new Date().toISOString()),
+    ];
+    if (claimableTypes !== null) {
+      filters.push(inArray(outboxEvents.eventType, claimableTypes));
+    }
     return this.db.withBypass(async (tx) => {
       const rows = await tx
         .select()
         .from(outboxEvents)
-        .where(
-          and(
-            inArray(outboxEvents.status, ['PENDING', 'RETRY_WAIT']),
-            lte(outboxEvents.nextAttemptAt, new Date().toISOString()),
-          ),
-        )
+        .where(and(...filters))
         // Deterministic FIFO: createdAt is the ordering key; eventId (uuidv7,
         // time-sortable) breaks same-µs ties so two replicas interleave claims
         // without reordering per-partition delivery.
@@ -192,6 +211,27 @@ export class OutboxDispatcher {
 
   private consumersFor(eventType: string): OutboxConsumer[] {
     return this.consumers.filter((c) => c.eventTypes.includes(eventType) || c.eventTypes.includes('*'));
+  }
+
+  /**
+   * The event types this dispatcher instance may claim.
+   * - `null` — a consumer registered with the '*' wildcard claims every type
+   *   (preserves pre-scoping behavior for wildcard dispatchers).
+   * - `[]` — no consumers registered at all: claim nothing, fail closed.
+   * - otherwise — exactly the union of registered types; rows for other types
+   *   stay PENDING for whichever dispatcher instance handles them.
+   */
+  private claimableEventTypes(): string[] | null {
+    const types = new Set<string>();
+    for (const consumer of this.consumers) {
+      if (consumer.eventTypes.includes('*')) {
+        return null;
+      }
+      for (const type of consumer.eventTypes) {
+        types.add(type);
+      }
+    }
+    return [...types];
   }
 
   private async markPublished(eventId: string): Promise<void> {

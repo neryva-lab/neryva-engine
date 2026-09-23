@@ -214,7 +214,8 @@ export class AuthGuard implements CanActivate {
     if (count === 1) {
       await this.redis.raw.expire(rlKey, windowSeconds).catch(() => undefined);
     }
-    if (count > 600) {
+    // Ceiling is env-configurable; production default 600/min (see env.ts).
+    if (count > env.AUTH_L2_RATE_LIMIT_PER_MINUTE) {
       throw ApiError.rateLimited(windowSeconds);
     }
 
@@ -290,7 +291,8 @@ export class AuthGuard implements CanActivate {
     if (count === 1) {
       await this.redis.raw.expire(rlKey, windowSeconds).catch(() => undefined);
     }
-    if (count > 600) {
+    // Ceiling is env-configurable; production default 600/min (see env.ts).
+    if (count > env.AUTH_L2_RATE_LIMIT_PER_MINUTE) {
       throw ApiError.rateLimited(windowSeconds);
     }
 

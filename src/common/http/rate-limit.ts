@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, Injectable, SetMetadata } from '@nestjs/
 import { Reflector } from '@nestjs/core';
 import { FastifyRequest } from 'fastify';
 import { RedisService } from '../infra/redis.service';
+import { env } from '../config/env';
 import { ApiError } from './api-error';
 import { Principal } from '../auth/principal';
 
@@ -86,7 +87,12 @@ export class RateLimitGuard implements CanActivate {
 
     let result: [number, number] | null = null;
     try {
-      result = (await this.redis.raw.eval(this.script, 1, key, String(options.capacity), String(options.refillPerSecond), String(Date.now()), '1')) as [number, number];
+      // Local harnesses may raise RATE_LIMIT_MULTIPLIER so audit workers never
+      // stall on 429s; production keeps it at 1 (shipped behavior unchanged).
+      const mult = env.RATE_LIMIT_MULTIPLIER;
+      const capacity = options.capacity * mult;
+      const refill = options.refillPerSecond * mult;
+      result = (await this.redis.raw.eval(this.script, 1, key, String(capacity), String(refill), String(Date.now()), '1')) as [number, number];
     } catch {
       // Redis unavailable: fail-open with a log line. Auth-critical paths
       // carry additional per-artifact limits in their own tables (email

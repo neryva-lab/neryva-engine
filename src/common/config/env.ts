@@ -181,6 +181,21 @@ const envSchema = z.object({
   IDENTITY_CODE_TTL_SECONDS: positiveInt(60, 600),
   IDENTITY_EMAIL_CODE_TTL_SECONDS: positiveInt(600, 3600),
   IDENTITY_EMAIL_CODE_MAX_ATTEMPTS: positiveInt(5, 20),
+  // Email-code issue budgets: codes/account/hour and codes/IP/hour.
+  // Production defaults (3, 10) are the shipped values. Local harnesses
+  // raise these via env to keep audit workers from stalling on the quota;
+  // production MUST leave them unset (or at the defaults) — never deploy
+  // a raised budget.
+  IDENTITY_EMAIL_CODE_ACCOUNT_BUDGET: positiveInt(3, 1_000_000),
+  IDENTITY_EMAIL_CODE_IP_BUDGET: positiveInt(10, 1_000_000),
+  // Global rate-limit multiplier applied to every @RateLimit token bucket
+  // (capacity and refill scale together, so bucket semantics are unchanged).
+  // Production default 1 = shipped behavior. Local harnesses raise this so
+  // audit workers never stall on 429s; production MUST keep it at 1.
+  RATE_LIMIT_MULTIPLIER: positiveInt(1, 1_000_000),
+  // Per-key L2 API-key request ceiling (fixed 60s window, Redis).
+  // Production default 600/min; see RATE_LIMIT_MULTIPLIER note above.
+  AUTH_L2_RATE_LIMIT_PER_MINUTE: positiveInt(600, 1_000_000),
   IDENTITY_JWKS_CACHE_TTL_SECONDS: positiveInt(300, 86400),
   // The agent-runtime satellite's client-credentials secret (ADR-006
   // connection contract #1). Set at deploy; seeded envelope-encrypted into

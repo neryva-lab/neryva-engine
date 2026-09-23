@@ -110,14 +110,16 @@ export class EmailCodeService {
       .where(and(eq(emailLoginCodes.accountId, accountId), isNull(emailLoginCodes.consumedAt)));
   }
 
-  // ── Rate budgets: 3 codes/account/hour, 10/IP/hour (fixed window) ───────
+  // ── Rate budgets: N codes/account/hour, M/IP/hour (fixed window) ────────
+  // N/M come from env; production defaults are 3/10 (see env.ts). Local
+  // harnesses raise them; production must keep the defaults.
   private async budgetAllows(accountId: string, ip: string | null): Promise<true | 'account_rate_limited' | 'ip_rate_limited'> {
     try {
       const a = await this.redis.raw.incr(`emailcode:acct:${accountId}:${hourWindow()}`);
       if (a === 1) {
         await this.redis.raw.expire(`emailcode:acct:${accountId}:${hourWindow()}`, 3700);
       }
-      if (a > 3) {
+      if (a > env.IDENTITY_EMAIL_CODE_ACCOUNT_BUDGET) {
         return 'account_rate_limited';
       }
       if (ip) {
@@ -125,7 +127,7 @@ export class EmailCodeService {
         if (i === 1) {
           await this.redis.raw.expire(`emailcode:ip:${ip}:${hourWindow()}`, 3700);
         }
-        if (i > 10) {
+        if (i > env.IDENTITY_EMAIL_CODE_IP_BUDGET) {
           return 'ip_rate_limited';
         }
       }

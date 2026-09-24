@@ -1,10 +1,11 @@
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { memoryItems, MemoryItem } from './schema';
+import { legalHolds } from '../lifecycle/lifecycle.schema';
 import { EmbeddingService } from './embedding.service';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { memoryProposals } from '../conversations/mcp.schema';
@@ -176,6 +177,12 @@ export class MemoryService {
       }
 
       const scopeType = input.scopeType ?? 'organization';
+      // A4-21: a user-scoped item with no explicit scope_id is bound to the
+      // deciding actor's account — run-time retrieval keys user memories on
+      // scope_id = the run actor's account id, so a NULL scope_id would be a
+      // write-void (stored, listed, never served to any run).
+      const scopeId =
+        scopeType === 'user' && !input.scopeId ? input.actor : (input.scopeId ?? null);
       // P3: scrub BEFORE embed (the vector must match the STORED text, never
       // the pre-redaction original) and before the TTL default resolves.
       const scrubbed = await this.applyScrubPolicy(input.orgId, proposal.value);
@@ -191,7 +198,7 @@ export class MemoryService {
           id: uuidv7(),
           organizationId: input.orgId,
           scopeType,
-          scopeId: input.scopeId ?? null,
+          scopeId,
           content: scrubbed.text,
           sourceRef: { proposal_id: proposal.id, run_id: proposal.runId },
           provenance: proposal.provenance ?? 'memory_proposal',
@@ -232,10 +239,12 @@ export class MemoryService {
 
   async list(
     orgId: string,
-    opts?: { scopeType?: string; scopeId?: string; limit?: number },
+    opts?: { scopeType?: string; scopeId?: string; limit?: number; callerId?: string },
   ): Promise<MemoryItem[]> {
     assertUuid(orgId, 'orgId');
-    const limit = Math.min(Math.max(1, opts?.limit ?? 50), 100);
+    // A4-27: clamp defensively — a non-numeric ?limit= must not reach drizzle.
+    const rawLimit = typeof opts?.limit === 'number' && Number.isFinite(opts.limit) ? opts.limit : 50;
+    const limit = Math.min(Math.max(1, rawLimit), 100);
     const conditions = [eq(memoryItems.organizationId, orgId), isNull(memoryItems.deletedAt)];
     if (opts?.scopeType) {
       conditions.push(eq(memoryItems.scopeType, opts.scopeType));
@@ -243,6 +252,13 @@ export class MemoryService {
     if (opts?.scopeId) {
       assertUuid(opts.scopeId, 'scopeId');
       conditions.push(eq(memoryItems.scopeId, opts.scopeId));
+    }
+    // A4-22: user-scoped rows are account-private by contract ("visible only
+    // to that account"). The library read must not return another account's
+    // user rows, so a user-scope read without an explicit scope_id is
+    // constrained to the caller.
+    if (opts?.scopeType === 'user' && opts?.callerId) {
+      conditions.push(eq(memoryItems.scopeId, opts.callerId));
     }
     return this.db.withOrg(orgId, (tx) =>
       tx
@@ -263,6 +279,12 @@ export class MemoryService {
     actor: string;
   }): Promise<MemoryItem> {
     assertUuid(input.orgId, 'orgId');
+    // A4-21: a user-scoped item with no explicit scope_id is bound to the
+    // author's account — run-time retrieval keys user memories on
+    // scope_id = the run actor's account id, so a NULL scope_id would be a
+    // write-void (stored, listed, never served to any run).
+    const scopeId =
+      input.scopeType === 'user' && !input.scopeId ? input.actor : (input.scopeId ?? null);
     // P3: scrub-then-embed (same ordering law as the approval path).
     const scrubbed = await this.applyScrubPolicy(input.orgId, input.content.trim());
     const policy = await this.readMemoryPolicy(input.orgId);
@@ -276,7 +298,7 @@ export class MemoryService {
           id: uuidv7(),
           organizationId: input.orgId,
           scopeType: input.scopeType,
-          scopeId: input.scopeId ?? null,
+          scopeId,
           content: scrubbed.text.slice(0, 8192),
           sourceRef: { actor: input.actor },
           provenance: 'user_authored',
@@ -311,6 +333,75 @@ export class MemoryService {
   }
 
   /**
+   * A4-20 — in-place edit of a memory entry's content. The UI previously
+   * offered no correction path (delete + re-create); this is the honest
+   * alternative to silent immutability. Scope, TTL, provenance and visibility
+   * are NOT editable (scope changes would silently re-home the row; TTL is a
+   * lifecycle concern). The scrub-then-embed ordering law of create applies:
+   * the stored vector must match the STORED text, so the embedding and its
+   * model stamp are recomputed. Tombstoned rows are not resurrectable here —
+   * editing a deleted row 404s (recovery is a Phase 9 workflow).
+   */
+  async updateMemory(input: {
+    orgId: string;
+    memoryId: string;
+    content: string;
+    actor: string;
+  }): Promise<MemoryItem> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.memoryId, 'memoryId');
+    const text = input.content.trim();
+    if (!text) {
+      throw ApiError.validation({ content: 'must be a non-empty string' });
+    }
+    const scrubbed = await this.applyScrubPolicy(input.orgId, text);
+    const [embedding] = await this.embedding.embed([scrubbed.text]);
+    const embeddingModel = await this.resolveWriteEmbeddingModel(input.orgId);
+    const rows = await this.db.withOrg(input.orgId, (tx) =>
+      tx
+        .update(memoryItems)
+        .set({
+          content: scrubbed.text.slice(0, 8192),
+          embedding,
+          embeddingModel,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(
+          and(
+            eq(memoryItems.id, input.memoryId),
+            eq(memoryItems.organizationId, input.orgId),
+            isNull(memoryItems.deletedAt),
+          ),
+        )
+        .returning(),
+    );
+    if (rows.length === 0) {
+      throw ApiError.notFound('memory item');
+    }
+    await this.audit.add({
+      action: 'memory.updated',
+      resourceType: 'memory_item',
+      resourceId: input.memoryId,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: {},
+    });
+    if (scrubbed.redacted) {
+      await this.audit.add({
+        action: 'memory.pii_redacted',
+        resourceType: 'memory_item',
+        resourceId: input.memoryId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { match_count: scrubbed.matchCount },
+      });
+    }
+    return rows[0];
+  }
+
+  /**
    * P3 (DSR "forget my X") — content-addressed purge: tombstone every
    * non-deleted item whose content contains `substring` (case-insensitive).
    * Same tombstone semantics as softDelete (deletedAt + invalidAt — history
@@ -325,12 +416,33 @@ export class MemoryService {
     orgId: string;
     substring: string;
     actor: string;
-  }): Promise<{ purged: number }> {
+  }): Promise<{ purged: number; truncated: boolean }> {
     assertUuid(input.orgId, 'orgId');
     const needle = input.substring.trim();
     if (needle.length < 3 || needle.length > 128) {
       throw ApiError.validation({
         substring: 'must be 3..128 chars — shorter queries would match the corpus by accident',
+      });
+    }
+    // A4-24: an active org-scope legal hold blocks the DSR purge, mirroring
+    // the retention workflow's check_holds gate (retention-purge.service.ts).
+    const holds = await this.db.withOrg(input.orgId, (tx) =>
+      tx
+        .select({ id: legalHolds.id })
+        .from(legalHolds)
+        .where(
+          and(
+            eq(legalHolds.organizationId, input.orgId),
+            eq(legalHolds.status, 'active'),
+            or(isNull(legalHolds.expiresAt), sql`${legalHolds.expiresAt} > now()`),
+            eq(legalHolds.scopeType, 'organization'),
+          ),
+        )
+        .limit(1),
+    );
+    if (holds.length > 0) {
+      throw ApiError.conflict('an active legal hold blocks memory purge', {
+        legal_hold_id: holds[0].id,
       });
     }
     // Escape LIKE wildcards so the match is literal, not a pattern. Single
@@ -366,7 +478,9 @@ export class MemoryService {
         purged_ids: matched.slice(0, 100).map((r) => r.id),
       },
     });
-    return { purged: matched.length };
+    // A4-25: the subquery caps at 1000 — report it so the caller never
+    // claims "nothing matched stays retrievable" when the cap was hit.
+    return { purged: matched.length, truncated: matched.length === 1000 };
   }
 
   /** Soft delete — tombstone stays for provenance; purge is a Phase 9 workflow. */

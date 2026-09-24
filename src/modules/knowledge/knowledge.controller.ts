@@ -191,6 +191,39 @@ export class KnowledgeController {
     return { ok: true };
   }
 
+  /** A4-01 — document preview: latest-version chunks in sequence order. */
+  @Get('documents/:documentId/preview')
+  @Roles('owner', 'admin', 'developer', 'reader', 'billing')
+  @UseGuards(OrgRolesGuard)
+  async previewDocument(
+    @Param('orgId') orgId: string,
+    @Param('documentId') documentId: string,
+    @Query('chunks') chunks?: string,
+  ) {
+    const chunkLimit = chunks === undefined ? undefined : Number.parseInt(chunks, 10);
+    if (chunkLimit !== undefined && (!Number.isInteger(chunkLimit) || chunkLimit < 1)) {
+      throw ApiError.validation({ chunks: 'must be a positive integer' });
+    }
+    return this.artifacts.getDocumentPreview({ orgId, documentId, chunkLimit });
+  }
+
+  /**
+   * A4-05 — tombstone a document (state='retired'): it leaves retrieval
+   * immediately; the mapping is kept so history and pins stay answerable.
+   */
+  @Delete('documents/:documentId')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async deleteDocument(
+    @Param('orgId') orgId: string,
+    @Param('documentId') documentId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    await this.artifacts.retireDocument({ orgId, documentId, actor: principal.id });
+    return { retired: true };
+  }
+
   @Get('memories')
   @Roles('owner', 'admin', 'developer', 'reader', 'billing')
   @UseGuards(OrgRolesGuard)
@@ -198,8 +231,21 @@ export class KnowledgeController {
     @Param('orgId') orgId: string,
     @Query('scope_type') scopeType?: string,
     @Query('scope_id') scopeId?: string,
+    @Query('limit') limit?: string,
+    @CurrentPrincipal() principal?: L1Principal,
   ) {
-    const items = await this.memory.list(orgId, { scopeType, scopeId });
+    // A4-22: user-scoped rows are account-private — the service constrains
+    // user-scope reads to the caller so the UI's "visible only to that
+    // account" promise holds. The principal is always present on this
+    // authenticated route; an absent principal skips the constraint.
+    // A4-27: the service clamps limit to 1..100; the UI discloses the cap.
+    const parsedLimit = limit === undefined ? undefined : Number(limit);
+    const items = await this.memory.list(orgId, {
+      scopeType,
+      scopeId,
+      limit: parsedLimit,
+      callerId: principal?.id,
+    });
     return { memories: items };
   }
 

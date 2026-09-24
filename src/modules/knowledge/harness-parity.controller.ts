@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
@@ -231,5 +231,35 @@ export class HarnessParityController {
     assertUuid(memoryId, 'memoryId');
     await this.memory.softDelete({ orgId, memoryId, actor: principal.id });
     return { deleted: true };
+  }
+
+  /**
+   * A4-20 — in-place edit of a memory entry's content. Scope/TTL/provenance
+   * are not editable; only the content (scrub-then-embed re-runs server-side,
+   * same ordering law as create). Tombstoned rows 404.
+   */
+  @Patch('memories/:memoryId')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async updateMemory(
+    @Param('orgId') orgId: string,
+    @Param('memoryId') memoryId: string,
+    @Body() dto: { content?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(memoryId, 'memoryId');
+    if (typeof dto.content !== 'string' || !dto.content.trim()) {
+      throw ApiError.validation({ content: 'must be a non-empty string' });
+    }
+    return {
+      memory: await this.memory.updateMemory({
+        orgId,
+        memoryId,
+        content: dto.content,
+        actor: principal.id,
+      }),
+    };
   }
 }

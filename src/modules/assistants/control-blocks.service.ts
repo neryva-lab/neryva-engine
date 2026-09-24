@@ -49,6 +49,11 @@ export class ControlBlocksService {
     if (targetName.length === 0 || targetName.length > 128) {
       throw ApiError.validation({ target_name: 'must be 1..128 chars' });
     }
+    if (input.targetType === 'capability' && targetName !== 'tool' && !/^model:.+/.test(targetName)) {
+      // Enforcement only ever looks up capability 'tool' and 'model:<provider>'
+      // (mcp-authority) — any other capability name is a silent no-op.
+      throw ApiError.validation({ target_name: "capability blocks must be 'tool' or 'model:<provider>' — other names never match an enforcement check" });
+    }
     if (typeof input.reason !== 'string' || input.reason.trim().length === 0 || input.reason.length > 512) {
       throw ApiError.validation({ reason: 'must be 1..512 chars (operator justification is mandatory)' });
     }
@@ -58,10 +63,20 @@ export class ControlBlocksService {
       if (Number.isNaN(parsed.getTime())) {
         throw ApiError.validation({ expires_at: 'must be an ISO timestamp or null' });
       }
+      if (parsed.getTime() <= Date.now()) {
+        throw ApiError.validation({ expires_at: 'must be in the future — a block born expired refuses nothing' });
+      }
       expiresAt = parsed.toISOString();
     }
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
+    const rows = await this.db.withOrg(input.orgId, async (tx) => {
+      // Dedupe: an identical ACTIVE block makes a second row a silent twin —
+      // clearing one leaves the other enforcing, so the UI would lie about
+      // the clear. Expired rows are history and may repeat.
+      const twin = await ControlBlocksService.findActiveBlock(tx, input.orgId, input.targetType as ControlBlockTarget, targetName);
+      if (twin) {
+        throw ApiError.conflict('an active block already exists for this target — clear it before setting a new one');
+      }
+      return tx
         .insert(controlBlocks)
         .values({
           organizationId: input.orgId,
@@ -71,8 +86,8 @@ export class ControlBlocksService {
           expiresAt,
           createdBy: input.actor.slice(0, 128),
         })
-        .returning(),
-    );
+        .returning();
+    });
     const row = rows[0];
     await this.audit.add({
       action: 'control.block_set',

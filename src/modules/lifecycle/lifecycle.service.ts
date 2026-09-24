@@ -225,6 +225,19 @@ export class LifecycleService {
       resourceType: 'export_request',
       resourceId: request.id,
     });
+    // P2-COMP-15: export downloads were only written to data_access_records,
+    // which no surface reads — so the console's claim that privileged actions
+    // "appear here and on the Activity page" was false for downloads. Emit the
+    // audit event too, so downloads are visible in the hash-chained trail.
+    await this.audit.add({
+      action: 'export.downloaded',
+      resourceType: 'export_request',
+      resourceId: request.id,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { download_count: request.downloadCount },
+    });
     return request.manifest as Record<string, unknown>;
   }
 

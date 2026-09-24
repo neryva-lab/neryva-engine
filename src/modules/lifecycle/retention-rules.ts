@@ -1,5 +1,9 @@
 /**
- * Pure retention-rule evaluation — shared by the sweep SQL and tests.
+ * Pure retention-rule evaluation (unit-tested).
+ *
+ * Note: the retention sweep (RetentionPurgeService.sweepRetention) evaluates
+ * eligibility in SQL, not through this helper — this module is a standalone
+ * predicate, not shared sweep logic.
  * Fail-safe: an invalid rule NEVER flags data for deletion.
  */
 export const RETENTION_RULES = {

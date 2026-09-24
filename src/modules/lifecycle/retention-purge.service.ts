@@ -10,6 +10,7 @@ import { conversations, messages } from '../conversations/schema';
 import { artifacts } from '../knowledge/schema';
 import { memoryItems } from '../knowledge/schema';
 import { env } from '../../common/config/env';
+import { legacyTenants } from '../../common/infra/db/legacy-schema';
 import { legalHolds, purgeTasks, PurgeTask, retentionPolicies, tombstones } from './lifecycle.schema';
 import { assertUuid } from './assert';
 
@@ -29,10 +30,15 @@ import { assertUuid } from './assert';
 export const PURGE_STEPS = ['authorize', 'check_holds', 'mark_unavailable', 'emit_derived_deletion', 'purge_objects', 'purge_content', 'tombstone', 'done'] as const;
 export type PurgeStep = (typeof PURGE_STEPS)[number];
 
+/** Retention sweep cadence: hourly. Sweep only creates purge tasks; the purge
+ * worker's tick advances them, so a sweep is cheap and idempotent. */
+export const RETENTION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
 @Injectable()
 export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   private static readonly logger = new Logger(RetentionPurgeService.name);
   private timer?: NodeJS.Timeout;
+  private retentionTimer?: NodeJS.Timeout;
   private ticking = false;
 
   constructor(
@@ -99,6 +105,62 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
       `);
       return created.rows.length;
     });
+  }
+
+  /**
+   * Conversation retention sweep: orgs that set `tenants.retention_days` get
+   * purge tasks for conversations older than the window. Null retention_days
+   * means keep indefinitely — no automatic deletion. Legal holds still gate
+   * every task at the check_holds step; a task is never created twice while
+   * one is pending/in_progress/blocked/done.
+   */
+  async sweepConversationRetention(input: { orgId: string }): Promise<number> {
+    assertUuid(input.orgId, 'orgId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const created = await tx.execute(sql`
+        insert into purge_tasks (id, organization_id, scope_type, scope_id, reason)
+        select gen_random_uuid(), c.organization_id, 'conversation', c.id, 'retention_expiry'
+        from conversations c
+        join tenants t on t.id = c.organization_id::text
+        where c.organization_id = ${input.orgId}::uuid
+          and t.retention_days is not null
+          and c.status <> 'deleted'
+          and c.created_at < now() - (t.retention_days * interval '1 day')
+          and not exists (
+            select 1 from purge_tasks pt
+            where pt.organization_id = c.organization_id and pt.scope_id = c.id
+              and pt.state in ('pending','in_progress','blocked','done')
+          )
+        returning id
+      `);
+      return created.rows.length;
+    });
+  }
+
+  /**
+   * Hourly retention sweep across every org (P2-COMP-10: sweepRetention had no
+   * non-test caller, so retention policies never fired). Runs both the
+   * artifact sweep and the conversation-retention sweep; per-org failures are
+   * logged and do not stop the sweep.
+   */
+  async sweepAllRetention(): Promise<void> {
+    try {
+      const rows = await this.db.withBypass((tx) => tx.select({ id: legacyTenants.id }).from(legacyTenants));
+      let created = 0;
+      for (const row of rows) {
+        try {
+          created += await this.sweepRetention({ orgId: row.id });
+          created += await this.sweepConversationRetention({ orgId: row.id });
+        } catch (err) {
+          RetentionPurgeService.logger.warn(`retention sweep failed for org ${row.id}: ${(err as Error).message}`);
+        }
+      }
+      if (created > 0) {
+        RetentionPurgeService.logger.log(`retention sweep created ${created} purge tasks`);
+      }
+    } catch (err) {
+      RetentionPurgeService.logger.warn(`retention sweep failed: ${(err as Error).message}`);
+    }
   }
 
   // ── Purge task lifecycle (9.6) ──────────────────────────────────────────
@@ -417,10 +479,13 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     if (!env.WORKERS__OUTBOX_ENABLED) return;
     this.timer = setInterval(() => void this.tick(), env.OUTBOX_DISPATCH_INTERVAL_MS);
     this.timer.unref();
+    this.retentionTimer = setInterval(() => void this.sweepAllRetention(), RETENTION_SWEEP_INTERVAL_MS);
+    this.retentionTimer.unref();
     RetentionPurgeService.logger.log('retention/purge worker started');
   }
 
   onModuleDestroy(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.retentionTimer) clearInterval(this.retentionTimer);
   }
 }

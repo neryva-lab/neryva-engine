@@ -1325,7 +1325,9 @@ export class McpAuthorityService {
         resourceType: 'approval',
         resourceId: approval.id,
         tenantId: input.orgId,
-        details: { run_id: run.id, decision: 'DENIED', actor: input.actor },
+        // Compliance shape parity with the APPROVED branch (P2-COMP-43): a
+        // reviewer must see the quorum requirement on denials too.
+        details: { run_id: run.id, decision: 'DENIED', actor: input.actor, required },
       });
       return {
         approvalId: approval.id,

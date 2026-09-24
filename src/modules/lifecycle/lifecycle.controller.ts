@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { FastifyReply } from 'fastify';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
@@ -8,7 +9,11 @@ import { RetentionPurgeService } from './retention-purge.service';
 import { LifecycleService } from './lifecycle.service';
 
 export class HoldDto {
-  @IsIn(['organization', 'user', 'conversation', 'assistant'])
+  // Only scopes the purge gate can actually match (stepCheckHolds): the whole
+  // organization, or one conversation. user/assistant holds were accepted but
+  // could never block a purge (purge tasks are conversation/artifact scoped),
+  // so they are rejected instead of silently doing nothing (P2-COMP-11).
+  @IsIn(['organization', 'conversation'])
   scope_type!: string;
 
   @IsOptional()
@@ -132,8 +137,17 @@ export class LifecycleController {
   @Get('exports/:exportId/download')
   @Roles('owner', 'admin', 'developer', 'reader', 'billing')
   @UseGuards(OrgRolesGuard)
-  async downloadExport(@Param('orgId') orgId: string, @Param('exportId') exportId: string, @Query('token') token: string, @CurrentPrincipal() principal: L1Principal) {
+  async downloadExport(
+    @Param('orgId') orgId: string,
+    @Param('exportId') exportId: string,
+    @Query('token') token: string,
+    @CurrentPrincipal() principal: L1Principal,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
     const manifest = await this.lifecycle.downloadExport({ orgId, exportId, token: token ?? '', actor: principal.id });
+    // Named download (P2-COMP-12): without a disposition the console saves an
+    // extensionless blob; the manifest is JSON.
+    reply.header('content-disposition', `attachment; filename="neryva-export-${exportId}.json"`);
     return { export: manifest };
   }
 

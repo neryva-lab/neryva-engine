@@ -212,6 +212,10 @@ export class AuditService {
     let checked = 0;
     for (const row of result.rows) {
       const createdAt = canonicalUtcIso(row.created_at);
+      // pg-types keeps jsonb as a raw string on raw `execute` reads — parse it
+      // back before canonicalizing, or the digest double-encodes the payload
+      // and every event fails verification (P1-COMP-1).
+      const details = typeof row.details === 'string' ? (JSON.parse(row.details) as unknown) : row.details;
       const parts = [
         row.prev_hash ?? '',
         row.id,
@@ -221,7 +225,7 @@ export class AuditService {
         row.action,
         row.resource_type,
         row.resource_id ?? '',
-        canonicalJson(row.details),
+        canonicalJson(details),
         createdAt,
       ].join('|');
       const expected = createHash('sha256').update(parts, 'utf8').digest('hex');

@@ -80,6 +80,9 @@ export class OutboxDispatcherWorker implements OnModuleInit, OnModuleDestroy {
     if (channelOutbound) {
       consumers.push(channelOutbound);
     }
+    if (humanLoopNotify) {
+      consumers.push(humanLoopNotify);
+    }
     this.dispatcher = new OutboxDispatcher(db, consumers, {
       batchSize: env.OUTBOX_BATCH_SIZE,
       maxAttempts: env.OUTBOX_MAX_ATTEMPTS,

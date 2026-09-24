@@ -61,7 +61,11 @@ export const assistantPayloadSchema = z.object({
     summary_enabled: z.boolean().optional().default(true),
     knowledge_sources: z.array(z.string()).optional().default([]),
     memory_scope: z
-      .enum(['user', 'organization', 'conversation', 'none'])
+      // A4-23: 'assistant' serves the run's own assistant-scoped rows
+      // (scope_type='assistant', scope_id=assistant id) — the library's
+      // Assistant tab and the builder preview are only truthful once the
+      // run time can actually select them (FL-1.5 branch in mcp-authority).
+      .enum(['user', 'organization', 'conversation', 'assistant', 'none'])
       .optional()
       .default('user'),
   }),

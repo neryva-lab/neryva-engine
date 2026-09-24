@@ -2339,13 +2339,17 @@ export class McpAuthorityService {
         // manifest carries. Undefined keeps the legacy default (organization +
         // conversation rows) for pre-FL-1.5 snapshots; 'none' excludes the
         // surface entirely; 'user' resolves the run actor's account via the
-        // trigger message — user-scoped rows are NEVER visible across accounts.
+        // trigger message — user-scoped rows are NEVER visible across accounts;
+        // 'assistant' (A4-23) resolves this run's assistant via the pinned
+        // snapshot → version — assistant-scoped rows are the agent's own
+        // memory, visible only to its own runs.
         const memoryScopeRaw =
           typeof contextPolicy.memory_scope === 'string' ? contextPolicy.memory_scope : undefined;
         const memoryScope =
           memoryScopeRaw === 'user' ||
           memoryScopeRaw === 'organization' ||
           memoryScopeRaw === 'conversation' ||
+          memoryScopeRaw === 'assistant' ||
           memoryScopeRaw === 'none'
             ? memoryScopeRaw
             : undefined;
@@ -2364,6 +2368,20 @@ export class McpAuthorityService {
             ? triggerAuthor
             : null;
         const userAccountId = memoryScope === 'user' ? runActorAccountId : null;
+
+        // A4-23: the assistant identity behind this run's pinned snapshot.
+        // Resolved snapshot → version → assistant; unresolvable (deleted
+        // version/assistant) yields NO assistant scopes — fail closed, never
+        // a widening to another scope (same posture as the user branch).
+        let runAssistantId: string | null = null;
+        if (memoryScope === 'assistant' && snapshot?.assistantVersionId) {
+          const versionRows = await tx
+            .select({ assistantId: assistantVersions.assistantId })
+            .from(assistantVersions)
+            .where(eq(assistantVersions.id, snapshot.assistantVersionId))
+            .limit(1);
+          runAssistantId = versionRows[0]?.assistantId ?? null;
+        }
 
         // History — bounded by the pinned context policy (contract caps 20).
         const historyLimit = Math.min(Math.max(1, contextPolicy.history_limit ?? 20), 20);
@@ -2431,12 +2449,19 @@ export class McpAuthorityService {
                 ? [{ scopeType: 'conversation' as const, scopeId: run.conversationId }]
                 : memoryScope === 'organization'
                   ? [{ scopeType: 'organization' as const }]
-                  : // user scope without a resolvable account (service/channel
-                    // trigger) yields NO scopes — zero user memories, never a
-                    // widening to another scope.
-                    userAccountId !== null
-                    ? [{ scopeType: 'user' as const, scopeId: userAccountId }]
-                    : [];
+                  : memoryScope === 'assistant'
+                    ? // A4-23: assistant scope without a resolvable assistant
+                      // (deleted version/assistant) yields NO scopes — zero
+                      // assistant memories, never a widening to another scope.
+                      runAssistantId !== null
+                      ? [{ scopeType: 'assistant' as const, scopeId: runAssistantId }]
+                      : []
+                    : // user scope without a resolvable account (service/channel
+                      // trigger) yields NO scopes — zero user memories, never a
+                      // widening to another scope.
+                      userAccountId !== null
+                      ? [{ scopeType: 'user' as const, scopeId: userAccountId }]
+                      : [];
           memoryRows = await this.retrieval.searchApprovedMemories({
             orgId: input.orgId,
             query: triggerQuery,

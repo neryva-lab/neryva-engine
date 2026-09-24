@@ -35,6 +35,8 @@ interface UpsertToolDto {
   execution_environment?: unknown;
   allowed_egress_domains?: unknown;
   http_binding?: unknown;
+  /** A4-69: plaintext credential — sealed (enc:v1:) server-side, never returned. */
+  credential?: unknown;
 }
 
 function asString(
@@ -53,6 +55,27 @@ function asString(
     throw ApiError.validation({ [field]: `must be a string of 1..${max} chars` });
   }
   return value;
+}
+
+/**
+ * A4-69 — parse the declared-but-previously-ignored http_binding on PUT.
+ * Returns undefined when absent (service preserves the existing binding on
+ * upsert); throws a validation error on a malformed binding instead of
+ * silently dropping it. URL validity + egress coverage are enforced by
+ * normalizeToolPerimeter in the service.
+ */
+function parseHttpBinding(value: unknown): { url: string } | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw ApiError.validation({ http_binding: 'must be an object with a url' });
+  }
+  const url = (value as { url?: unknown }).url;
+  if (typeof url !== 'string' || !/^https:\/\//.test(url)) {
+    throw ApiError.validation({ http_binding: 'url must be a valid https URL' });
+  }
+  return { url };
 }
 
 @Controller('console/org/:orgId/tools')
@@ -114,6 +137,17 @@ export class ToolCatalogController {
           : undefined,
       executionEnvironment,
       allowedEgressDomains,
+      // A4-69 — the DTO declares http_binding but the old handler silently
+      // dropped it (and credential): every custom tool landed as
+      // external_gateway with no endpoint, permanently uninvokable. Honor
+      // both; normalizeToolPerimeter validates the binding (https URL,
+      // egress covers the binding host) and the service seals the credential.
+      // Absent = preserved on upsert (service spreads only when present).
+      httpBinding: parseHttpBinding(dto.http_binding),
+      credential:
+        typeof dto.credential === 'string' && dto.credential.length > 0
+          ? dto.credential
+          : undefined,
       actor: principal.id,
     };
     const row = await this.catalog.upsert(input);

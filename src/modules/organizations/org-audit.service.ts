@@ -132,7 +132,7 @@ export class OrgAuditService {
   /** Distinct values for the filter dropdowns (bounded, cached by the caller's HTTP layer). Actions ordered by frequency so the most useful chips surface first. */
   async filterFacets(orgId: string): Promise<{ actions: string[]; resourceTypes: string[] }> {
     const actions = await this.db.root.execute<{ action: string }>(sql`
-      select action from audit_events where tenant_id = ${orgId} group by action order by count(*) desc limit 500
+      select action from audit_events where tenant_id = ${orgId} group by action order by count(*) desc, action asc limit 500
     `);
     const resourceTypes = await this.db.root.execute<{ resource_type: string }>(sql`
       select distinct resource_type from audit_events where tenant_id = ${orgId} order by resource_type limit 200

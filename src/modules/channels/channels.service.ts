@@ -11,6 +11,28 @@ import { TemplatesService as AssistantTemplatesService } from '../assistants/tem
 import { assistants } from '../assistants/schema';
 import { channelAccounts, channelSessions, ChannelAccount, ChannelConfig, CHANNEL_PLATFORMS } from './schema';
 import { assertAllowedDomainFormat, assertCredentialsShape, isUuid, META_GRAPH_VERSION, NK_KEY_PREFIX } from './dto';
+import { pgViolation } from '../../common/infra/db/pg-types';
+
+/**
+ * The DB never returns raw 23505s — an (org, platform, display_name)
+ * collision is a client conflict the console can explain.
+ */
+function mapAccountUniqueViolation(err: unknown): never {
+  if (pgViolation(err).code === '23505') {
+    throw ApiError.conflict('a channel with this name already exists for this platform');
+  }
+  throw err as Error;
+}
+
+/**
+ * P5-C6: the dto assertion helpers (assertCredentialsShape,
+ * assertAllowedDomainFormat) throw plain Errors, which Fastify renders as
+ * HTTP 500. Customer input problems must be 400s the console can explain.
+ */
+export function mapInputValidation(err: unknown): never {
+  if (err instanceof ApiError) throw err;
+  throw ApiError.validation({ input: (err as Error).message });
+}
 
 /**
  * Channel accounts — the console CRUD surface for the channel plane (Phase C1).
@@ -38,7 +60,11 @@ export class ChannelsService {
     if (!(CHANNEL_PLATFORMS as readonly string[]).includes(input.platform)) {
       throw ApiError.validation({ platform: `must be one of ${CHANNEL_PLATFORMS.join(', ')}` });
     }
-    assertCredentialsShape(input.platform, input.credentials);
+    try {
+      assertCredentialsShape(input.platform, input.credentials);
+    } catch (err) {
+      mapInputValidation(err);
+    }
     const config = this.sanitizeConfig(input.platform, input.config);
     if (!config.default_assistant_id || !isUuid(config.default_assistant_id)) {
       throw ApiError.validation({ config: 'default_assistant_id is required — channel conversations pin the account assistant' });
@@ -56,7 +82,9 @@ export class ChannelsService {
 
     const sealed = this.sealCredentials(input.platform, input.credentials);
     const accountId = uuidv7();
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
+    let row: ChannelAccount;
+    try {
+      row = await this.db.withOrg(input.orgId, async (tx) => {
       const countRows = await tx
         .select({ n: sql<number>`count(*)::int` })
         .from(channelAccounts)
@@ -82,7 +110,10 @@ export class ChannelsService {
         })
         .returning();
       return rows[0];
-    });
+      });
+    } catch (err) {
+      mapAccountUniqueViolation(err);
+    }
     await this.audit.add({
       action: 'channel.account_created',
       resourceType: 'channel_account',
@@ -132,18 +163,23 @@ export class ChannelsService {
     if (config?.config.default_assistant_id) {
       await this.assertAssistantRoutable(input.orgId, config.platform, config.config.default_assistant_id);
     }
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(channelAccounts)
-        .set({
-          ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-          ...(input.status !== undefined ? { status: input.status } : {}),
-          ...(config !== undefined ? { config: config as never } : {}),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(eq(channelAccounts.id, input.accountId), eq(channelAccounts.organizationId, input.orgId)))
-        .returning(),
-    );
+    let rows: ChannelAccount[];
+    try {
+      rows = await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .update(channelAccounts)
+          .set({
+            ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+            ...(input.status !== undefined ? { status: input.status } : {}),
+            ...(config !== undefined ? { config: config as never } : {}),
+            updatedAt: new Date().toISOString(),
+          })
+          .where(and(eq(channelAccounts.id, input.accountId), eq(channelAccounts.organizationId, input.orgId)))
+          .returning(),
+      );
+    } catch (err) {
+      mapAccountUniqueViolation(err);
+    }
     if (rows.length === 0) {
       throw ApiError.notFound('channel account');
     }
@@ -198,7 +234,11 @@ export class ChannelsService {
     if (!account) {
       throw ApiError.notFound('channel account');
     }
-    assertCredentialsShape(account.platform, input.credentials);
+    try {
+      assertCredentialsShape(account.platform, input.credentials);
+    } catch (err) {
+      mapInputValidation(err);
+    }
     const sealed = this.sealCredentials(account.platform, input.credentials);
     // New Meta verify token on rotation — the old one dies with the secret.
     const verifyToken = account.platform === 'whatsapp' || account.platform === 'messenger' ? randomToken(18) : null;
@@ -426,7 +466,11 @@ export class ChannelsService {
     }
     if (platform === 'web') {
       out.allowed_domains = (c.allowed_domains ?? []).map((d) => {
-        assertAllowedDomainFormat(String(d));
+        try {
+          assertAllowedDomainFormat(String(d));
+        } catch (err) {
+          mapInputValidation(err);
+        }
         return String(d).replace(/\/$/, '').toLowerCase();
       });
       if (!out.allowed_domains || out.allowed_domains.length === 0) {

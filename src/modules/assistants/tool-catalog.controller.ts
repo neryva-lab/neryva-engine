@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
@@ -6,6 +6,21 @@ import { Idempotent } from '../../common/http/idempotency';
 import { ApiError } from '../../common/http/api-error';
 import { ToolCatalogService, TOOL_TEMPLATES, UpsertToolInput } from './tool-catalog.service';
 import { TOOL_APPROVAL_REQUIREMENTS, TOOL_EFFECT_CLASSES } from './tool-catalog.schema';
+import type { ToolCatalogEntry } from './tool-catalog.schema';
+
+/**
+ * A4-63 — the HTTP boundary never returns sealed per-tool credentials.
+ * `credentialSealed` is envelope-encrypted at rest and is only ever read
+ * server-side (tool-gateway credential resolution); catalog read paths
+ * strip it so the sealed blob never transits to browsers, for any role.
+ */
+type PublicToolCatalogEntry = Omit<ToolCatalogEntry, 'credentialSealed'>;
+
+function toPublicTool(row: ToolCatalogEntry): PublicToolCatalogEntry {
+  const { credentialSealed: _credentialSealed, ...publicRow } = row;
+  void _credentialSealed;
+  return publicRow;
+}
 
 interface UpsertToolDto {
   name?: unknown;
@@ -102,15 +117,22 @@ export class ToolCatalogController {
       actor: principal.id,
     };
     const row = await this.catalog.upsert(input);
-    return { tool: row };
+    return { tool: toPublicTool(row) };
   }
 
   @Get()
   @Roles('owner', 'admin', 'developer', 'reader', 'billing')
   @UseGuards(OrgRolesGuard)
-  async list(@Param('orgId') orgId: string) {
-    const tools = await this.catalog.list(orgId);
-    return { tools };
+  async list(
+    @Param('orgId') orgId: string,
+    @Query('include_disabled') includeDisabled?: string,
+  ) {
+    // A4-64 — the console needs to surface disabled rows (re-enable path);
+    // default stays enabled-only so existing readers see no behavior change.
+    const tools = await this.catalog.list(orgId, {
+      includeDisabled: includeDisabled === 'true',
+    });
+    return { tools: tools.map(toPublicTool) };
   }
 
   // ── FL-3.11 — pre-built tool template directory ──────────────────────────
@@ -179,7 +201,7 @@ export class ToolCatalogController {
       allowedEgressDomains: templateEgress,
       actor: principal.id,
     });
-    return { tool: row };
+    return { tool: toPublicTool(row) };
   }
 
   @Get(':name')
@@ -190,7 +212,7 @@ export class ToolCatalogController {
     if (!tool) {
       throw ApiError.notFound('tool');
     }
-    return { tool };
+    return { tool: toPublicTool(tool) };
   }
 
   @Patch(':name/enabled')
@@ -212,6 +234,6 @@ export class ToolCatalogController {
       enabled: dto.enabled,
       actor: principal.id,
     });
-    return { tool: row };
+    return { tool: toPublicTool(row) };
   }
 }

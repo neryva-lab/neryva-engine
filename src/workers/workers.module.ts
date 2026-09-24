@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { OutboxDispatcherWorker } from './outbox-dispatcher.worker';
 import { ApprovalExpirySweepWorker } from './approval-expiry-sweep.worker';
+import { WebhookDeliverySweepWorker } from './webhook-delivery-sweep.worker';
 import { RunDispatchConsumer } from './run-dispatch.consumer';
 import { TemplateProvisioningConsumer } from './template-provisioning.consumer';
 import { RunCancelConsumer } from './run-cancel.consumer';
@@ -81,6 +82,13 @@ import { AssistantsModule } from '../modules/assistants/assistants.module';
       : []),
     OutboxDispatcherWorker,
     AcceptedRunSweepWorker,
+    // Webhook-delivery sweep (P5-W13): re-queues stranded delivery rows so
+    // every durable side effect keeps a reconciliation path. Needs the
+    // webhooks module (WebhooksService) and the dispatcher-adjacent worker
+    // host to be enabled.
+    ...(ModuleFlags.webhooks && env.WORKERS__OUTBOX_ENABLED && env.WORKERS__WEBHOOK_SWEEP_ENABLED
+      ? [WebhookDeliverySweepWorker]
+      : []),
     // Run watchdog resolves conversations (accept/retry bookkeeping).
     ...(ModuleFlags.conversations ? [RunWatchdogWorker] : []),
     // P5: drift needs EvalService (knowledge) + notification fan-out; the

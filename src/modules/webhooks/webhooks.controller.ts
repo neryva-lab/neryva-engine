@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
@@ -12,6 +12,18 @@ import { WebhooksService, webhookEventCatalog } from './webhooks.service';
  * "webhooks" page — org furniture, any product's customers can use it):
  * L1 + membership; manage roles create/update/delete, all roles view.
  */
+/** Parse an optional int query param; falls back to `fallback` on garbage. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
 @Controller('console/org/:orgId/webhooks')
 @AuthLayer('l1')
 @UseGuards(OrgRolesGuard)
@@ -67,6 +79,7 @@ export class WebhooksController {
 
   @Post(':webhookId/rotate-secret')
   @Roles('owner', 'admin', 'developer')
+  @RateLimit({ name: 'webhook-rotate', capacity: 10, refillPerSecond: 0.05, scope: 'principal' })
   async rotateSecret(@Param('orgId') orgId: string, @Param('webhookId') webhookId: string, @CurrentPrincipal() principal: L1Principal) {
     return this.webhooks.rotateSecret({ orgId, webhookId, actorId: principal.id }); // secret shown exactly once
   }
@@ -80,7 +93,19 @@ export class WebhooksController {
 
   @Get(':webhookId/deliveries')
   @Roles('owner', 'admin', 'billing', 'developer', 'reader')
-  async deliveries(@Param('orgId') orgId: string, @Param('webhookId') webhookId: string) {
-    return { deliveries: await this.webhooks.deliveries(orgId, webhookId) };
+  async deliveries(
+    @Param('orgId') orgId: string,
+    @Param('webhookId') webhookId: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return {
+      deliveries: await this.webhooks.deliveries(
+        orgId,
+        webhookId,
+        boundedInt(limit, 50, 1, 200),
+        boundedInt(offset, 0, 0, 100_000),
+      ),
+    };
   }
 }

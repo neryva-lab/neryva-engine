@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import { DbService } from '../../common/infra/db/db.service';
@@ -8,7 +8,7 @@ import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { QueueService } from '../../common/infra/queue.service';
 import { envelopeDecrypt, envelopeEncrypt, randomToken } from '../../common/infra/crypto/envelope';
 import { webhooks, webhookDeliveries, WebhookRow } from './schema';
-import { checkWebhookUrl } from './webhook-url.guard';
+import { checkWebhookUrl, recheckWebhookTarget } from './webhook-url.guard';
 
 /**
  * The webhook dispatch service (gap P-1): org-owned endpoints receive
@@ -109,9 +109,19 @@ export class WebhooksService implements OnModuleInit {
     return { webhook: this.redact(inserted[0]), secret }; // shown exactly once
   }
 
-  async list(orgId: string): Promise<WebhookRow[]> {
+  async list(orgId: string): Promise<Array<WebhookRow & { secretHint: string | null }>> {
     const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(webhooks).where(eq(webhooks.orgId, orgId)).orderBy(desc(webhooks.createdAt)));
-    return rows.map((row) => this.redact(row));
+    return rows.map((row) => ({ ...this.redact(row), secretHint: this.secretHint(row.secretEnvelope) }));
+  }
+
+  /** Last-4 hint of the signing secret for the console's secret-hint slot (P5-W6). Never the secret itself. */
+  private secretHint(secretEnvelope: string): string | null {
+    try {
+      const secret = envelopeDecrypt(secretEnvelope);
+      return secret.length >= 4 ? `…${secret.slice(-4)}` : null;
+    } catch {
+      return null;
+    }
   }
 
   async update(input: { orgId: string; webhookId: string; url?: string; events?: string[]; description?: string; status?: 'active' | 'disabled'; actorId: string }): Promise<WebhookRow> {
@@ -161,7 +171,7 @@ export class WebhooksService implements OnModuleInit {
     });
   }
 
-  async deliveries(orgId: string, webhookId: string, limit = 50): Promise<Array<typeof webhookDeliveries.$inferSelect>> {
+  async deliveries(orgId: string, webhookId: string, limit = 50, offset = 0): Promise<Array<typeof webhookDeliveries.$inferSelect>> {
     await this.require(orgId, webhookId);
     return this.db.withOrg(orgId, (tx) =>
       tx
@@ -169,8 +179,56 @@ export class WebhooksService implements OnModuleInit {
         .from(webhookDeliveries)
         .where(and(eq(webhookDeliveries.orgId, orgId), eq(webhookDeliveries.webhookId, webhookId)))
         .orderBy(desc(webhookDeliveries.createdAt))
-        .limit(Math.min(limit, 200)),
+        .limit(Math.min(Math.max(limit, 1), 200))
+        .offset(Math.max(offset, 0)),
     );
+  }
+
+  /**
+   * Stranded-delivery sweep (P5-W13): re-enqueue delivery rows the live path
+   * lost — `pending` rows older than 5 minutes that were never picked up
+   * (insert succeeded, enqueue failed/died), and `failed` rows whose
+   * `nextAttemptAt` is past but which still have attempts left (the retry
+   * enqueue never landed). Claims with FOR UPDATE SKIP LOCKED so concurrent
+   * sweeps/workers never double-claim; the deterministic jobId makes even a
+   * raced re-enqueue a no-op instead of a double delivery.
+   */
+  async sweepStrandedDeliveries(batchSize: number): Promise<number> {
+    const claimed = await this.db.withBypass((tx) =>
+      // Justification (withBypass): the sweep drains cross-org rows by id —
+      // the reconciliation is org-scoped per row by the delivery's own org_id.
+      tx.execute<{
+        id: string;
+        attempts: number;
+      }>(sql`
+        update webhook_deliveries
+        set updated_at = now()
+        where id in (
+          select id from webhook_deliveries
+          where (
+            (status = 'pending' and created_at < now() - interval '5 minutes')
+            or (status = 'failed' and next_attempt_at is not null and next_attempt_at <= now() and attempts < ${MAX_ATTEMPTS})
+          )
+          order by created_at
+          limit ${batchSize}
+          for update skip locked
+        )
+        returning id, attempts
+      `),
+    );
+    let requeued = 0;
+    for (const row of claimed.rows) {
+      try {
+        await this.enqueueDelivery(row.id, row.attempts);
+        requeued += 1;
+      } catch (err) {
+        WebhooksService.logger.warn(`delivery sweep re-enqueue failed for ${row.id}: ${(err as Error).message}`);
+      }
+    }
+    if (requeued > 0) {
+      WebhooksService.logger.log(`webhook delivery sweep re-queued ${requeued} stranded delivery(ies)`);
+    }
+    return requeued;
   }
 
   /** Rotate the signing secret (old one dies immediately). Returned once. */
@@ -191,16 +249,27 @@ export class WebhooksService implements OnModuleInit {
     return { secret };
   }
 
-  /** Send a test event (validates the endpoint end-to-end). */
+  /** Send a test event (validates the endpoint end-to-end). A targeted test
+   *  always reaches its webhook — the subscription check is bypassed, because
+   *  the point of "test" is to verify the destination, not the filter. */
   async sendTest(input: { orgId: string; webhookId: string; actorId: string }): Promise<{ deliveryId: string }> {
     await this.require(input.orgId, input.webhookId);
-    return this.dispatch(input.orgId, 'webhook.test', { org_id: input.orgId, test: true, at: new Date().toISOString() }, input.webhookId);
+    return this.dispatch(input.orgId, 'webhook.test', { org_id: input.orgId, test: true, at: new Date().toISOString() }, input.webhookId, true);
   }
 
   // ── dispatch + delivery ────────────────────────────────────────────────────
 
-  /** Fan an event out to the org's subscribed, active webhooks. */
-  async dispatch(orgId: string, eventType: string, payload: Record<string, unknown>, onlyWebhookId?: string): Promise<{ deliveryId: string }> {
+  /**
+   * Fan an event out to the org's subscribed, active webhooks.
+   *
+   * The delivery-row insert and the BullMQ enqueue are two separate durable
+   * steps (no distributed transaction): if the enqueue throws, the row is
+   * parked as `failed` with an imminent `nextAttemptAt` so the stranded-
+   * delivery sweep picks it up instead of leaving it `pending` forever.
+   * Enqueues carry a deterministic jobId (`webhook-deliver:<id>:<attempts>`)
+   * so a sweep re-enqueue can never double-deliver against the live path.
+   */
+  async dispatch(orgId: string, eventType: string, payload: Record<string, unknown>, onlyWebhookId?: string, ignoreSubscription = false): Promise<{ deliveryId: string }> {
     let lastId = '';
     const targets = await this.db.withOrg(orgId, (tx) =>
       tx.select().from(webhooks).where(and(eq(webhooks.orgId, orgId), eq(webhooks.status, 'active'))),
@@ -209,7 +278,7 @@ export class WebhooksService implements OnModuleInit {
       if (onlyWebhookId && target.id !== onlyWebhookId) {
         continue;
       }
-      const subscribed = (target.events as string[]).includes('*') || (target.events as string[]).includes(eventType);
+      const subscribed = ignoreSubscription || (target.events as string[]).includes('*') || (target.events as string[]).includes(eventType);
       if (!subscribed) {
         continue;
       }
@@ -223,13 +292,32 @@ export class WebhooksService implements OnModuleInit {
         }).returning({ id: webhookDeliveries.id }),
       );
       lastId = inserted[0].id;
-      await this.queues.queue('webhooks').add('webhook.deliver', { deliveryId: inserted[0].id }, {
-        attempts: 1, // retries are managed by the service (backoff table), not BullMQ
-        removeOnComplete: { age: 7 * 86_400 },
-        removeOnFail: { age: 30 * 86_400 },
-      });
+      try {
+        await this.enqueueDelivery(inserted[0].id, 0);
+      } catch (err) {
+        // The row exists but no job was queued — park it for the sweep
+        // instead of stranding it as `pending` forever (P5-W13).
+        WebhooksService.logger.warn(`webhook enqueue failed for delivery ${inserted[0].id}: ${(err as Error).message}`);
+        await this.db.withOrg(orgId, (tx) =>
+          tx
+            .update(webhookDeliveries)
+            .set({ status: 'failed', attempts: 0, lastError: `enqueue failed: ${(err as Error).message}`.slice(0, 512), nextAttemptAt: new Date(Date.now() + 60_000).toISOString(), updatedAt: new Date().toISOString() })
+            .where(eq(webhookDeliveries.id, inserted[0].id)),
+        );
+      }
     }
     return { deliveryId: lastId };
+  }
+
+  /** Enqueue one delivery attempt with a deterministic jobId for dedup. */
+  private async enqueueDelivery(deliveryId: string, attempts: number, delayMs = 0): Promise<void> {
+    await this.queues.queue('webhooks').add('webhook.deliver', { deliveryId }, {
+      attempts: 1, // retries are managed by the service (backoff table), not BullMQ
+      delay: delayMs,
+      jobId: `webhook-deliver:${deliveryId}:${attempts}`,
+      removeOnComplete: { age: 7 * 86_400 },
+      removeOnFail: { age: 30 * 86_400 },
+    });
   }
 
   /** One delivery attempt; reschedules itself via the backoff table. */
@@ -250,9 +338,27 @@ export class WebhooksService implements OnModuleInit {
       return 'dead';
     }
 
+    // Delivery-time SSRF re-check (P5-W7): the host is re-resolved fresh on
+    // every attempt, so DNS drift/rebinding after the create-time check
+    // cannot smuggle a blocked target past the guard.
+    const recheck = await recheckWebhookTarget(hook.url);
+    if (!recheck.ok) {
+      await this.finishDelivery(delivery.orgId, delivery.id, { status: 'dead', lastError: `delivery-time target check failed: ${recheck.reason ?? 'blocked'}` });
+      return 'dead';
+    }
+
+    let secret: string;
+    try {
+      secret = envelopeDecrypt(hook.secretEnvelope);
+    } catch (err) {
+      // The secret can never be recovered — retrying is pointless.
+      await this.finishDelivery(delivery.orgId, delivery.id, { status: 'dead', lastError: `signing secret unreadable: ${(err as Error).message}`.slice(0, 512) });
+      return 'dead';
+    }
+
     const body = JSON.stringify(delivery.payload);
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = createHmac('sha256', envelopeDecrypt(hook.secretEnvelope)).update(`${timestamp}.${body}`).digest('hex');
+    const signature = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
 
     try {
       const response = await fetch(hook.url, {
@@ -293,7 +399,7 @@ export class WebhooksService implements OnModuleInit {
         .set({ status: 'failed', attempts, lastError: error, nextAttemptAt, updatedAt: new Date().toISOString() })
         .where(eq(webhookDeliveries.id, deliveryId)),
     );
-    await this.queues.queue('webhooks').add('webhook.deliver', { deliveryId }, { delay, attempts: 1, removeOnComplete: { age: 7 * 86_400 }, removeOnFail: { age: 30 * 86_400 } });
+    await this.enqueueDelivery(deliveryId, attempts, delay);
     return 'retry_scheduled';
   }
 

@@ -8,11 +8,14 @@ import { isProduction } from '../../common/config/env';
  * a tenant points a webhook at the platform's own internals — metadata
  * services, localhost admin ports, private ranges).
  *
- * Validation at CREATE/UPDATE time (and re-checked at delivery for DNS
- * drift): protocol must be https in production (http allowed in dev for
- * local testing), the host must RESOLVE to public addresses only — every
- * A/AAAA record is checked against the blocked ranges. Lookups are cached
- * (60s positive / 10s negative) so the delivery hot path stays cheap.
+ * Validation runs at CREATE/UPDATE time (cached) and is re-checked at
+ * DELIVERY time (fresh lookup, no cache) so DNS drift / rebinding between
+ * registration and delivery cannot smuggle a blocked target past the
+ * create-time check: protocol must be https in production (http allowed in
+ * dev for local testing), the host must RESOLVE to public addresses only —
+ * every A/AAAA record is checked against the blocked ranges. Create-time
+ * lookups are cached (60s positive / 10s negative) so the delivery hot path
+ * stays cheap; delivery-time re-checks bypass the cache deliberately.
  */
 const logger = new Logger('WebhookUrlGuard');
 
@@ -94,6 +97,20 @@ export interface UrlCheckResult {
 
 /** Parse + protocol + host-resolution check. Async (DNS). */
 export async function checkWebhookUrl(rawUrl: string): Promise<UrlCheckResult> {
+  return checkTarget(rawUrl, true);
+}
+
+/**
+ * Delivery-time re-check: same validation as {@link checkWebhookUrl} but
+ * with a fresh DNS lookup every call (no cache), so a hostname that was
+ * clean at registration cannot drift onto a blocked address before the
+ * POST goes out (DNS rebinding / TOCTOU).
+ */
+export async function recheckWebhookTarget(rawUrl: string): Promise<UrlCheckResult> {
+  return checkTarget(rawUrl, false);
+}
+
+async function checkTarget(rawUrl: string, useCache: boolean): Promise<UrlCheckResult> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -114,25 +131,32 @@ export async function checkWebhookUrl(rawUrl: string): Promise<UrlCheckResult> {
     return ipBlocked(host) ? { ok: false, reason: 'target address is in a blocked range' } : { ok: true };
   }
 
-  const cached = cache.get(host);
-  if (cached) {
-    const ttl = cached.ok ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
-    if (Date.now() - cached.at < ttl) {
-      return cached.ok ? { ok: true } : { ok: false, reason: 'target resolves to a blocked address' };
+  if (useCache) {
+    const cached = cache.get(host);
+    if (cached) {
+      const ttl = cached.ok ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
+      if (Date.now() - cached.at < ttl) {
+        return cached.ok ? { ok: true } : { ok: false, reason: 'target resolves to a blocked address' };
+      }
     }
   }
+  const remember = (ok: boolean): void => {
+    if (useCache) {
+      cache.set(host, { ok, at: Date.now() });
+    }
+  };
   try {
     const records = await lookup(host, { all: true, verbatim: true });
     if (records.length === 0) {
-      cache.set(host, { ok: false, at: Date.now() });
+      remember(false);
       return { ok: false, reason: 'host does not resolve' };
     }
     const blocked = records.some((record) => ipBlocked(record.address));
-    cache.set(host, { ok: !blocked, at: Date.now() });
+    remember(!blocked);
     return blocked ? { ok: false, reason: 'target resolves to a blocked address' } : { ok: true };
   } catch (err) {
     logger.warn(`webhook host lookup failed for ${host}: ${(err as Error).message}`);
-    cache.set(host, { ok: false, at: Date.now() });
+    remember(false);
     return { ok: false, reason: 'host does not resolve' };
   }
 }

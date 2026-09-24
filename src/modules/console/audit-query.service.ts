@@ -1,8 +1,19 @@
-import { and, desc, eq, gte, like, lte, lt } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, lt, sql } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { legacyAuditEvents } from '../../common/infra/db/legacy-schema';
+
+/**
+ * Escape the LIKE wildcards (`%`, `_`) and the escape char itself in a
+ * user-supplied action prefix. The previous implementation *stripped* `%`
+ * and `_`, which made every action containing an underscore
+ * (legal_hold.placed, retention.policy_upserted, mcp.approval_decided,
+ * org.settings_updated, …) unfilterable — the filter silently returned [].
+ */
+export function escapeActionLikePrefix(action: string): string {
+  return action.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
 
 /**
  * The audit query engine (gap O-5/O-6): cursor pagination over the shared
@@ -27,7 +38,8 @@ export class ConsoleAuditQueryService {
       conditions.push(eq(legacyAuditEvents.actor_id, filter.actor));
     }
     if (filter.action) {
-      conditions.push(like(legacyAuditEvents.action, `${filter.action.replace(/[%_]/g, '')}%`));
+      const pattern = `${escapeActionLikePrefix(filter.action)}%`;
+      conditions.push(sql`${legacyAuditEvents.action} like ${pattern} escape '\\'`);
     }
     if (filter.from && Number.isFinite(Date.parse(filter.from))) {
       conditions.push(gte(legacyAuditEvents.created_at, filter.from));

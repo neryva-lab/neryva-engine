@@ -225,7 +225,16 @@ export class TemplatesService {
     rejectUnknownPayloadKeys(template.definition as Record<string, unknown>);
     const validated = validateAssistantPayload(template.definition);
     if (!validated.ok) {
-      throw ApiError.validation({ template: `registry definition failed Engine validation: ${validated.issues}` });
+      // Format the issues as a readable string — interpolating the raw
+      // flattened zod error object would render as "[object Object]".
+      const issues = validated.issues;
+      const detail =
+        typeof issues === 'string'
+          ? issues
+          : Array.isArray(issues)
+            ? issues.map((i) => (typeof i === 'string' ? i : JSON.stringify(i))).join('; ')
+            : JSON.stringify(issues);
+      throw ApiError.validation({ template: `registry definition failed Engine validation: ${detail}` });
     }
     const name = (input.name ?? template.slug).trim();
     if (name.length < 2 || name.length > 128) {
@@ -233,7 +242,7 @@ export class TemplatesService {
     }
     const hash = canonicalHash(validated.normalized);
 
-    // TPL-2.2 gate: unknown/disabled tool pins fail HERE with 422, before any
+    // TPL-2.2 gate: unknown/disabled tool pins fail HERE with 400, before any
     // version row exists. Provisioning (TPL-2.3) re-verifies the same truth
     // durably — catalog drift between install and provisioning retries via
     // the outbox instead of corrupting identity.
@@ -344,7 +353,14 @@ export class TemplatesService {
   private async listTemplates(): Promise<AssistantTemplate[]> {
     // Global table (no RLS): platform-plane read via db.root — no tenant
     // context is set, and the predicate-free select is the documented posture.
-    return this.db.root.select().from(assistantTemplates).orderBy(assistantTemplates.slug, desc(assistantTemplates.version)).limit(TemplatesService.LIST_CAP);
+    const templates = await this.db.root.select().from(assistantTemplates).orderBy(assistantTemplates.slug, desc(assistantTemplates.version)).limit(TemplatesService.LIST_CAP);
+    // Customer-visible templates only. The registry mirror is seeded by the
+    // release job; rows with family='test' are internal test fixtures that
+    // leaked in via direct inserts (bypassing the release job) and must
+    // never be shown to customers. The family column is the authoritative
+    // discriminator — not slug heuristics, which could hide legitimate
+    // templates that happen to contain "test" or similar substrings.
+    return templates.filter((t) => t.family !== 'test');
   }
 
   private async listInstalls(orgId: string): Promise<AssistantInstall[]> {

@@ -72,10 +72,17 @@ export class ConsoleAuditQueryService {
     };
   }
 
-  /** Compliance export: NDJSON lines (the controller sets the download headers). */
+  /** Compliance export: NDJSON lines (the controller sets the download headers). Paginates the full trail. */
   async export(orgId: string, filter: { actor?: string; action?: string; from?: string; to?: string } = {}): Promise<string> {
-    const { events } = await this.query(orgId, { ...filter, limit: 200 });
-    return events.map((e) => JSON.stringify(e)).join('\n');
+    const lines: string[] = [];
+    let before: string | undefined;
+    for (;;) {
+      const { events, nextCursor } = await this.query(orgId, { ...filter, limit: 200, ...(before ? { before } : {}) });
+      for (const e of events) lines.push(JSON.stringify(e));
+      if (!nextCursor) break;
+      before = nextCursor;
+    }
+    return lines.join('\n');
   }
 
   /** Chain verification view for compliance (the shared chain verifies globally). */

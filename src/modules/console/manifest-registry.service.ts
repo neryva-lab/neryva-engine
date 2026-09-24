@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { parse } from 'yaml';
 import { manifestSchema, ProductManifest } from './manifest.schema';
+import { ApiError } from '../../common/http/api-error';
 
 /** Override token for tests/tools; production uses the default directory. */
 export const MANIFESTS_DIR = 'MANIFESTS_DIR';
@@ -69,7 +70,7 @@ export class ManifestRegistryService implements OnModuleInit {
   require(key: string): ProductManifest {
     const manifest = this.manifests.get(key);
     if (!manifest) {
-      throw new Error(`unknown product key: ${key}`);
+      throw ApiError.notFound(`product '${key}'`);
     }
     return manifest;
   }

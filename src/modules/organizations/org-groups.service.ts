@@ -3,6 +3,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
+import { pgViolation } from '../../common/infra/db/pg-types';
 import { accounts } from '../identity/schema';
 import { MembershipsService } from './memberships.service';
 import { orgGroupMembers, orgGroups, orgMemberships } from './schema';
@@ -111,13 +112,24 @@ export class OrgGroupsService {
     if (input.description !== undefined) {
       updates.description = input.description?.slice(0, 512) ?? null;
     }
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgGroups)
-        .set(updates as never)
-        .where(and(eq(orgGroups.id, input.groupId), eq(orgGroups.orgId, input.orgId)))
-        .returning({ id: orgGroups.id }),
-    );
+    let updated: { id: string }[];
+    try {
+      updated = await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .update(orgGroups)
+          .set(updates as never)
+          .where(and(eq(orgGroups.id, input.groupId), eq(orgGroups.orgId, input.orgId)))
+          .returning({ id: orgGroups.id }),
+      );
+    } catch (err) {
+      // A rename onto an existing group name trips the (org_id, name) unique
+      // index — translate it to the same stable 409 the create path returns
+      // instead of leaking a raw 23505 as a 500.
+      if (pgViolation(err).code === '23505') {
+        throw ApiError.conflict('a group with that name exists in this organization');
+      }
+      throw err;
+    }
     if (!updated[0]) {
       throw ApiError.conflict('a group with that name exists in this organization');
     }

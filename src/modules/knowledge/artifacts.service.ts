@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
@@ -7,7 +7,7 @@ import { StorageService } from '../../common/infra/storage/storage.service';
 import { ApiError } from '../../common/http/api-error';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { env } from '../../common/config/env';
-import { artifacts, documents, uploadSessions, Artifact, UploadSession } from './schema';
+import { artifacts, chunks, documents, documentVersions, uploadSessions, Artifact, UploadSession } from './schema';
 import { ARTIFACT_PURPOSES } from './schema';
 import { normalizeSourceSlug } from './source-slug';
 
@@ -287,6 +287,109 @@ export class ArtifactsService {
       tenantId: input.orgId,
       details: { to: slug },
     });
+  }
+
+  /**
+   * A4-01 — document preview: the stored text the row's pin resolves to.
+   * Latest-version chunks in sequence order, windowed (server caps the
+   * window and reports the truncation so the UI never implies the whole
+   * text is shown). Same read roles as the documents list and the search
+   * workbench, which already return chunk text.
+   */
+  async getDocumentPreview(input: { orgId: string; documentId: string; chunkLimit?: number }): Promise<{
+    document: { id: string; source_slug: string; title: string | null; state: string; latest_version: number | null };
+    total_chunks: number;
+    truncated: boolean;
+    chunks: Array<{ sequence: number; text: string; source_range: unknown }>;
+  }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.documentId, 'documentId');
+    const chunkLimit = Math.min(Math.max(1, input.chunkLimit ?? 10), 50);
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const docs = await tx
+        .select({ id: documents.id, sourceSlug: documents.sourceSlug, title: documents.title, state: documents.state })
+        .from(documents)
+        .where(and(eq(documents.id, input.documentId), eq(documents.organizationId, input.orgId)))
+        .limit(1);
+      const doc = docs[0];
+      if (!doc) {
+        throw ApiError.notFound('document');
+      }
+      const versions = await tx
+        .select({ id: documentVersions.id, version: documentVersions.version })
+        .from(documentVersions)
+        .where(and(eq(documentVersions.documentId, doc.id), eq(documentVersions.organizationId, input.orgId)))
+        .orderBy(desc(documentVersions.version))
+        .limit(1);
+      const version = versions[0] ?? null;
+      let totalChunks = 0;
+      let rows: Array<{ sequence: number; text: string; sourceRange: unknown }> = [];
+      if (version) {
+        const counted = await tx.execute(
+          sql`select count(*)::int as n from chunks where document_version_id = ${version.id}::uuid and organization_id = ${input.orgId}::uuid`,
+        );
+        totalChunks = Number((counted.rows[0] as { n: number } | undefined)?.n ?? 0);
+        rows = await tx
+          .select({ sequence: chunks.sequence, text: chunks.text, sourceRange: chunks.sourceRange })
+          .from(chunks)
+          .where(and(eq(chunks.documentVersionId, version.id), eq(chunks.organizationId, input.orgId)))
+          .orderBy(asc(chunks.sequence))
+          .limit(chunkLimit);
+      }
+      return {
+        document: {
+          id: doc.id,
+          source_slug: doc.sourceSlug,
+          title: doc.title,
+          state: doc.state,
+          latest_version: version?.version ?? null,
+        },
+        total_chunks: totalChunks,
+        truncated: totalChunks > rows.length,
+        chunks: rows.map((r) => ({ sequence: r.sequence, text: r.text, source_range: r.sourceRange })),
+      };
+    });
+  }
+
+  /**
+   * A4-05 — console removal is a tombstone (state='retired'), the same
+   * terminal state connector deletions use: unreachable by retrieval
+   * (retrieval constrains documents to state='ready'), the mapping kept so
+   * history and existing pins stay answerable. Audited like the rename path.
+   */
+  async retireDocument(input: { orgId: string; documentId: string; actor: string }): Promise<void> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.documentId, 'documentId');
+    const changed = await this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .select({ id: documents.id, state: documents.state })
+        .from(documents)
+        .where(and(eq(documents.id, input.documentId), eq(documents.organizationId, input.orgId)))
+        .limit(1);
+      const doc = rows[0];
+      if (!doc) {
+        throw ApiError.notFound('document');
+      }
+      if (doc.state === 'retired') {
+        return false;
+      }
+      await tx
+        .update(documents)
+        .set({ state: 'retired', updatedAt: new Date().toISOString() })
+        .where(eq(documents.id, input.documentId));
+      return true;
+    });
+    if (changed) {
+      await this.audit.add({
+        action: 'document.retired',
+        resourceType: 'document',
+        resourceId: input.documentId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: {},
+      });
+    }
   }
 
   // ── Claim-check facade (7 checks — ledger 4.11/5.12) ────────────────────

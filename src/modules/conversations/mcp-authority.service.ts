@@ -2182,6 +2182,8 @@ export class McpAuthorityService {
   async getAuthorizedRunContext(input: { orgId: string; runId: string }): Promise<{
     assistantVersionId: string;
     policyVersion: string;
+    /** A4-82: the run actor's account id (null for service/channel triggers). Lets the runtime worker match user-scoped memories without guessing. */
+    runUserId: string | null;
     conversationSummary: string;
     recentMessages: Array<{ messageId: string; role: string; text: string }>;
     memories: Array<{
@@ -2600,6 +2602,7 @@ export class McpAuthorityService {
         return {
           assistantVersionId: run.assistantVersionId,
           policyVersion: run.policySnapshotId,
+          runUserId: runActorAccountId,
           conversationSummary: summaryText,
           recentMessages: orderedRecent.map((m) => {
             // FL-1.6 — pinned MESSAGE_ATTACHMENT claim-check refs; the runtime

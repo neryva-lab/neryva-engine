@@ -314,6 +314,7 @@ export class KeysService {
       revoked: key.revoked,
       expires_at: key.expires_at,
       days_to_expiry: daysToExpiry,
+      created_at: key.created_at,
       usage_count: key.usage_count,
       last_used_at: key.last_used_at,
       project_binding: bindingRows[0] ? { project_id: bindingRows[0].projectId } : null,

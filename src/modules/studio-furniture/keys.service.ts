@@ -11,9 +11,9 @@ import { studioProjectKeys } from './schema';
  * Project-scoped key management (S-4). Read path: org keys from the shared
  * Python-owned api_keys (explicit tenant filter — the table has no RLS),
  * joined with the engine-owned bindings. Write path: bindings only — key
- * creation/rotation stays runtime-side until handover A-1 flips write
- * authority; the engine records WHICH PROJECT a key belongs to, which is
- * the fact the engine owns and the runtime doesn't.
+ * creation/rotation since handover A-1 flipped write authority — the engine
+ * records WHICH PROJECT a key belongs to, which is the fact the engine owns
+ * and the runtime doesn't.
  *
  * Bound keys must not be revoked: a binding to a dead key is a lie about
  * spend attribution, so the list view filters them and re-binding a revoked

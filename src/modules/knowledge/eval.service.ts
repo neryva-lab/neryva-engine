@@ -20,6 +20,7 @@ import { BUILT_IN_TOOLS } from '../assistants/tool-catalog.service';
 import { validateAssistantPayload } from '../assistants/validation';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { RetrievalService } from './retrieval.service';
+import { parseCsv, toCsv } from './csv';
 
 /**
  * Eval harness (FL-2.21) — Engine is the system of record for datasets,
@@ -30,6 +31,10 @@ import { RetrievalService } from './retrieval.service';
 
 export const evalCaseSchema = z.object({
   input: z.object({ text: z.string().min(1).max(8192) }).strict(),
+  // A4-45 — `expected` defaults to {}: a text-only case (no assertions) is a
+  // valid case. The console's case builder omits `expected` when no assertion
+  // field is filled, and the evaluator already treats empty assertions as a
+  // vacuous pass.
   expected: z
     .object({
       contains: z.array(z.string().max(256)).max(20).optional(),
@@ -38,14 +43,17 @@ export const evalCaseSchema = z.object({
       /** FL-3.8 — expected document ids for retrieval recall@k evaluation. */
       document_ids: z.array(z.string().uuid()).max(20).optional(),
     })
-    .strict(),
+    .strict()
+    .default({}),
+  // Export writes `rubric: null` for rubric-less cases; nullish keeps the
+  // export → import round trip valid.
   rubric: z
     .object({
       instructions: z.string().min(1).max(2048),
       min_score: z.number().min(0).max(1).default(0.7),
     })
     .strict()
-    .optional(),
+    .nullish(),
 });
 
 export const evalResultsSchema = z.object({
@@ -209,6 +217,403 @@ export class EvalService {
     return this.db.withOrg(orgId, (tx) =>
       tx.select().from(evalDatasets).orderBy(desc(evalDatasets.createdAt)).limit(100),
     );
+  }
+
+  /**
+   * A4-43 — list the cases of a dataset (verify-what-you-added). Ordered by
+   * sequence; total is exact. Cross-org / unknown datasets 404 through the
+   * org predicate, never an empty-list lie.
+   */
+  async listCases(input: {
+    orgId: string;
+    datasetId: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ cases: unknown[]; total: number; limit: number; offset: number }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    const limit = Math.min(Math.max(1, Math.floor(input.limit)), 200);
+    const offset = Math.max(0, Math.floor(input.offset));
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const ds = await tx
+        .select({ id: evalDatasets.id })
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      if (ds.length === 0) {
+        throw ApiError.notFound('eval dataset');
+      }
+      const totalRows = await tx.execute(sql`
+        select count(*)::int as total from eval_cases
+        where organization_id = ${input.orgId}::uuid and dataset_id = ${input.datasetId}::uuid
+      `);
+      const total = Number((totalRows.rows[0] as { total: number }).total);
+      const rows = await tx
+        .select()
+        .from(evalCases)
+        .where(and(eq(evalCases.organizationId, input.orgId), eq(evalCases.datasetId, input.datasetId)))
+        .orderBy(asc(evalCases.sequence))
+        .limit(limit)
+        .offset(offset);
+      return {
+        cases: rows.map((r) => ({
+          id: r.id,
+          sequence: r.sequence,
+          input: r.input,
+          expected: r.expected,
+          rubric: r.rubric,
+          createdAt: r.createdAt,
+        })),
+        total,
+        limit,
+        offset,
+      };
+    });
+  }
+
+  /**
+   * A4-41 — in-place correction of a malformed case. Full-body replace
+   * through evalCaseSchema (same strictness as add); sequence and identity
+   * are preserved, so run provenance still anchors on the same case id.
+   */
+  async updateCase(input: {
+    orgId: string;
+    datasetId: string;
+    caseId: string;
+    body: unknown;
+    actor: string;
+  }): Promise<{ case: unknown }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    assertUuid(input.caseId, 'caseId');
+    const result = evalCaseSchema.safeParse(input.body);
+    if (!result.success) {
+      throw ApiError.validation({ body: result.error.flatten() });
+    }
+    const c = result.data;
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .update(evalCases)
+        .set({ input: c.input, expected: c.expected, rubric: c.rubric ?? null })
+        .where(
+          and(
+            eq(evalCases.id, input.caseId),
+            eq(evalCases.datasetId, input.datasetId),
+            eq(evalCases.organizationId, input.orgId),
+          ),
+        )
+        .returning();
+      if (rows.length === 0) {
+        throw ApiError.notFound('eval case');
+      }
+      await this.audit.add({
+        action: 'eval.case_updated',
+        resourceType: 'eval_case',
+        resourceId: input.caseId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { datasetId: input.datasetId },
+      });
+      const r = rows[0];
+      return {
+        case: {
+          id: r.id,
+          sequence: r.sequence,
+          input: r.input,
+          expected: r.expected,
+          rubric: r.rubric,
+          createdAt: r.createdAt,
+        },
+      };
+    });
+  }
+
+  /**
+   * A4-41 — delete one case. The row cascades to its eval_case_executions;
+   * completed run records keep their own results snapshot (the run decision
+   * never recomputes from live rows), so history is not rewritten.
+   */
+  async deleteCase(input: {
+    orgId: string;
+    datasetId: string;
+    caseId: string;
+    actor: string;
+  }): Promise<{ deleted: true }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    assertUuid(input.caseId, 'caseId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const rows = await tx
+        .delete(evalCases)
+        .where(
+          and(
+            eq(evalCases.id, input.caseId),
+            eq(evalCases.datasetId, input.datasetId),
+            eq(evalCases.organizationId, input.orgId),
+          ),
+        )
+        .returning({ id: evalCases.id });
+      if (rows.length === 0) {
+        throw ApiError.notFound('eval case');
+      }
+      await this.audit.add({
+        action: 'eval.case_deleted',
+        resourceType: 'eval_case',
+        resourceId: input.caseId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { datasetId: input.datasetId },
+      });
+      return { deleted: true as const };
+    });
+  }
+
+  /**
+   * A4-42 — delete a dataset. Cases cascade with it. Refuses with a 409
+   * while any eval run references the dataset: runs are the evidence behind
+   * publish decisions and are append-only history (invariant 9) — the
+   * refusal names the run count so the user knows why.
+   */
+  async deleteDataset(input: { orgId: string; datasetId: string; actor: string }): Promise<{ deleted: true }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const ds = await tx
+        .select({ id: evalDatasets.id, name: evalDatasets.name })
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      if (ds.length === 0) {
+        throw ApiError.notFound('eval dataset');
+      }
+      const runRows = await tx.execute(sql`
+        select count(*)::int as total from eval_runs
+        where organization_id = ${input.orgId}::uuid and dataset_id = ${input.datasetId}::uuid
+      `);
+      const runCount = Number((runRows.rows[0] as { total: number }).total);
+      if (runCount > 0) {
+        throw ApiError.conflict('dataset has eval runs; deletion blocked to preserve run provenance', {
+          dataset_id: input.datasetId,
+          eval_runs: runCount,
+        });
+      }
+      await tx
+        .delete(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)));
+      await this.audit.add({
+        action: 'eval.dataset_deleted',
+        resourceType: 'eval_dataset',
+        resourceId: input.datasetId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { name: ds[0].name },
+      });
+      return { deleted: true as const };
+    });
+  }
+
+  /**
+   * A4-44 — export a dataset. JSON is the canonical interchange shape
+   * (re-importable); CSV uses one row per case with newline-separated
+   * multi-value cells, matching the console's one-per-line case builder.
+   * Returned as text for the console to save — never a signed-URL stub.
+   */
+  async exportDataset(input: {
+    orgId: string;
+    datasetId: string;
+    format: 'json' | 'csv';
+  }): Promise<{ format: string; filename: string; content: string }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    return this.db.withOrg(input.orgId, async (tx) => {
+      const ds = await tx
+        .select()
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      if (ds.length === 0) {
+        throw ApiError.notFound('eval dataset');
+      }
+      const rows = await tx
+        .select()
+        .from(evalCases)
+        .where(and(eq(evalCases.organizationId, input.orgId), eq(evalCases.datasetId, input.datasetId)))
+        .orderBy(asc(evalCases.sequence));
+      const slug = ds[0].name.replace(/[^a-zA-Z0-9-_]+/g, '-').slice(0, 64) || 'dataset';
+      if (input.format === 'csv') {
+        const header = ['input_text', 'contains', 'not_contains', 'state_assertions', 'document_ids', 'rubric_instructions', 'rubric_min_score'];
+        const joinLines = (v: unknown): string =>
+          Array.isArray(v) ? v.map((x) => String(x)).join('\n') : '';
+        const data = rows.map((r) => {
+          const input = (r.input ?? {}) as Record<string, unknown>;
+          const expected = (r.expected ?? {}) as Record<string, unknown>;
+          const rubric = (r.rubric ?? {}) as Record<string, unknown>;
+          return [
+            typeof input.text === 'string' ? input.text : '',
+            joinLines(expected.contains),
+            joinLines(expected.not_contains),
+            joinLines(expected.state_assertions),
+            joinLines(expected.document_ids),
+            typeof rubric.instructions === 'string' ? rubric.instructions : '',
+            typeof rubric.min_score === 'number' ? String(rubric.min_score) : '',
+          ];
+        });
+        return {
+          format: 'csv',
+          filename: `${slug}-cases.csv`,
+          content: toCsv([header, ...data]),
+        };
+      }
+      return {
+        format: 'json',
+        filename: `${slug}-cases.json`,
+        content: JSON.stringify(
+          {
+            name: ds[0].name,
+            description: ds[0].description,
+            exported_at: new Date().toISOString(),
+            cases: rows.map((r) => ({ input: r.input, expected: r.expected, rubric: r.rubric })),
+          },
+          null,
+          2,
+        ),
+      };
+    });
+  }
+
+  private static csvHeader(): string[] {
+    return ['input_text', 'contains', 'not_contains', 'state_assertions', 'document_ids', 'rubric_instructions', 'rubric_min_score'];
+  }
+
+  /**
+   * A4-44 — import cases into a dataset. JSON accepts the export shape
+   * ({cases:[...]}) or a bare array; CSV accepts the export header with
+   * newline-separated multi-value cells. Every row validates through
+   * evalCaseSchema with per-row 422 paths — a corrupt upload refuses,
+   * never partially ingests.
+   */
+  async importDataset(input: {
+    orgId: string;
+    datasetId: string;
+    format: 'json' | 'csv';
+    cases?: unknown;
+    csv?: unknown;
+    actor: string;
+  }): Promise<{ added: number }> {
+    assertUuid(input.orgId, 'orgId');
+    assertUuid(input.datasetId, 'datasetId');
+    let bodies: unknown[];
+    if (input.format === 'csv') {
+      if (typeof input.csv !== 'string' || !input.csv.trim()) {
+        throw ApiError.validation({ csv: 'must be a non-empty CSV string' });
+      }
+      bodies = EvalService.csvRowsToCases(parseCsv(input.csv));
+    } else {
+      const raw = (input.cases ?? []) as unknown;
+      const list = Array.isArray(raw)
+        ? raw
+        : typeof raw === 'object' && raw !== null && Array.isArray((raw as Record<string, unknown>).cases)
+          ? ((raw as Record<string, unknown>).cases as unknown[])
+          : null;
+      if (!list || list.length === 0) {
+        throw ApiError.validation({ cases: 'must be a non-empty array (or {cases:[...]})' });
+      }
+      bodies = list;
+    }
+    if (bodies.length > 2000) {
+      throw ApiError.validation({ cases: 'import is capped at 2000 cases per request' });
+    }
+    // Same strictness law as addCases (F6): per-index typed 422s.
+    const parsed: Array<z.infer<typeof evalCaseSchema>> = [];
+    for (let index = 0; index < bodies.length; index += 1) {
+      const result = evalCaseSchema.safeParse(bodies[index]);
+      if (!result.success) {
+        throw ApiError.validation({ [`cases[${index}]`]: result.error.flatten() });
+      }
+      parsed.push(result.data);
+    }
+    const added = await this.db.withOrg(input.orgId, async (tx) => {
+      const ds = await tx
+        .select({ id: evalDatasets.id })
+        .from(evalDatasets)
+        .where(and(eq(evalDatasets.id, input.datasetId), eq(evalDatasets.organizationId, input.orgId)))
+        .limit(1);
+      if (ds.length === 0) {
+        throw ApiError.notFound('eval dataset');
+      }
+      const next = await tx.execute(sql`
+        select coalesce(max(sequence), 0) + 1 as next from eval_cases where dataset_id = ${input.datasetId}::uuid
+      `);
+      let sequence = Number((next.rows[0] as { next: number | string }).next);
+      for (const c of parsed) {
+        await tx.insert(evalCases).values({
+          id: uuidv7(),
+          organizationId: input.orgId,
+          datasetId: input.datasetId,
+          input: c.input,
+          expected: c.expected,
+          rubric: c.rubric ?? null,
+          sequence: sequence++,
+        });
+      }
+      await this.audit.add({
+        action: 'eval.dataset_imported',
+        resourceType: 'eval_dataset',
+        resourceId: input.datasetId,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { format: input.format, added: parsed.length },
+      });
+      return parsed.length;
+    });
+    return { added };
+  }
+
+  /** Maps CSV rows (export header) to evalCaseSchema-shaped bodies. */
+  private static csvRowsToCases(rows: string[][]): unknown[] {
+    const header = EvalService.csvHeader();
+    if (rows.length === 0) {
+      throw ApiError.validation({ csv: 'empty CSV' });
+    }
+    const head = rows[0].map((h) => h.trim().toLowerCase());
+    for (let i = 0; i < header.length; i += 1) {
+      if (head[i] !== header[i]) {
+        throw ApiError.validation({
+          csv: `header column ${i + 1} must be "${header[i]}" (got "${head[i] ?? ''}")`,
+        });
+      }
+    }
+    const splitLines = (v: string): string[] =>
+      v.split('\n').map((s) => s.trim()).filter(Boolean);
+    return rows.slice(1).map((row) => {
+      const cell = (i: number): string => (row[i] ?? '').trim();
+      const body: Record<string, unknown> = { input: { text: cell(0) } };
+      const expected: Record<string, unknown> = {};
+      const contains = splitLines(cell(1));
+      const notContains = splitLines(cell(2));
+      const assertions = splitLines(cell(3));
+      const docIds = splitLines(cell(4));
+      if (contains.length > 0) expected.contains = contains;
+      if (notContains.length > 0) expected.not_contains = notContains;
+      if (assertions.length > 0) expected.state_assertions = assertions;
+      if (docIds.length > 0) expected.document_ids = docIds;
+      if (Object.keys(expected).length > 0) body.expected = expected;
+      const instructions = cell(5);
+      const minScoreRaw = cell(6);
+      if (instructions || minScoreRaw) {
+        const rubric: Record<string, unknown> = { instructions };
+        if (minScoreRaw) {
+          const min = Number(minScoreRaw);
+          rubric.min_score = min;
+        }
+        body.rubric = rubric;
+      }
+      return body;
+    });
   }
 
   /**

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
@@ -70,6 +70,142 @@ export class HarnessParityController {
       throw ApiError.validation({ cases: 'must be a non-empty array' });
     }
     return await this.evalService.addCases({ orgId, datasetId, cases: dto.cases, actor: 'console' });
+  }
+
+  /**
+   * A4-43 — list a dataset's cases (ordered by sequence) with an exact
+   * total, so the console can show what was actually added.
+   */
+  @Get('eval/datasets/:datasetId/cases')
+  @Roles('owner', 'admin', 'developer', 'reader')
+  @UseGuards(OrgRolesGuard)
+  async listCases(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    // A query like ?limit=abc parses to NaN; normalize to the service's
+    // defaults rather than passing NaN into drizzle.
+    const toNum = (raw: string | undefined, fallback: number): number => {
+      if (raw === undefined || raw === '') return fallback;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    return await this.evalService.listCases({
+      orgId,
+      datasetId,
+      limit: toNum(limit, 50),
+      offset: toNum(offset, 0),
+    });
+  }
+
+  /**
+   * A4-41 — correct a malformed case in place. Full-body replace through
+   * the same strict case schema as add (identity + sequence preserved).
+   */
+  @Patch('eval/datasets/:datasetId/cases/:caseId')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async updateCase(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Param('caseId') caseId: string,
+    @Body() dto: unknown,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    assertUuid(caseId, 'caseId');
+    return await this.evalService.updateCase({ orgId, datasetId, caseId, body: dto, actor: principal.id });
+  }
+
+  /** A4-41 — delete one case (its run-execution rows cascade; run records keep their own snapshot). */
+  @Delete('eval/datasets/:datasetId/cases/:caseId')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async deleteCase(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Param('caseId') caseId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    assertUuid(caseId, 'caseId');
+    return await this.evalService.deleteCase({ orgId, datasetId, caseId, actor: principal.id });
+  }
+
+  /**
+   * A4-42 — delete a dataset (cases cascade). Refuses 409 while eval runs
+   * reference it — runs are append-only publish evidence.
+   */
+  @Delete('eval/datasets/:datasetId')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async deleteDataset(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    return await this.evalService.deleteDataset({ orgId, datasetId, actor: principal.id });
+  }
+
+  /**
+   * A4-44 — export a dataset's cases. Returns the file content as text for
+   * the console to save (`{format, filename, content}`); JSON is canonical,
+   * CSV matches the console's one-per-line case builder.
+   */
+  @Get('eval/datasets/:datasetId/export')
+  @Roles('owner', 'admin', 'developer', 'reader')
+  @UseGuards(OrgRolesGuard)
+  async exportDataset(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Query('format') format?: string,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    if (format !== undefined && format !== 'json' && format !== 'csv') {
+      throw ApiError.validation({ format: "must be 'json' or 'csv'" });
+    }
+    const fmt = format === 'csv' ? 'csv' : 'json';
+    return await this.evalService.exportDataset({ orgId, datasetId, format: fmt });
+  }
+
+  /**
+   * A4-44 — import cases into a dataset. JSON takes the export shape
+   * ({cases:[...]}) or a bare array; CSV takes the export header with
+   * newline-separated multi-value cells. Per-row typed 422s on violations.
+   */
+  @Post('eval/datasets/:datasetId/import')
+  @Roles('owner', 'admin', 'developer')
+  @UseGuards(OrgRolesGuard)
+  @Idempotent()
+  async importDataset(
+    @Param('orgId') orgId: string,
+    @Param('datasetId') datasetId: string,
+    @Body() dto: { format?: unknown; cases?: unknown; csv?: unknown },
+    @CurrentPrincipal() principal: L1Principal,
+  ) {
+    assertUuid(orgId, 'orgId');
+    assertUuid(datasetId, 'datasetId');
+    const fmt = dto.format === 'csv' ? 'csv' : 'json';
+    return await this.evalService.importDataset({
+      orgId,
+      datasetId,
+      format: fmt,
+      cases: dto.cases,
+      csv: dto.csv,
+      actor: principal.id,
+    });
   }
 
   @Post('eval/runs')

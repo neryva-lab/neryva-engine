@@ -14,6 +14,7 @@ import { deriveSourceSlug, normalizeSourceSlug } from './source-slug';
 import { chunkText } from './text';
 import { buildExtractorChain, TextExtractorPort } from './extraction.port';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
+import { AuditService } from '../../common/audit/audit.service';
 import { EmbeddingService } from './embedding.service';
 
 /**
@@ -64,6 +65,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     private readonly embedding: EmbeddingService,
     private readonly scanner: DefaultScanner,
     private readonly configPublish: ConfigPublishService,
+    private readonly audit: AuditService,
   ) {}
 
   onModuleInit(): void {
@@ -208,11 +210,15 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
         // new version instead of duplicating the document).
         let documentId: string | undefined;
         if (session.targetDocumentId) {
+          // A4-11: FOR UPDATE serializes concurrent version appends to the
+          // same document (multi-process workers): the max(version)+1 below
+          // must not race, or two uploads mint the same version number.
           const target = await tx
             .select({ id: documents.id })
             .from(documents)
             .where(and(eq(documents.id, session.targetDocumentId), eq(documents.organizationId, session.organizationId)))
-            .limit(1);
+            .limit(1)
+            .for('update');
           if (!target[0]) {
             throw new Error('re-ingestion target document is gone (deleted or foreign org)');
           }
@@ -343,9 +349,16 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   private async readyStage(session: UploadSession): Promise<void> {
-    await this.db.withBypass(async (tx) => {
+    const isVersion = session.targetDocumentId != null;
+    const docId = await this.db.withBypass(async (tx) => {
       await tx.update(uploadSessions).set({ state: 'READY', updatedAt: new Date().toISOString() }).where(eq(uploadSessions.id, session.id));
       const orgConfig = await this.orgKnowledgeConfig(session.organizationId);
+      // A4-11: version sessions attach to the re-ingestion target (the
+      // session's artifact is new, so a sourceArtifactId match misses);
+      // first ingests match on the source artifact as before.
+      const docCond = isVersion
+        ? eq(documents.id, session.targetDocumentId as string)
+        : eq(documents.sourceArtifactId, session.artifactId);
       await tx
         .update(documents)
         .set({
@@ -353,14 +366,14 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
           embeddingModel: orgConfig.embeddingModel || EMBEDDING_MODEL,
           updatedAt: new Date().toISOString(),
         })
-        .where(eq(documents.sourceArtifactId, session.artifactId));
+        .where(docCond);
       // Default ACL: documents are organization-visible at ingest
       // (retrieval.service's contract). Without this row the retrieval join
       // excludes the document entirely — it would be indexed but unreachable.
       const docRows = await tx
         .select({ id: documents.id })
         .from(documents)
-        .where(eq(documents.sourceArtifactId, session.artifactId))
+        .where(docCond)
         .limit(1);
       if (docRows[0]) {
         await tx
@@ -379,7 +392,31 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
         // restrictions (permissions widened at the source).
         await this.applySourceAcl(tx, session, docRows[0].id);
       }
+      return docRows[0]?.id ?? null;
     });
+    // A4-11: audit the version append. The worker acts on the session
+    // creator's behalf (actor = the account that authorized the upload);
+    // NULL when the session predates createdBy tracking — never a
+    // fabricated identity.
+    if (isVersion && docId) {
+      const versions = await this.db.withBypass((tx) =>
+        tx
+          .select({ version: documentVersions.version })
+          .from(documentVersions)
+          .where(eq(documentVersions.documentId, docId))
+          .orderBy(desc(documentVersions.version))
+          .limit(1),
+      );
+      await this.audit.add({
+        action: 'document.version_added',
+        resourceType: 'document',
+        resourceId: docId,
+        actorType: 'account',
+        actorId: session.createdBy ?? null,
+        tenantId: session.organizationId,
+        details: { version: versions[0]?.version ?? null, session_id: session.id },
+      });
+    }
     KnowledgeIngestionWorker.logger.log(`upload session ${session.id} ingested (READY)`);
   }
 
@@ -479,6 +516,11 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
         .update(uploadSessions)
         .set({ state: 'FAILED', lastError: message.slice(0, 4000), updatedAt: new Date().toISOString() })
         .where(eq(uploadSessions.id, session.id));
+      // A4-11: this match deliberately misses version sessions (their
+      // artifact is new). A failed version ingestion must NOT touch the
+      // document row — the previous version keeps serving in its prior
+      // state. The failure surfaces on the upload session (tracker), not
+      // on the document.
       await tx.update(documents).set({ state: 'failed', updatedAt: new Date().toISOString() }).where(eq(documents.sourceArtifactId, session.artifactId));
     });
     KnowledgeIngestionWorker.logger.warn(`upload session ${session.id} FAILED: ${message}`);

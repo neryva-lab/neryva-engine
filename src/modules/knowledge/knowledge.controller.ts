@@ -3,7 +3,7 @@ import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { Idempotent } from '../../common/http/idempotency';
-import { IsIn, IsInt, IsOptional, IsString, Length, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, Length, MaxLength, MinLength } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ArtifactsService } from './artifacts.service';
 import { MemoryService } from './memory.service';
@@ -30,6 +30,16 @@ export class CreateUploadDto extends MediaDto {
   @IsString()
   @MaxLength(256)
   title?: string;
+
+  /**
+   * A4-11 — optional re-ingestion target: append a new version to this
+   * existing document instead of minting one. The slug/title intents are
+   * ignored for version uploads (the pin address is immutable); sending
+   * source_slug together with this is a 422.
+   */
+  @IsOptional()
+  @IsUUID()
+  target_document_id?: string;
 }
 
 export class DecideMemoryDto {
@@ -99,6 +109,7 @@ export class KnowledgeController {
       sha256Hex: dto.sha256,
       sourceSlug: dto.source_slug ?? null,
       title: dto.title ?? null,
+      targetDocumentId: dto.target_document_id ?? null,
       createdBy: principal.id,
     });
     return {
@@ -106,6 +117,7 @@ export class KnowledgeController {
         id: result.session.id,
         state: result.session.state,
         source_slug: result.session.sourceSlug,
+        target_document_id: result.session.targetDocumentId,
       },
       upload: result.upload,
     };
@@ -198,13 +210,21 @@ export class KnowledgeController {
   async previewDocument(
     @Param('orgId') orgId: string,
     @Param('documentId') documentId: string,
+    @CurrentPrincipal() principal: L1Principal,
     @Query('chunks') chunks?: string,
   ) {
     const chunkLimit = chunks === undefined ? undefined : Number.parseInt(chunks, 10);
     if (chunkLimit !== undefined && (!Number.isInteger(chunkLimit) || chunkLimit < 1)) {
       throw ApiError.validation({ chunks: 'must be a positive integer' });
     }
-    return this.artifacts.getDocumentPreview({ orgId, documentId, chunkLimit });
+    // A4-12 — the caller's account scopes the visibility/source-ACL gates.
+    return this.artifacts.getDocumentPreview({
+      orgId,
+      documentId,
+      chunkLimit,
+      accountId: principal.id,
+      callerEmails: principal.email ? [principal.email] : [],
+    });
   }
 
   /**

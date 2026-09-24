@@ -10,6 +10,7 @@ import { env } from '../../common/config/env';
 import { artifacts, chunks, documents, documentVersions, uploadSessions, Artifact, UploadSession } from './schema';
 import { ARTIFACT_PURPOSES } from './schema';
 import { normalizeSourceSlug } from './source-slug';
+import { buildSourceAclFilter } from './retrieval.service';
 
 /**
  * Artifacts — the claim-check facade (Phase 7, ledger 7.1/7.2/7.9 + MCP 5.12).
@@ -64,6 +65,8 @@ export class ArtifactsService {
     /** E-2: optional pin address + display title intents. */
     sourceSlug?: string | null;
     title?: string | null;
+    /** A4-11: optional re-ingestion target — append a new version instead of minting a document. */
+    targetDocumentId?: string | null;
   }): Promise<{ session: UploadSession; upload: { url: string; fields: Record<string, string>; expiresIn: number } }> {
     assertUuid(input.orgId, 'orgId');
     if (!(ARTIFACT_PURPOSES as readonly string[]).includes(input.purpose)) {
@@ -81,10 +84,41 @@ export class ArtifactsService {
     if (!/^[0-9a-f]{64}$/i.test(input.sha256Hex)) {
       throw ApiError.validation({ sha256: 'must be 64 hex chars' });
     }
+    // A4-11: version upload — target an existing document instead of minting
+    // one. Verified at authorize time (same verify-at-authorize pattern the
+    // ingestion worker uses at claim time): 404 for missing/foreign-org,
+    // 409 for retired (retire is terminal for manual documents), 422 when a
+    // slug intent is also sent (the pin address is immutable on versions).
+    // No slug reservation: no new document means no slug to reserve. The
+    // title intent is ignored for version uploads (the console never sends
+    // it) — the document keeps its title.
+    let targetDocumentId: string | null = null;
+    const wantsVersion = input.targetDocumentId !== undefined && input.targetDocumentId !== null && input.targetDocumentId !== '';
+    if (wantsVersion) {
+      assertUuid(input.targetDocumentId as string, 'targetDocumentId');
+      if (input.sourceSlug !== undefined && input.sourceSlug !== null && input.sourceSlug !== '') {
+        throw ApiError.validation({ target_document_id: 'source_slug is immutable on a version upload' });
+      }
+      const target = await this.db.withOrg(input.orgId, (tx) =>
+        tx
+          .select({ id: documents.id, state: documents.state })
+          .from(documents)
+          .where(and(eq(documents.id, input.targetDocumentId as string), eq(documents.organizationId, input.orgId)))
+          .limit(1),
+      );
+      if (target.length === 0) {
+        throw ApiError.notFound('document');
+      }
+      if (target[0].state === 'retired') {
+        throw ApiError.conflict('version upload to a retired document is not allowed', { reason: 'version_target_retired' });
+      }
+      targetDocumentId = target[0].id;
+    }
     // E-2: slug intent is validated + reserved NOW (fail fast at authorize
     // time, not deep in the ingestion worker). NULL = derive at ingestion.
+    // Skipped entirely for version uploads (no new document).
     let sourceSlug: string | null = null;
-    if (input.sourceSlug !== undefined && input.sourceSlug !== null && input.sourceSlug !== '') {
+    if (targetDocumentId === null && input.sourceSlug !== undefined && input.sourceSlug !== null && input.sourceSlug !== '') {
       sourceSlug = normalizeSourceSlug(input.sourceSlug);
       const clash = await this.db.withOrg(input.orgId, (tx) =>
         tx
@@ -98,7 +132,9 @@ export class ArtifactsService {
       }
     }
     let title: string | null = null;
-    if (input.title !== undefined && input.title !== null && input.title !== '') {
+    // A4-11: title intent is ignored for version uploads — the document keeps
+    // its title (the console never sends one for a version).
+    if (targetDocumentId === null && input.title !== undefined && input.title !== null && input.title !== '') {
       title = input.title.trim().slice(0, 256);
       if (title.length === 0) {
         throw ApiError.validation({ title: 'must not be blank' });
@@ -148,6 +184,7 @@ export class ArtifactsService {
           state: 'CREATED',
           sourceSlug,
           title,
+          targetDocumentId,
           expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
           createdBy: input.createdBy,
         })
@@ -293,10 +330,23 @@ export class ArtifactsService {
    * A4-01 — document preview: the stored text the row's pin resolves to.
    * Latest-version chunks in sequence order, windowed (server caps the
    * window and reports the truncation so the UI never implies the whole
-   * text is shown). Same read roles as the documents list and the search
-   * workbench, which already return chunk text.
+   * text is shown).
+   *
+   * A4-12 — preview enforces the same read gates as the search workbench
+   * (the bypass was accidental, not designed): document state='ready',
+   * artifact active + scan clean/skipped + unexpired, retrieval_acl
+   * visibility (organization-wide, or private-to-the-calling-account), and
+   * the P0-1 source-ACL filter. A document failing any gate is unreachable
+   * here exactly as it is unreachable by retrieval — 404, not 403, so the
+   * existence of a non-visible document is never disclosed.
    */
-  async getDocumentPreview(input: { orgId: string; documentId: string; chunkLimit?: number }): Promise<{
+  async getDocumentPreview(input: {
+    orgId: string;
+    documentId: string;
+    chunkLimit?: number;
+    accountId: string;
+    callerEmails?: string[];
+  }): Promise<{
     document: { id: string; source_slug: string; title: string | null; state: string; latest_version: number | null };
     total_chunks: number;
     truncated: boolean;
@@ -304,8 +354,37 @@ export class ArtifactsService {
   }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.documentId, 'documentId');
+    assertUuid(input.accountId, 'accountId');
     const chunkLimit = Math.min(Math.max(1, input.chunkLimit ?? 10), 50);
+    const sourceAclFilter = buildSourceAclFilter({
+      orgId: input.orgId,
+      accountId: input.accountId,
+      emails: input.callerEmails ?? [],
+    });
     return this.db.withOrg(input.orgId, async (tx) => {
+      // A4-12 gate — byte-identical shape to retrieval's aclPredicate:
+      // authorization before any chunk text is touched.
+      const gated = await tx.execute(sql`
+        select 1
+        from documents d
+        join artifacts a on a.id = d.source_artifact_id
+        left join retrieval_acl acl
+          on acl.organization_id = d.organization_id
+          and acl.resource_type = 'document'
+          and acl.resource_id = d.id
+        where d.id = ${input.documentId}::uuid
+          and d.organization_id = ${input.orgId}::uuid
+          and d.state = 'ready'
+          and a.state = 'active'
+          and (a.scan_status in ('clean', 'skipped'))
+          and (a.expires_at is null or a.expires_at > now())
+          and (acl.visibility = 'organization' or (acl.visibility = 'private' and acl.scope_account_id = ${input.accountId}::uuid))
+          ${sourceAclFilter}
+        limit 1
+      `);
+      if (gated.rows.length === 0) {
+        throw ApiError.notFound('document');
+      }
       const docs = await tx
         .select({ id: documents.id, sourceSlug: documents.sourceSlug, title: documents.title, state: documents.state })
         .from(documents)

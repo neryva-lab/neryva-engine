@@ -150,7 +150,7 @@ export const documentVersions = pgTable(
     parserVersion: varchar('parser_version', { length: 32 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   },
-  (t) => [index('ix_document_versions_doc').on(t.documentId, t.version)],
+  (t) => [uniqueIndex('uq_document_versions_doc_version').on(t.documentId, t.version)],
 );
 
 export const chunks = pgTable(

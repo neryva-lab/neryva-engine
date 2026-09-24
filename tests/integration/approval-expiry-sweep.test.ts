@@ -185,6 +185,20 @@ describeIfDb('approval expiry sweep (requires DATABASE_URL + redis)', () => {
     return Number((res.rows[0] as { n: number }).n);
   };
 
+  /** P5-A8: the sweep's run.canceled payload must satisfy the run-cancel consumer. */
+  const outboxCanceledPayload = async (runId: string) => {
+    const res = await db.withBypass((tx) =>
+      tx.execute(sql`
+        select payload from outbox_events
+        where organization_id = ${orgId}::uuid and aggregate_id = ${runId} and event_type = 'run.canceled'
+        order by created_at desc limit 1
+      `),
+    );
+    // Raw tx.execute returns jsonb as a string (pg-types.ts 3802 override).
+    const raw = (res.rows[0] as { payload: string | Record<string, unknown> } | undefined)?.payload;
+    return typeof raw === 'string' ? (JSON.parse(raw) as Record<string, unknown>) : raw;
+  };
+
   const redisEvents = async (): Promise<number> => {
     const v = await redis.raw.get(`quota:${orgId}:agents:${monthKey()}:events`);
     return v ? Number(v) : 0;
@@ -262,6 +276,12 @@ describeIfDb('approval expiry sweep (requires DATABASE_URL + redis)', () => {
       expect(await reservationState(runId)).toBe('RELEASED');
       // The denial-path outbox event fires so the run-cancel consumer stops Studio.
       expect(await outboxCanceledCount(runId)).toBe(1);
+      // P5-A8: payload must include conversation_id or the run-cancel consumer
+      // dead-letters it as malformed and Studio is never told to stop the run.
+      const payload = await outboxCanceledPayload(runId);
+      expect(payload?.run_id).toBe(runId);
+      expect(typeof payload?.conversation_id).toBe('string');
+      expect(payload?.reason).toBe('approval_expired');
     }
     // Both advisory holds returned (fail-closed: never auto-approve, quota settled).
     expect(await redisEvents()).toBe(holdsBefore - 2);

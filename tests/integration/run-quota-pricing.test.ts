@@ -500,6 +500,19 @@ describeIfDb('wave2.3 run quota + pricing (requires DATABASE_URL + redis)', () =
     expect(decided.state).toBe('DENIED');
     expect(decided.runState).toBe('CANCELED');
 
+    // P5-A2: the deny reason the UI calls "audited" must reach the audit log.
+    const auditRows = await db.withBypass((tx) =>
+      tx.execute(sql`
+        select details from audit_events
+        where tenant_id = ${orgId} and action = 'mcp.approval_decided' and resource_id = ${approvalId}
+        order by created_at desc limit 1
+      `),
+    );
+    const raw = (auditRows.rows[0] as { details: string | Record<string, unknown> } | undefined)?.details;
+    const details = typeof raw === 'string' ? (JSON.parse(raw) as Record<string, unknown>) : raw;
+    expect(details?.decision).toBe('DENIED');
+    expect(details?.reason).toBe('w2q-test denial');
+
     expect((await reservationRows(orgId)).map((r) => r.state)).toEqual(['RELEASED']);
     expect(await redisEvents(orgId)).toBe(0);
     expect(await orphanedHolds(orgId)).toBe(0);

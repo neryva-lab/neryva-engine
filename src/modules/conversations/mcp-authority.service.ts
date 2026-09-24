@@ -1253,6 +1253,8 @@ export class McpAuthorityService {
             actor: input.actor,
             required,
             received: required > 1 ? required : 1,
+            // P5-A1: the UI copies call the reason "audited" — record it.
+            reason: input.reason ?? null,
           },
         });
         return {
@@ -1327,7 +1329,8 @@ export class McpAuthorityService {
         tenantId: input.orgId,
         // Compliance shape parity with the APPROVED branch (P2-COMP-43): a
         // reviewer must see the quorum requirement on denials too.
-        details: { run_id: run.id, decision: 'DENIED', actor: input.actor, required },
+        // P5-A2: the UI copies call the reason "audited" — record it.
+        details: { run_id: run.id, decision: 'DENIED', actor: input.actor, required, reason: input.reason ?? null },
       });
       return {
         approvalId: approval.id,
@@ -1445,8 +1448,8 @@ export class McpAuthorityService {
         // (completed/failed/canceled by another path) are left alone, but
         // their sibling PENDING approvals still expire below.
         const runRows = (await tx.execute(sql`
-          select id, state from runs where id = ${runId}::uuid for update
-        `)).rows as Array<{ id: string; state: string }>;
+          select id, state, conversation_id from runs where id = ${runId}::uuid for update
+        `)).rows as Array<{ id: string; state: string; conversation_id: string }>;
         const run = runRows[0];
         const terminalStates = ['COMPLETED', 'FAILED', 'CANCELED'];
         if (run && !terminalStates.includes(run.state)) {
@@ -1465,15 +1468,16 @@ export class McpAuthorityService {
           `);
           // Transactional outbox event (invariant 7).
           // partitionKey: the run's conversation (matches run.failed above).
-          const runRow = runRows[0] as unknown as { conversationId?: string };
+          const runRow = runRows[0] as unknown as { conversation_id: string };
           await recordOutboxEvent(tx, {
             aggregateType: 'run',
             aggregateId: runId,
             organizationId: input.orgId,
             eventType: 'run.canceled',
-            partitionKey: runRow.conversationId ?? runId,
+            partitionKey: runRow.conversation_id ?? runId,
             payload: {
               run_id: runId,
+              conversation_id: runRow.conversation_id,
               reason: 'approval_expired',
               approval_id: approvalId,
             },

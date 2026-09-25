@@ -64,8 +64,13 @@ const imports = [
 @Module({
   imports,
   providers: [
-    { provide: APP_GUARD, useClass: RateLimitGuard },
+    // P5-W14: AuthGuard MUST run before RateLimitGuard. Every
+    // `@RateLimit({ scope: 'principal' })` declaration was silently falling
+    // back to IP scoping because request.principal did not exist yet at
+    // rate-limit time. @Public() routes still pass auth without a principal,
+    // so their limits keep the IP fallback.
     { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_GUARD, useClass: RateLimitGuard },
   ],
 })
 export class AppModule {}

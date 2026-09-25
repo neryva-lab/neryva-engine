@@ -258,14 +258,19 @@ export class ChannelsService {
     const sealed = this.sealCredentials(account.platform, input.credentials);
     // New Meta verify token on rotation — the old one dies with the secret.
     const verifyToken = account.platform === 'whatsapp' || account.platform === 'messenger' ? randomToken(18) : null;
+    // P5-C8: web has no credentials to verify (assertCredentialsShape accepts
+    // {} and verifyCredentials is a trivial pass), so forcing pending on a web
+    // rotation took a live channel offline for zero security benefit. Rotation
+    // stays a no-op status-wise for web; credential-bearing platforms still go
+    // pending until the new material is verified.
+    const reverify = account.platform !== 'web';
     const rows = await this.db.withOrg(input.orgId, (tx) =>
       tx
         .update(channelAccounts)
         .set({
           credentialsSealed: sealed as never,
           ...(verifyToken ? { verifyTokenSealed: envelopeEncrypt(verifyToken) } : {}),
-          status: 'pending',
-          health: { last_verified: null },
+          ...(reverify ? { status: 'pending', health: { last_verified: null } } : {}),
           updatedAt: new Date().toISOString(),
         })
         .where(and(eq(channelAccounts.id, input.accountId), eq(channelAccounts.organizationId, input.orgId)))

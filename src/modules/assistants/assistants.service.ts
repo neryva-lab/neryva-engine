@@ -32,7 +32,7 @@ import {
   unresolvedPinSlugs,
 } from './manifest-resolution.service';
 import { ConversationsService } from '../conversations/conversations.service';
-import { runs } from '../conversations/schema';
+import { conversations, runs } from '../conversations/schema';
 import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
 import { documents } from '../knowledge/schema';
 import { EvalService } from '../knowledge/eval.service';
@@ -243,9 +243,12 @@ export class AssistantsService {
   }
 
   /**
-   * Soft-deletes an assistant by clearing its identity fields (the row stays
-   * for FK integrity — conversations reference assistants.id). Refuses when
-   * conversations exist; the caller should archive those first.
+   * Deletes an assistant. Conversations are the audit plane: an assistant with
+   * ACTIVE conversations cannot be deleted (409). Conversations that are
+   * already archived or deleted are removed in the same transaction — archiving
+   * is the documented prerequisite ("archive them before deleting"), so a
+   * fully-archived assistant is deletable. Message/participant/event rows
+   * cascade from the conversation delete.
    */
   async remove(input: {
     orgId: string;
@@ -254,16 +257,46 @@ export class AssistantsService {
   }): Promise<{ ok: true }> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
-    // Attempt delete — the FK from conversations.assistant_id will reject
-    // if any conversation references this assistant. We catch and re-throw
-    // as a 409 so the caller knows to archive conversations first.
+    // P5-B12: the active check, the retired-conversation delete, and the
+    // assistant delete all run inside ONE transaction. The old code
+    // hard-deleted the assistant row and relied on the FK catch — but
+    // archiving never cleared the FK, so the documented "archive them before
+    // deleting" workflow could never succeed.
+    let retiredCount = 0;
+    let deletedName = '';
     try {
-      const rows = await this.db.withOrg(input.orgId, (tx) =>
-        tx.delete(assistants).where(eq(assistants.id, input.assistantId)).returning(),
-      );
-      if (rows.length === 0) {
-        throw ApiError.notFound('assistant');
-      }
+      await this.db.withOrg(input.orgId, async (tx) => {
+        // Active conversations block deletion; archived/deleted ones are
+        // removed below.
+        const active = await tx
+          .select({ id: conversations.id })
+          .from(conversations)
+          .where(
+            and(
+              eq(conversations.assistantId, input.assistantId),
+              eq(conversations.status, 'active'),
+            ),
+          )
+          .limit(1);
+        if (active.length > 0) {
+          throw ApiError.conflict('assistant has active conversations — archive them before deleting');
+        }
+        const retired = await tx
+          .delete(conversations)
+          .where(
+            and(
+              eq(conversations.assistantId, input.assistantId),
+              inArray(conversations.status, ['archived', 'deleted']),
+            ),
+          )
+          .returning({ id: conversations.id });
+        retiredCount = retired.length;
+        const rows = await tx.delete(assistants).where(eq(assistants.id, input.assistantId)).returning();
+        if (rows.length === 0) {
+          throw ApiError.notFound('assistant');
+        }
+        deletedName = rows[0].name;
+      });
       await this.audit.add({
         action: 'assistant.deleted',
         resourceType: 'assistant',
@@ -271,12 +304,13 @@ export class AssistantsService {
         actorType: 'account',
         actorId: input.actorId,
         tenantId: input.orgId,
-        details: { name: rows[0].name },
+        details: { name: deletedName, conversationsRemoved: retiredCount },
       });
     } catch (err) {
       if (err instanceof ApiError) throw err;
-      // FK violation — conversations still reference this assistant
-      throw ApiError.conflict('assistant has conversations — archive them before deleting');
+      // FK violation — an active conversation landed between the check and the
+      // delete (race); the caller should archive and retry.
+      throw ApiError.conflict('assistant has active conversations — archive them before deleting');
     }
     return { ok: true };
   }

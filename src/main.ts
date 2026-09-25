@@ -7,6 +7,7 @@ initTracing();
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import fastifyCookie from '@fastify/cookie';
 import pino from 'pino';
 import { AppModule } from './app.module';
 import { env } from './common/config/env';
@@ -52,6 +53,15 @@ async function bootstrap(): Promise<void> {
     // (FastifyError: already present).
     { logger, bodyParser: false },
   );
+
+  // Cookie parsing: the website widget plane authenticates visitors via the
+  // HttpOnly `nrv_channel_session` cookie (embed HTML uses
+  // `credentials: 'include'`; `x-neryva-session` is the header fallback).
+  // Fastify does not parse cookies natively — without this plugin
+  // `request.cookies` stays undefined and every cookie-authenticated widget
+  // request 401s (P5-C11). No signing secret: we never set/verify signed
+  // cookies, the session token is a hash-at-rest bearer.
+  await app.getHttpAdapter().getInstance().register(fastifyCookie);
 
   // The bijection collector must be hooked BEFORE Nest registers routes
   // (registration happens during init/listen). onRoute is Fastify's

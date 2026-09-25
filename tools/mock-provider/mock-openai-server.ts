@@ -183,7 +183,7 @@ function planTurn(messages: ChatMessage[]): PlanKind {
   if (lower.includes('word hello')) return { kind: 'text', text: 'The answer is hello.' };
 
   // Golden path trigger: user wants web search
-  if (lower.includes('search the web') || lower.includes('latest news') || lower.includes('web for')) {
+  if (lower.includes('search the web') || lower.includes('latest news') || lower.includes('web for') || (lower.includes('latest') && lower.includes('news')) || lower.includes('ai news')) {
     // Extract a query from the user text, or use a default
     const query = lastUserText.slice(0, 200);
     return { kind: 'tool', name: 'web_search', args: { query } };

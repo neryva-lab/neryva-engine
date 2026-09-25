@@ -1821,8 +1821,10 @@ export class ConversationsService {
 
   /**
    * REL-5.1 — the pending-work surface: org-scoped approval list with a
-   * computed `expired` flag (expiry evaluated at READ time — no sweeper,
-   * same philosophy as control blocks; the decision path still enforces it).
+   * computed `expired` flag (expiry evaluated at READ time; the
+   * approval-expiry-sweep worker terminalizes overdue PENDING approvals to
+   * EXPIRED on its tick — the decision path fail-closes on lapsed windows
+   * regardless, same philosophy as control blocks).
    */
   async listApprovals(input: {
     orgId: string;

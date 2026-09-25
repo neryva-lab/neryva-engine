@@ -54,6 +54,20 @@ export class DbService implements OnModuleDestroy {
     this.pool.on('error', (err) => {
       console.error('[db] idle client error', err.message);
     });
+    // pg-pool removes its own idle 'error' listener when a client is checked out,
+    // so a server-side connection kill on a checked-out client (e.g.
+    // idle_in_transaction_session_timeout terminating an idle transaction) would
+    // otherwise surface as an unhandled 'error' event and crash the process
+    // (observed 2026-09-25: FATAL 25P03 -> node:events "throw er"). This listener
+    // survives checkout (pool only removes its own idleListener) and converts the
+    // crash into a logged error; the dead connection is discarded by the pool on
+    // release via the _queryable check. It does NOT fix the underlying leaked or
+    // long-held transaction — that still needs investigation when it recurs.
+    this.pool.on('connect', (client) => {
+      client.on('error', (err) => {
+        console.error('[db] checked-out client error; connection discarded', err.message);
+      });
+    });
     this.db = drizzle(this.pool);
   }
 

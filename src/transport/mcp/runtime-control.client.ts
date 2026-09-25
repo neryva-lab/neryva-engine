@@ -25,6 +25,13 @@ export interface StartRunArgs {
   assistantVersionId: string;
   expectedConversationVersion: number;
   capabilityToken: string;
+  /**
+   * Agent-level per-tool approval policy (from assistant_versions.tool_policy).
+   * Maps tool name -> 'required' | 'optional' | 'none'. The Engine populates this
+   * from the published version so the Studio can enforce the builder's
+   * configuration at execution time.
+   */
+  agentApprovalPolicy?: Record<string, string> | undefined;
 }
 
 /** Proto guidance (run.proto): 5s default deadline for unary StartRun. */
@@ -72,7 +79,10 @@ export async function startRunOnStudio(args: StartRunArgs): Promise<{ workflowId
         inputMessageId: args.messageId,
         expectedConversationVersion: BigInt(args.expectedConversationVersion),
         capabilityToken: args.capabilityToken,
-      },
+        // Agent-level approval policy from the published version.
+        // Cast needed: generated types may lag the proto in some build setups.
+        agentApprovalPolicy: args.agentApprovalPolicy ?? {},
+      } as Parameters<typeof client.startRun>[0],
       { signal: deadline.signal },
     );
     return { workflowId: response.workflowId, alreadyStarted: response.alreadyStarted };

@@ -12,7 +12,7 @@ import { EventType } from '@neryva/mcp-contract';
 import { PermanentConsumerError } from '../common/infra/outbox/consumer';
 import { isRuntimeConfigured, startRunOnStudio } from '../transport/mcp/runtime-control.client';
 import { withSpan, setSpanAttributes } from '../common/observability/spans';
-import { runManifests } from '../modules/assistants/schema';
+import { assistantVersions, runManifests } from '../modules/assistants/schema';
 
 /**
  * Run dispatch consumer — the first real outbox consumer (Phase 6.6 worker
@@ -91,6 +91,7 @@ export class RunDispatchConsumer implements OutboxConsumer {
       subject: 'agent-studio-runtime',
     });
     const conversationVersion = await this.currentConversationVersion(orgId, conversationId);
+    const agentApprovalPolicy = await this.getAgentApprovalPolicy(orgId, assistantVersionId);
     const started = await this.tracedStartRun(orgId, runId, 'resume', () =>
       startRunOnStudio({
         organizationId: orgId,
@@ -100,6 +101,7 @@ export class RunDispatchConsumer implements OutboxConsumer {
         assistantVersionId,
         expectedConversationVersion: conversationVersion,
         capabilityToken: capability.token,
+        agentApprovalPolicy,
       }),
     );
     await this.recordResumeEvent(orgId, runId, started.workflowId);
@@ -173,6 +175,7 @@ export class RunDispatchConsumer implements OutboxConsumer {
     });
 
     const conversationVersion = await this.currentConversationVersion(orgId, conversationId);
+    const agentApprovalPolicy = await this.getAgentApprovalPolicy(orgId, assistantVersionId);
     const started = await this.tracedStartRun(orgId, runId, 'created', () =>
       startRunOnStudio({
         organizationId: orgId,
@@ -182,6 +185,7 @@ export class RunDispatchConsumer implements OutboxConsumer {
         assistantVersionId,
         expectedConversationVersion: conversationVersion,
         capabilityToken: capability.token,
+        agentApprovalPolicy,
       }),
     );
 
@@ -242,6 +246,39 @@ export class RunDispatchConsumer implements OutboxConsumer {
         throw new SkipDispatchError(`conversation ${conversationId} vanished before dispatch`);
       }
       return Number(row.version);
+    });
+  }
+
+  /**
+   * Fetches the agent-level per-tool approval policy from the published
+   * assistant version. Returns a map of tool name -> 'required' | 'optional' | 'none'.
+   * This ensures the Studio enforces the builder's "Always" approval setting
+   * at execution time, even for READ_ONLY tools.
+   */
+  private async getAgentApprovalPolicy(
+    orgId: string,
+    assistantVersionId: string,
+  ): Promise<Record<string, string>> {
+    return this.db.withOrg(orgId, async (tx) => {
+      const rows = await tx
+        .select({ toolPolicy: assistantVersions.toolPolicy })
+        .from(assistantVersions)
+        .where(eq(assistantVersions.id, assistantVersionId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) {
+        // Version vanished — fail closed with empty policy (Studio falls back
+        // to descriptor-based approval).
+        return {};
+      }
+      const policy = row.toolPolicy as { tools?: Array<{ name: string; approval?: string }> };
+      const result: Record<string, string> = {};
+      for (const tool of policy.tools ?? []) {
+        if (tool.name && tool.approval) {
+          result[tool.name] = tool.approval;
+        }
+      }
+      return result;
     });
   }
 

@@ -155,12 +155,15 @@ export const oauthSessions = pgTable('oauth_sessions', {
   accountId: uuid('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
   clientId: varchar('client_id', { length: 64 }).notNull(),
   familyId: uuid('family_id').notNull(),
+  // P7 D-2: the OIDC session.uid — the identifier tokens actually carry
+  // (JWT `sid` claim, deny-list, registry check all key off this).
+  sessionUid: varchar('session_uid', { length: 128 }),
   device: jsonb('device').notNull().default(sql`'{}'::jsonb`),
   ipCountry: varchar('ip_country', { length: 8 }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   lastSeenAt: timestamp('last_seen_at', { withTimezone: true, mode: 'string' }),
   revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
-}, (t) => [index('ix_oauth_sessions_account').on(t.accountId)]);
+}, (t) => [index('ix_oauth_sessions_account').on(t.accountId), index('ix_oauth_sessions_uid').on(t.sessionUid)]);
 
 /** Refresh tokens: rotation lineage + reuse tripwire (family revocation). */
 export const oauthRefreshTokens = pgTable('oauth_refresh_tokens', {

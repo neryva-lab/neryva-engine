@@ -30,6 +30,10 @@ export class BillingController {
     private readonly stripe: StripeService,
   ) {}
 
+  // Malformed invoice ids must 404 rather than let the pg UUID comparison
+  // throw a 500 (P7 billing BUG-3 engine half).
+  private static readonly UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
   /** Per-(org × product) ledgers with the entitlement-state join (M-3). */
   @Get(':orgId/ledgers')
   @Roles('owner', 'admin', 'billing')
@@ -120,6 +124,11 @@ export class BillingController {
     @Param('orgId') orgId: string,
     @Param('invoiceId') invoiceId: string,
   ) {
+    // Malformed ids must 404 like unknown ids — without this the pg UUID
+    // comparison throws and the probe surfaces a 500 (P7 billing BUG-3).
+    if (!BillingController.UUID_RE.test(invoiceId)) {
+      throw ApiError.notFound('invoice');
+    }
     const invoice = await this.invoices.get(orgId, invoiceId);
     if (invoice.status === 'paid' || invoice.status === 'void') {
       throw ApiError.conflict(`invoice is already ${invoice.status}`);

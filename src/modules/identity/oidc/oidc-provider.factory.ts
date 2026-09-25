@@ -54,6 +54,22 @@ export class OidcProviderFactory {
 
       jwks: { keys: jwks.keys as never[] },
 
+      // P7 D-2: per-session revocation needs the session identifier on the
+      // wire. Tokens carry session.uid (not the Session storage id), so the
+      // JWT `sid` claim is set to it here — the L1 guard's deny-list and
+      // registry checks key off the same value. Without this claim every
+      // access token was anonymous to revocation and revoke-one could never
+      // invalidate credentials.
+      formats: {
+        customizers: {
+          jwt: async (_ctx: unknown, token: { sessionUid?: string }, structuredToken: { payload: Record<string, unknown> }) => {
+            if (typeof token.sessionUid === 'string' && token.sessionUid.length > 0) {
+              structuredToken.payload.sid = token.sessionUid;
+            }
+          },
+        },
+      },
+
       claims: {
         address: ['address'],
         email: ['email', 'email_verified'],

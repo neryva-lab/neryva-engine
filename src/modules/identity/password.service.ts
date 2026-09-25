@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
@@ -6,10 +6,11 @@ import { ApiError } from '../../common/http/api-error';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { EmailService } from '../corporate/email/email.service';
 import { env } from '../../common/config/env';
-import { accounts, oauthSessions } from './schema';
+import { accounts, oauthRefreshTokens, oauthSessions, oidcPayloads } from './schema';
 import { AccountsService, normalizeEmail } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { AccountActionsService } from './account-actions.service';
+import { IdentityPublicService } from './identity-public.service';
 
 /**
  * Password lifecycle + session management surface:
@@ -35,6 +36,8 @@ export class PasswordService {
     private readonly accountsService: AccountsService,
     private readonly credentials: CredentialsService,
     private readonly actions: AccountActionsService,
+    // P7 D-2: the session deny-list seam (Redis) for real per-session revoke.
+    private readonly identityPublic: IdentityPublicService,
   ) {}
 
   // ── reset flow ─────────────────────────────────────────────────────────────
@@ -223,12 +226,14 @@ export class PasswordService {
   // ── session management ─────────────────────────────────────────────────────
 
   async listSessions(accountId: string): Promise<
-    Array<{ sid: string; client_id: string; device: Record<string, unknown>; created_at: string; last_seen_at: string | null; revoked: boolean }>
+    Array<{ sid: string; client_id: string; device: Record<string, unknown>; created_at: string; last_seen_at: string | null; revoked: boolean; session_uid: string | null }>
   > {
+    // P7 D-3: revoked rows are not active sessions — filter them at the
+    // engine so the UI never presents a dead session as live.
     const rows = await this.db.root
       .select()
       .from(oauthSessions)
-      .where(eq(oauthSessions.accountId, accountId))
+      .where(and(eq(oauthSessions.accountId, accountId), isNull(oauthSessions.revokedAt)))
       .orderBy(desc(oauthSessions.createdAt))
       .limit(50);
     return rows.map((row) => ({
@@ -238,6 +243,9 @@ export class PasswordService {
       created_at: row.createdAt,
       last_seen_at: row.lastSeenAt,
       revoked: row.revokedAt !== null,
+      // P7 D-2: the OIDC session.uid — the UI matches it against the `sid`
+      // claim of its own access token to mark the current session.
+      session_uid: row.sessionUid,
     }));
   }
 
@@ -246,9 +254,18 @@ export class PasswordService {
       .update(oauthSessions)
       .set({ revokedAt: new Date().toISOString() })
       .where(and(eq(oauthSessions.sid, sid), eq(oauthSessions.accountId, accountId), isNull(oauthSessions.revokedAt)))
-      .returning({ sid: oauthSessions.sid });
+      .returning({ sid: oauthSessions.sid, sessionUid: oauthSessions.sessionUid });
     if (!updated[0]) {
       throw ApiError.notFound('session');
+    }
+    // P7 D-2: marking the row is not enough — the session's credentials must
+    // die. Push the uid deny-list entry (the L1 guard checks it on every
+    // request via the JWT `sid` claim) and retire the session's refresh
+    // tokens so rotation cannot mint a fresh access token.
+    const uid = updated[0].sessionUid;
+    if (uid) {
+      this.identityPublic.pushSidDeny(uid);
+      await this.revokeRefreshTokensForSession(uid);
     }
     await this.events.emit(EngineEvents.SessionRevoked, { sid, accountId });
     await this.audit.add({
@@ -259,6 +276,26 @@ export class PasswordService {
       actorId: accountId,
       details: {},
     });
+  }
+
+  /**
+   * P7 D-2: retire every refresh token minted for the session (matched by
+   * the OIDC session.uid in the stored payload). The refresh grant refuses
+   * revoked rows, so a revoked session cannot rotate its way back to life.
+   */
+  private async revokeRefreshTokensForSession(sessionUid: string): Promise<void> {
+    const payloadRows = await this.db.root
+      .select({ id: oidcPayloads.id })
+      .from(oidcPayloads)
+      .where(and(eq(oidcPayloads.model, 'RefreshToken'), sql`${oidcPayloads.payload}->>'sessionUid' = ${sessionUid}`));
+    const jtis = payloadRows.map((r) => r.id);
+    if (jtis.length === 0) {
+      return;
+    }
+    await this.db.root
+      .update(oauthRefreshTokens)
+      .set({ revokedAt: new Date().toISOString() })
+      .where(inArray(oauthRefreshTokens.jti, jtis));
   }
 
   async revokeAllSessions(accountId: string): Promise<void> {

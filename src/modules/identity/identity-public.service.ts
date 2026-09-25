@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { RedisService } from '../../common/infra/redis.service';
@@ -22,7 +22,14 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
   /** SESSION_REGISTRY_PORT — the correctness fallback behind the Redis deny-list. */
   async isSessionActive(input: { accountId: string; sid: string | null; issuedAt: number }): Promise<boolean> {
     if (input.sid) {
-      const rows = await this.db.root.select().from(oauthSessions).where(eq(oauthSessions.sid, input.sid)).limit(1);
+      // P7 D-2: the JWT `sid` claim carries the OIDC session.uid (see the
+      // provider's formats.customizers.jwt). Match session_uid first; fall
+      // back to the legacy storage-id column for rows that predate it.
+      const rows = await this.db.root
+        .select()
+        .from(oauthSessions)
+        .where(or(eq(oauthSessions.sessionUid, input.sid), eq(oauthSessions.sid, input.sid)))
+        .limit(1);
       const row = rows[0];
       if (!row || row.revokedAt || row.accountId !== input.accountId) {
         return false;
@@ -62,6 +69,11 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
    * AND emit the revocation event — the satellites' durable feed records
    * OP-driven kills (logout / token revocation) through the same choke
    * point as user-driven ones.
+   *
+   * P7 D-2: `sid` here is the OIDC session.uid — the value the JWT `sid`
+   * claim carries (provider formats.customizers.jwt) and the value the L1
+   * guard looks up. Callers must resolve the session_uid first; pushing a
+   * storage id or authz sid silently denies nothing.
    */
   pushSidDeny(sid: string): void {
     void this.redis.raw.set(`auth:deny:sid:${sid}`, '1', 'EX', env.IDENTITY_ACCESS_TTL_SECONDS).catch(() => undefined);

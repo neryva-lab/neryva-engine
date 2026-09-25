@@ -250,12 +250,15 @@ export class OidcDrizzleAdapter {
       return; // pre-login interaction session — no registry row yet
     }
     const clientId = typeof payload.clientId === 'string' ? payload.clientId : 'unknown';
+    // P7 D-2: persist the OIDC session.uid — it is the identifier tokens
+    // carry, so the JWT `sid` claim, deny-list, and registry check key off it.
+    const sessionUid = typeof payload.uid === 'string' ? payload.uid : null;
     await this.db.root
       .insert(oauthSessions)
-      .values({ sid, accountId, clientId, familyId: randomUUID(), device: payload.extra ?? {} })
+      .values({ sid, accountId, clientId, familyId: randomUUID(), sessionUid, device: payload.extra ?? {} })
       .onConflictDoUpdate({
         target: oauthSessions.sid,
-        set: { lastSeenAt: new Date().toISOString(), device: payload.extra ?? {} },
+        set: { lastSeenAt: new Date().toISOString(), device: payload.extra ?? {}, sessionUid },
       });
   }
 
@@ -263,12 +266,33 @@ export class OidcDrizzleAdapter {
     const rows = await this.db.root.select().from(oauthSessions).where(eq(oauthSessions.sid, sid)).limit(1);
     await this.db.root.delete(oidcPayloads).where(and(eq(oidcPayloads.model, 'Session'), eq(oidcPayloads.id, sid)));
     await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sid, sid));
-    this.helpers.pushSidDeny(sid);
+    // P7 D-2: the deny-list keys off the OIDC session.uid (the JWT `sid`
+    // claim) — pushing the storage id here previously denied nothing.
+    const uid = rows[0]?.sessionUid;
+    if (uid) {
+      this.helpers.pushSidDeny(uid);
+    }
     await this.events.emit<SessionRevokedEvent>(EngineEvents.SessionRevoked, {
       sid,
       accountId: rows[0]?.accountId ?? 'unknown',
     });
     await this.audit.add({ action: 'session.revoked', resourceType: 'oauth_session', resourceId: sid, actorType: 'system', details: { reason } });
+  }
+
+  /**
+   * P7 D-2: resolve the OIDC session.uid for a refresh token (the payload
+   * carries it as sessionUid). The oauth_refresh_tokens.session_id column
+   * holds the per-client authz sid — the wrong namespace for revocation.
+   */
+  private async sessionUidForRefreshToken(jti: string): Promise<string | null> {
+    const rows = await this.db.root
+      .select({ payload: oidcPayloads.payload })
+      .from(oidcPayloads)
+      .where(and(eq(oidcPayloads.model, 'RefreshToken'), eq(oidcPayloads.id, jti)))
+      .limit(1);
+    const payload = rows[0]?.payload as Record<string, unknown> | null | undefined;
+    const uid = payload?.['sessionUid'];
+    return typeof uid === 'string' ? uid : null;
   }
 
   // ── Refresh rotation + the reuse tripwire ────────────────────────────────
@@ -348,14 +372,18 @@ export class OidcDrizzleAdapter {
       const firstDetection = !row.revokedAt;
       this.logger.warn(`refresh token reuse detected: jti=${id} family=${row.familyId}`);
       await this.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso(), retiredAt: nowIso() }).where(eq(oauthRefreshTokens.familyId, row.familyId));
-      if (row.sessionId) {
-        await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sid, row.sessionId));
-        this.helpers.pushSidDeny(row.sessionId);
+      // P7 D-2: revoke by the OIDC session.uid (the JWT `sid` claim). The old
+      // code matched oauth_sessions.sid against the per-client authz sid —
+      // different namespaces, so the session row was never actually revoked.
+      const uid = await this.sessionUidForRefreshToken(id);
+      if (uid) {
+        await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sessionUid, uid));
+        this.helpers.pushSidDeny(uid);
       }
       if (firstDetection) {
         tokenRefreshReuseTotal.inc();
         await this.events.emit<TokenRefreshReuseEvent>(EngineEvents.TokenRefreshReuse, {
-          accountId: await this.resolveAccountForSession(row.sessionId),
+          accountId: await this.resolveAccountForSessionUid(uid),
           familyId: row.familyId,
           sessionId: row.sessionId,
         });
@@ -373,14 +401,14 @@ export class OidcDrizzleAdapter {
   }
 
   /** Owner lookup for the reuse alert — 'unknown' when the session row is gone. */
-  private async resolveAccountForSession(sessionId: string | null): Promise<string> {
-    if (!sessionId) {
+  private async resolveAccountForSessionUid(sessionUid: string | null): Promise<string> {
+    if (!sessionUid) {
       return 'unknown';
     }
     const rows = await this.db.root
       .select({ accountId: oauthSessions.accountId })
       .from(oauthSessions)
-      .where(eq(oauthSessions.sid, sessionId))
+      .where(eq(oauthSessions.sessionUid, sessionUid))
       .limit(1);
     return rows[0]?.accountId ?? 'unknown';
   }

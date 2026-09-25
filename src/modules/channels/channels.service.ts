@@ -35,6 +35,20 @@ export function mapInputValidation(err: unknown): never {
 }
 
 /**
+ * P5-C9 regression guard: `update()` must persist the merged ChannelConfig —
+ * NOT the `{ platform, config }` wrapper `sanitizeConfigForUpdate` returns
+ * (storing the wrapper corrupted account configs into
+ * `{ config: {...}, platform: 'web' }`, silently dropping
+ * `default_assistant_id`/`allowed_domains` and killing the widget with
+ * "widget account has no assistant configured"). Pure so it is unit-testable.
+ */
+export function storedConfigForUpdate(
+  resolved: { platform: string; config: ChannelConfig } | undefined,
+): ChannelConfig | undefined {
+  return resolved?.config;
+}
+
+/**
  * Channel accounts — the console CRUD surface for the channel plane (Phase C1).
  * Credentials are sealed with the AES-256-GCM envelope at WRITE time and are
  * NEVER returned by any API (only rotate/verify touch them, server-side).
@@ -159,9 +173,11 @@ export class ChannelsService {
 
   async update(input: { orgId: string; accountId: string; displayName?: string; status?: 'active' | 'suspended'; config?: Record<string, unknown>; actor: string }): Promise<ChannelAccount> {
     assertUuid2(input.orgId, input.accountId);
-    const config = input.config !== undefined ? await this.sanitizeConfigForUpdate(input.orgId, input.accountId, input.config) : undefined;
-    if (config?.config.default_assistant_id) {
-      await this.assertAssistantRoutable(input.orgId, config.platform, config.config.default_assistant_id);
+    const resolved = input.config !== undefined ? await this.sanitizeConfigForUpdate(input.orgId, input.accountId, input.config) : undefined;
+    // P5-C9: persist the merged ChannelConfig — never the { platform, config } wrapper.
+    const config = storedConfigForUpdate(resolved);
+    if (config?.default_assistant_id) {
+      await this.assertAssistantRoutable(input.orgId, resolved?.platform ?? '', config.default_assistant_id);
     }
     let rows: ChannelAccount[];
     try {
@@ -485,6 +501,28 @@ export class ChannelsService {
     }
     if (platform === 'messenger' && typeof c.out_of_window_note === 'string') {
       out.out_of_window_note = c.out_of_window_note.slice(0, 500);
+    }
+    // P5-C10: these keys are declared in the ChannelConfig schema and read by
+    // the outbound pipeline (escalation lifecycle notes, FL-2.8 quick-reply
+    // chips / CSAT, FL-3.1 voice replies) — but were silently stripped here,
+    // so they could never be set through create/PATCH. Clamp and pass through.
+    if (typeof c.escalation_note === 'string') {
+      out.escalation_note = c.escalation_note.slice(0, 500);
+    }
+    if (typeof c.escalation_resolved_note === 'string') {
+      out.escalation_resolved_note = c.escalation_resolved_note.slice(0, 500);
+    }
+    if (Array.isArray(c.quick_replies)) {
+      out.quick_replies = c.quick_replies
+        .filter((r): r is string => typeof r === 'string' && r.length > 0)
+        .slice(0, 6)
+        .map((r) => r.slice(0, 64));
+    }
+    if (typeof c.csat_enabled === 'boolean') {
+      out.csat_enabled = c.csat_enabled;
+    }
+    if (typeof c.voice_replies_enabled === 'boolean') {
+      out.voice_replies_enabled = c.voice_replies_enabled;
     }
     return out;
   }

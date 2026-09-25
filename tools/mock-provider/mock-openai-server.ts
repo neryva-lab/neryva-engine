@@ -59,7 +59,8 @@ interface ChatCompletionsBody {
 type PlanKind =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; args: Record<string, unknown> }
-  | { kind: 'final-text' };
+  | { kind: 'final-text' }
+  | { kind: 'final-text-web' };
 
 interface TurnResult {
   planKind: string;
@@ -160,7 +161,13 @@ function planTurn(messages: ChatMessage[]): PlanKind {
 
   const lower = lastUserText.toLowerCase();
 
-  // Golden path script: search -> create -> final
+  // Golden path: web_search flow
+  // If web_search was already called, return the final summary
+  if (toolCallNames.includes('web_search')) {
+    return { kind: 'final-text-web' };
+  }
+
+  // Wave 4 script: search -> create -> final (kept for backwards compatibility)
   if (toolCallNames.includes('create_ticket')) return { kind: 'final-text' };
   if (toolCallNames.includes('search_tickets')) {
     return {
@@ -175,7 +182,14 @@ function planTurn(messages: ChatMessage[]): PlanKind {
   if (lower.includes('primary color')) return { kind: 'text', text: 'The answer is red.' };
   if (lower.includes('word hello')) return { kind: 'text', text: 'The answer is hello.' };
 
-  // Golden path trigger
+  // Golden path trigger: user wants web search
+  if (lower.includes('search the web') || lower.includes('latest news') || lower.includes('web for')) {
+    // Extract a query from the user text, or use a default
+    const query = lastUserText.slice(0, 200);
+    return { kind: 'tool', name: 'web_search', args: { query } };
+  }
+
+  // Wave 4 trigger (backwards compatibility)
   if (lower.includes('ticket')) {
     return { kind: 'tool', name: 'search_tickets', args: { query: 'smoke' } };
   }
@@ -193,6 +207,13 @@ function sseChunk(payload: unknown): string {
 
 const FINAL_TEXT =
   'Done. I searched the ticket system for "smoke" and created the ticket "wave4 smoke". Mock provider run complete.';
+
+const FINAL_TEXT_WEB =
+  'Based on my web search, here are the latest developments in AI agents this week:\n\n' +
+  '1. **Enterprise adoption accelerating** — More companies are deploying AI agents for customer support and internal workflows.\n' +
+  '2. **Multi-agent frameworks maturing** — New tools for orchestrating agent teams are gaining traction.\n' +
+  '3. **Safety and governance focus** — The industry is prioritizing approval workflows and audit trails for agent actions.\n\n' +
+  'This summary was generated from web search results via the mock provider.';
 
 // ============================================================================
 // Chat completions handler
@@ -276,7 +297,14 @@ function handleChatCompletions(
       return { planKind: `tool:${plan.name}`, chunks: 0 };
     }
 
-    const text = plan.kind === 'final-text' ? FINAL_TEXT : plan.kind === 'text' ? plan.text : '';
+    const text =
+      plan.kind === 'final-text'
+        ? FINAL_TEXT
+        : plan.kind === 'final-text-web'
+          ? FINAL_TEXT_WEB
+          : plan.kind === 'text'
+            ? plan.text
+            : '';
     const payload = {
       id,
       object: 'chat.completion',
@@ -355,7 +383,14 @@ function handleChatCompletions(
     return { planKind: `tool:${plan.name}`, chunks: chunkCount };
   }
 
-  const text = plan.kind === 'final-text' ? FINAL_TEXT : plan.kind === 'text' ? plan.text : '';
+  const text =
+    plan.kind === 'final-text'
+      ? FINAL_TEXT
+      : plan.kind === 'final-text-web'
+        ? FINAL_TEXT_WEB
+        : plan.kind === 'text'
+          ? plan.text
+          : '';
   // Split text into 5 content chunks to prove multi-chunk streaming.
   const n = 5;
   const size = Math.max(1, Math.ceil(text.length / n));

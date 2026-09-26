@@ -76,6 +76,7 @@ export class MongoPurgeStepRepository implements IPurgeStepRepository {
   }): Promise<void> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.scopeId, 'scopeId');
+    const db = this.mongo.root;
     await this.mongo.withOrg(input.orgId, async (ctx: MongoTxContext) => {
       const tenantId = requireOrg(ctx);
       const sessionOpt = { session: ctx.session };

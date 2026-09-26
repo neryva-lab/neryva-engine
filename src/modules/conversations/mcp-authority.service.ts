@@ -589,7 +589,9 @@ export class McpAuthorityService {
       });
 
       // Persist WAITING_APPROVAL when the run is executing (contract doc: 172).
-      if (run.state === 'RUNNING') {
+      // DISPATCHED is included: the worker may park for approval before the
+      // run row transitions to RUNNING (approval must not leave the run stuck).
+      if (run.state === 'RUNNING' || run.state === 'DISPATCHED') {
         assertRunTransition(run.state, 'WAITING_APPROVAL');
         const updated = await tx
           .update(runs)

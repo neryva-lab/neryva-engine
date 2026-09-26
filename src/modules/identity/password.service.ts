@@ -1,12 +1,14 @@
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { EmailService } from '../corporate/email/email.service';
 import { env } from '../../common/config/env';
-import { accounts, oauthRefreshTokens, oauthSessions, oidcPayloads } from './schema';
+import { SESSION_REPOSITORY, REFRESH_TOKEN_REPOSITORY, OIDC_PAYLOAD_REPOSITORY } from './repositories/repository-tokens';
+import type { ISessionRepository } from './repositories/session.repository';
+import type { IRefreshTokenRepository } from './repositories/refresh-token.repository';
+import type { IOidcPayloadRepository } from './repositories/oidc-payload.repository';
+import type { Account } from './repositories/account.repository';
 import { AccountsService, normalizeEmail } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { AccountActionsService } from './account-actions.service';
@@ -25,11 +27,17 @@ import { IdentityPublicService } from './identity-public.service';
  *
  * Password rules live in CredentialsService (12–512 chars). Every
  * credential event is audited; notifications email the account owner.
+ *
+ * Persistence goes through the provider-blind repository ports
+ * (`ISessionRepository`, `IRefreshTokenRepository`,
+ * `IOidcPayloadRepository`); crypto, policy, and fan-out stay here.
  */
 @Injectable()
 export class PasswordService {
   constructor(
-    private readonly db: DbService,
+    @Inject(SESSION_REPOSITORY) private readonly sessions: ISessionRepository,
+    @Inject(REFRESH_TOKEN_REPOSITORY) private readonly refreshTokens: IRefreshTokenRepository,
+    @Inject(OIDC_PAYLOAD_REPOSITORY) private readonly oidcPayloads: IOidcPayloadRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly email: EmailService,
@@ -44,7 +52,7 @@ export class PasswordService {
 
   /** Always behaves identically whether or not the account exists (enumeration-safe). */
   async requestReset(rawEmail: string, requestIp: string | null): Promise<void> {
-    let account: typeof accounts.$inferSelect | null = null;
+    let account: Account | null = null;
     try {
       account = await this.accountsService.findByEmail(normalizeEmail(rawEmail));
     } catch {
@@ -230,12 +238,7 @@ export class PasswordService {
   > {
     // P7 D-3: revoked rows are not active sessions — filter them at the
     // engine so the UI never presents a dead session as live.
-    const rows = await this.db.root
-      .select()
-      .from(oauthSessions)
-      .where(and(eq(oauthSessions.accountId, accountId), isNull(oauthSessions.revokedAt)))
-      .orderBy(desc(oauthSessions.createdAt))
-      .limit(50);
+    const rows = await this.sessions.listActive(accountId, 50);
     return rows.map((row) => ({
       sid: row.sid,
       client_id: row.clientId,
@@ -250,19 +253,15 @@ export class PasswordService {
   }
 
   async revokeSession(accountId: string, sid: string): Promise<void> {
-    const updated = await this.db.root
-      .update(oauthSessions)
-      .set({ revokedAt: new Date().toISOString() })
-      .where(and(eq(oauthSessions.sid, sid), eq(oauthSessions.accountId, accountId), isNull(oauthSessions.revokedAt)))
-      .returning({ sid: oauthSessions.sid, sessionUid: oauthSessions.sessionUid });
-    if (!updated[0]) {
+    const updated = await this.sessions.revokeOne(accountId, sid, new Date().toISOString());
+    if (!updated) {
       throw ApiError.notFound('session');
     }
     // P7 D-2: marking the row is not enough — the session's credentials must
     // die. Push the uid deny-list entry (the L1 guard checks it on every
     // request via the JWT `sid` claim) and retire the session's refresh
     // tokens so rotation cannot mint a fresh access token.
-    const uid = updated[0].sessionUid;
+    const uid = updated.sessionUid;
     if (uid) {
       this.identityPublic.pushSidDeny(uid);
       await this.revokeRefreshTokensForSession(uid);
@@ -284,18 +283,11 @@ export class PasswordService {
    * revoked rows, so a revoked session cannot rotate its way back to life.
    */
   private async revokeRefreshTokensForSession(sessionUid: string): Promise<void> {
-    const payloadRows = await this.db.root
-      .select({ id: oidcPayloads.id })
-      .from(oidcPayloads)
-      .where(and(eq(oidcPayloads.model, 'RefreshToken'), sql`${oidcPayloads.payload}->>'sessionUid' = ${sessionUid}`));
-    const jtis = payloadRows.map((r) => r.id);
+    const jtis = await this.oidcPayloads.findIdsWherePayloadFieldEquals('RefreshToken', 'sessionUid', sessionUid);
     if (jtis.length === 0) {
       return;
     }
-    await this.db.root
-      .update(oauthRefreshTokens)
-      .set({ revokedAt: new Date().toISOString() })
-      .where(inArray(oauthRefreshTokens.jti, jtis));
+    await this.refreshTokens.revokeByJtis(jtis, new Date().toISOString());
   }
 
   async revokeAllSessions(accountId: string): Promise<void> {

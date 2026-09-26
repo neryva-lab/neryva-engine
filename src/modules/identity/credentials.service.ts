@@ -1,8 +1,7 @@
 import { hash, verify } from '@node-rs/argon2';
-import { and, eq, isNull } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { accountCredentials } from './schema';
+import { Inject, Injectable } from '@nestjs/common';
+import { CREDENTIAL_REPOSITORY } from './repositories/repository-tokens';
+import type { ICredentialRepository } from './repositories/credential.repository';
 
 /**
  * argon2id credentials (doc-06 §10.1): m=64 MiB, t=3, p=1 — the floor the
@@ -13,6 +12,9 @@ import { accountCredentials } from './schema';
  * account_credentials kind='password' — the single factor registry. The
  * denormalized accounts.password_hash column was dropped (drizzle/0047);
  * this service is the ONLY reader/writer of password material.
+ *
+ * Persistence goes through `ICredentialRepository` (provider-blind); all
+ * crypto and password policy stays here.
  */
 const ARGON2_OPTS = {
   memoryCost: 65_536, // 64 MiB
@@ -20,11 +22,11 @@ const ARGON2_OPTS = {
   parallelism: 1,
 } as const;
 
-const PASSWORD_KIND = 'password';
-
 @Injectable()
 export class CredentialsService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    @Inject(CREDENTIAL_REPOSITORY) private readonly credentials: ICredentialRepository,
+  ) {}
 
   async hashPassword(password: string): Promise<string> {
     this.assertAcceptablePassword(password);
@@ -56,24 +58,12 @@ export class CredentialsService {
    * (no kind='password' row — the account-registry notion of "no password").
    */
   async getPasswordHash(accountId: string): Promise<string | null> {
-    const rows = await this.db.root
-      .select({ secret: accountCredentials.secret })
-      .from(accountCredentials)
-      .where(and(eq(accountCredentials.accountId, accountId), eq(accountCredentials.kind, PASSWORD_KIND), isNull(accountCredentials.revokedAt)))
-      .limit(1);
-    return rows[0]?.secret ?? null;
+    return this.credentials.getPasswordHash(accountId);
   }
 
   /** Upsert the password factor row (insert or rotate the secret in place). */
   async setPasswordHash(accountId: string, passwordHash: string): Promise<void> {
-    await this.db.root
-      .insert(accountCredentials)
-      .values({ accountId, kind: PASSWORD_KIND, secret: passwordHash })
-      .onConflictDoUpdate({
-        target: [accountCredentials.accountId, accountCredentials.kind],
-        targetWhere: eq(accountCredentials.kind, PASSWORD_KIND),
-        set: { secret: passwordHash, updatedAt: new Date().toISOString() },
-      });
+    await this.credentials.setPasswordHash(accountId, passwordHash);
   }
 
   private assertAcceptablePassword(password: string): void {

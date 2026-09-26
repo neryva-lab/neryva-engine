@@ -1,7 +1,7 @@
-import { Injectable } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/http/api-error';
+import { ORG_AUDIT_REPOSITORY } from './repositories/repository-tokens';
+import type { AuditEventRow, IOrgAuditRepository } from './repositories/org-audit.repository';
 
 /**
  * Org-scoped audit reads (eng-0009). audit_events is the shared Tier-0
@@ -41,28 +41,7 @@ interface AuditRow {
 
 @Injectable()
 export class OrgAuditService {
-  constructor(private readonly db: DbService) {}
-
-  private buildWhere(orgId: string, f: AuditQueryFilters) {
-    const conditions = [sql`tenant_id = ${orgId}`];
-    if (f.actorId) {
-      conditions.push(sql`actor_id = ${f.actorId}`);
-    }
-    if (f.action) {
-      // Exact action or an action prefix filter ("org." → every org.* event).
-      conditions.push(sql`action = ${f.action}`);
-    }
-    if (f.resourceType) {
-      conditions.push(sql`resource_type = ${f.resourceType}`);
-    }
-    if (f.from) {
-      conditions.push(sql`created_at >= ${f.from}::timestamptz`);
-    }
-    if (f.to) {
-      conditions.push(sql`created_at <= ${f.to}::timestamptz`);
-    }
-    return sql.join(conditions, sql` and `);
-  }
+  constructor(@Inject(ORG_AUDIT_REPOSITORY) private readonly auditRepository: IOrgAuditRepository) {}
 
   private validateTime(f: AuditQueryFilters): void {
     for (const [key, value] of [['from', f.from], ['to', f.to]] as const) {
@@ -76,19 +55,10 @@ export class OrgAuditService {
     this.validateTime(filters);
     const limit = Math.min(Math.max(filters.limit ?? 100, 1), AUDIT_QUERY_MAX_LIMIT);
     const offset = Math.max(filters.offset ?? 0, 0);
-    const where = this.buildWhere(orgId, filters);
-
-    const rows = await this.db.root.execute<AuditRow>(sql`
-      select id, actor_type, actor_id, action, resource_type, resource_id, details, created_at
-      from audit_events
-      where ${where}
-      order by created_at desc, id desc
-      limit ${limit} offset ${offset}
-    `);
-    const totals = await this.db.root.execute<{ total: string }>(sql`
-      select count(*) as total from audit_events where ${where}
-    `);
-    return { events: rows.rows, total: Number(totals.rows[0]?.total ?? 0) };
+    // Newest-first is the repository default; limit/offset are clamped here
+    // (the repository clamps defensively too).
+    const { events, total } = await this.auditRepository.query(orgId, { ...filters, limit, offset });
+    return { events: events.map(toAuditRow), total };
   }
 
   /**
@@ -98,26 +68,27 @@ export class OrgAuditService {
    * cheap for everyone.
    */
   async export(orgId: string, filters: AuditQueryFilters, format: 'csv' | 'json'): Promise<{ body: string; contentType: string; filename: string }> {
-    const rows = await this.db.root.execute<AuditRow>(sql`
-      select id, actor_type, actor_id, action, resource_type, resource_id, details, created_at
-      from audit_events
-      where ${this.buildWhere(orgId, filters)}
-      order by created_at asc, id asc
-      limit ${AUDIT_EXPORT_MAX_ROWS + 1}
-    `);
-    const events = rows.rows.slice(0, AUDIT_EXPORT_MAX_ROWS);
+    // Oldest-first (truncation drops the newest) — the repository's
+    // internal order override; the public filter surface is unchanged.
+    const { events } = await this.auditRepository.query(orgId, {
+      ...filters,
+      order: 'asc',
+      limit: AUDIT_EXPORT_MAX_ROWS + 1,
+      offset: 0,
+    });
+    const rows = events.slice(0, AUDIT_EXPORT_MAX_ROWS);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
     if (format === 'json') {
       return {
-        body: JSON.stringify({ org_id: orgId, exported_at: new Date().toISOString(), count: events.length, truncated: rows.rows.length > AUDIT_EXPORT_MAX_ROWS, events }, null, 2),
+        body: JSON.stringify({ org_id: orgId, exported_at: new Date().toISOString(), count: rows.length, truncated: events.length > AUDIT_EXPORT_MAX_ROWS, events: rows.map(toAuditRow) }, null, 2),
         contentType: 'application/json',
         filename: `neryva-audit-${orgId}-${timestamp}.json`,
       };
     }
 
     const header = 'id,created_at,actor_type,actor_id,action,resource_type,resource_id,details';
-    const lines = events.map((row) =>
+    const lines = rows.map((row) =>
       [row.id, row.created_at, row.actor_type, row.actor_id ?? '', row.action, row.resource_type, row.resource_id ?? '', JSON.stringify(row.details ?? {})]
         .map(csvEscape)
         .join(','),
@@ -131,17 +102,21 @@ export class OrgAuditService {
 
   /** Distinct values for the filter dropdowns (bounded, cached by the caller's HTTP layer). Actions ordered by frequency so the most useful chips surface first. */
   async filterFacets(orgId: string): Promise<{ actions: string[]; resourceTypes: string[] }> {
-    const actions = await this.db.root.execute<{ action: string }>(sql`
-      select action from audit_events where tenant_id = ${orgId} group by action order by count(*) desc, action asc limit 500
-    `);
-    const resourceTypes = await this.db.root.execute<{ resource_type: string }>(sql`
-      select distinct resource_type from audit_events where tenant_id = ${orgId} order by resource_type limit 200
-    `);
-    return {
-      actions: actions.rows.map((r) => r.action),
-      resourceTypes: resourceTypes.rows.map((r) => r.resource_type),
-    };
+    return this.auditRepository.filterFacets(orgId);
   }
+}
+
+function toAuditRow(row: AuditEventRow): AuditRow {
+  return {
+    id: row.id,
+    actor_type: row.actor_type,
+    actor_id: row.actor_id,
+    action: row.action,
+    resource_type: row.resource_type,
+    resource_id: row.resource_id,
+    details: row.details,
+    created_at: row.created_at,
+  };
 }
 
 function csvEscape(value: string): string {

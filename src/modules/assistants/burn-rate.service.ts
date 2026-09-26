@@ -1,11 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
-import { assistantRollouts } from './schema';
-import { assistants } from './schema';
+import { BURN_RATE_REPOSITORY, ROLLOUT_REPOSITORY } from './repositories/repository-tokens';
+import type { IBurnRateRepository } from './repositories/burn-rate.repository';
+import type { IRolloutRepository } from './repositories/rollout.repository';
 
 /**
  * Burn-rate auto-rollback — REL-11.3 (Wave 3, explicitly deferred in TPL-6.2).
@@ -29,8 +28,13 @@ import { assistants } from './schema';
  * plus direct service calls. A manual promotion inside the resume cooldown
  * suppresses re-pausing once (audited auto-pause + promotion audits tell the
  * story; the suppression itself is debug-logged, not audit-spammed).
+ *
+ * Persistence split (P3): all reads come from `IBurnRateRepository` (a
+ * READ-ONLY port — usage_ledger_entries aggregations, the audit_events
+ * suppression read, the rollouts newest-active read). The pause path writes
+ * `assistant_rollouts` ONLY through `IRolloutRepository.pauseRelease` — one
+ * writer of rollout state.
  */
-
 export interface BurnRateCheckResult {
   orgId: string;
   assistantId: string;
@@ -47,7 +51,8 @@ export class BurnRateService {
   private static readonly logger = new Logger(BurnRateService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(BURN_RATE_REPOSITORY) private readonly burnRate: IBurnRateRepository,
+    @Inject(ROLLOUT_REPOSITORY) private readonly rollouts: IRolloutRepository,
     private readonly audit: AuditService,
   ) {}
 
@@ -63,20 +68,7 @@ export class BurnRateService {
    * cost one indexed query, not N cost aggregations. Bounded for the worker.
    */
   async sweepCandidates(limit = 500): Promise<Array<{ orgId: string; assistantId: string }>> {
-    const rows = await this.db.root.execute<{ organization_id: string; assistant_id: string }>(sql`
-      select distinct ro.organization_id, ro.assistant_id
-      from assistant_rollouts ro
-      where ro.state = 'active' and ro.environment = 'production' and ro.channel = 'default'
-        and exists (
-          select 1 from usage_ledger_entries u
-          where u.organization_id = ro.organization_id and u.created_at > now() - interval '1 hour'
-        )
-      limit ${Math.min(Math.max(1, limit), 5000)}
-    `);
-    return (rows.rows as Array<{ organization_id: string; assistant_id: string }>).map((r) => ({
-      orgId: String(r.organization_id),
-      assistantId: String(r.assistant_id),
-    }));
+    return this.burnRate.sweepCandidates(Math.min(Math.max(1, limit), 5000));
   }
 
   /**
@@ -117,27 +109,14 @@ export class BurnRateService {
     if (cooldownMs <= 0) {
       return false;
     }
-    const pauses = await this.db.root.execute<{ created_at: string }>(sql`
-      select created_at from audit_events
-      where tenant_id = ${orgId} and action = 'assistant.auto_rollback'
-        and details->>'assistant_id' = ${assistantId}
-      order by created_at desc limit 1
-    `);
-    const lastAutoPauseAt = (pauses.rows[0]?.created_at ?? null) as string | null;
+    const lastAutoPauseAt = await this.burnRate.lastAutoRollbackAt(orgId, assistantId);
     if (!lastAutoPauseAt) {
       return false;
     }
-    const actives = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ createdAt: assistantRollouts.createdAt })
-        .from(assistantRollouts)
-        .where(and(eq(assistantRollouts.organizationId, orgId), eq(assistantRollouts.assistantId, assistantId), eq(assistantRollouts.state, 'active')))
-        .orderBy(desc(assistantRollouts.createdAt))
-        .limit(1),
-    );
+    const activeRolloutCreatedAt = await this.burnRate.newestActiveRolloutCreatedAt(orgId, assistantId);
     return BurnRateService.isSuppressedByManualResume({
       lastAutoPauseAt,
-      activeRolloutCreatedAt: actives[0]?.createdAt ?? null,
+      activeRolloutCreatedAt,
       nowMs: Date.now(),
       cooldownMs,
     });
@@ -164,24 +143,7 @@ export class BurnRateService {
     }
 
     // Last hour and last 24h costs from the same dollar the quota wall reads.
-    const costs = await this.db.withOrg(orgId, async (tx) => {
-      const hourRow = await tx.execute<{ cost: string }>(sql`
-        select coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0)::text as cost
-        from usage_ledger_entries
-        where organization_id = ${orgId}::uuid
-          and created_at >= now() - interval '1 hour'
-      `);
-      const dayRow = await tx.execute<{ cost: string }>(sql`
-        select coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0)::text as cost
-        from usage_ledger_entries
-        where organization_id = ${orgId}::uuid
-          and created_at >= now() - interval '24 hours'
-      `);
-      return {
-        lastHourCost: Number(hourRow.rows[0]?.cost ?? 0),
-        lastDayCost: Number(dayRow.rows[0]?.cost ?? 0),
-      };
-    });
+    const costs = await this.burnRate.costWindows(orgId);
 
     const baselineHourly = costs.lastDayCost / 24;
     const triggered = BurnRateService.shouldTrigger(costs.lastHourCost, baselineHourly, multiplier, floor);
@@ -213,37 +175,24 @@ export class BurnRateService {
 
     // Triggered — pause the active rollout at (production, default). Pausing
     // reverts traffic to the publish pointer without deleting history.
-    const paused = await this.db.withOrg(orgId, async (tx) => {
-      // Verify assistant exists and belongs to org (RLS + explicit check).
-      const found = await tx.select({ id: assistants.id }).from(assistants).where(eq(assistants.id, assistantId)).limit(1);
-      if (found.length === 0) throw ApiError.notFound('assistant');
-      const updated = await tx
-        .update(assistantRollouts)
-        .set({
-          state: 'paused',
-          pausedReason: `burn_rate: last-hour $${costs.lastHourCost.toFixed(2)} exceeded threshold $${(Math.max(baselineHourly, floor) * multiplier).toFixed(2)}`,
-          pausedBy: actor.slice(0, 128),
-          pausedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(
-          and(
-            eq(assistantRollouts.assistantId, assistantId),
-            eq(assistantRollouts.organizationId, orgId),
-            eq(assistantRollouts.environment, 'production'),
-            eq(assistantRollouts.channel, 'default'),
-            eq(assistantRollouts.state, 'active'),
-          ),
-        )
-        .returning({ id: assistantRollouts.id });
-      return updated[0]?.id ?? null;
+    // The write goes through IRolloutRepository.pauseRelease — the one writer
+    // of rollout state — never through the burn-rate port.
+    const pausedReason = `burn_rate: last-hour $${costs.lastHourCost.toFixed(2)} exceeded threshold $${(Math.max(baselineHourly, floor) * multiplier).toFixed(2)}`;
+    const { paused, rolloutId } = await this.rollouts.pauseRelease({
+      orgId,
+      assistantId,
+      environment: 'production',
+      channel: 'default',
+      reason: pausedReason,
+      pausedBy: actor,
     });
+    const pausedId = rolloutId ?? null;
 
-    if (paused) {
+    if (pausedId) {
       await this.audit.add({
         action: 'assistant.auto_rollback',
         resourceType: 'assistant_rollout',
-        resourceId: paused,
+        resourceId: pausedId,
         actorType: 'system',
         actorId: actor,
         tenantId: orgId,
@@ -255,7 +204,7 @@ export class BurnRateService {
           threshold: Math.max(baselineHourly, floor) * multiplier,
         },
       });
-      BurnRateService.logger.warn(`burn-rate auto-rollback paused rollout ${paused} for ${orgId}/${assistantId}: lastHour $${costs.lastHourCost.toFixed(2)} > threshold $${(Math.max(baselineHourly, floor) * multiplier).toFixed(2)}`);
+      BurnRateService.logger.warn(`burn-rate auto-rollback paused rollout ${pausedId} for ${orgId}/${assistantId}: lastHour $${costs.lastHourCost.toFixed(2)} > threshold $${(Math.max(baselineHourly, floor) * multiplier).toFixed(2)}`);
     }
 
     return {
@@ -266,7 +215,7 @@ export class BurnRateService {
       threshold: Math.max(baselineHourly, floor) * multiplier,
       triggered: true,
       action: paused ? 'paused_rollout' : 'none',
-      rolloutId: paused ?? undefined,
+      rolloutId: pausedId ?? undefined,
     };
   }
 }

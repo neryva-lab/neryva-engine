@@ -1,16 +1,18 @@
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { AuditService } from '../../common/audit/audit.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { StorageService } from '../../common/infra/storage/storage.service';
+import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { env } from '../../common/config/env';
-import { artifacts, chunks, documents, documentVersions, uploadSessions, Artifact, UploadSession } from './schema';
+import { Artifact, UploadSession } from './schema';
 import { ARTIFACT_PURPOSES } from './schema';
 import { normalizeSourceSlug } from './source-slug';
-import { buildSourceAclFilter } from './retrieval.service';
+import { ARTIFACT_REPOSITORY, DOCUMENT_REPOSITORY, UPLOAD_SESSION_REPOSITORY } from './repositories/repository-tokens';
+import { IArtifactRepository } from './repositories/artifact.repository';
+import { IDocumentRepository } from './repositories/document.repository';
+import { IUploadSessionRepository } from './repositories/upload-session.repository';
+import type { NewArtifact, NewUploadSession } from './repositories/repository-types';
 
 /**
  * Artifacts — the claim-check facade (Phase 7, ledger 7.1/7.2/7.9 + MCP 5.12).
@@ -18,7 +20,7 @@ import { buildSourceAclFilter } from './retrieval.service';
  * Engine owns metadata + access state; object storage owns bytes. Object
  * keys are tenant-bound `org/{orgId}/{purpose}/{uuid}` — never user-supplied.
  * Dereferencing an artifact is a FRESH authorization pass (the 7 checks);
- * an ArtifactRef is a capability, not a bearer URL.
+ * an ArtifactRef is a capability, not a Bearer <redacted>
  */
 const MEDIA_TYPE_ALLOWLIST = [
   'text/plain',
@@ -47,7 +49,9 @@ export class ArtifactsService {
   private static readonly logger = new Logger(ArtifactsService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(UPLOAD_SESSION_REPOSITORY) private readonly sessions: IUploadSessionRepository,
+    @Inject(ARTIFACT_REPOSITORY) private readonly artifactsRepo: IArtifactRepository,
+    @Inject(DOCUMENT_REPOSITORY) private readonly documents: IDocumentRepository,
     private readonly storage: StorageService,
     private readonly audit: AuditService,
   ) {}
@@ -99,20 +103,14 @@ export class ArtifactsService {
       if (input.sourceSlug !== undefined && input.sourceSlug !== null && input.sourceSlug !== '') {
         throw ApiError.validation({ target_document_id: 'source_slug is immutable on a version upload' });
       }
-      const target = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .select({ id: documents.id, state: documents.state })
-          .from(documents)
-          .where(and(eq(documents.id, input.targetDocumentId as string), eq(documents.organizationId, input.orgId)))
-          .limit(1),
-      );
-      if (target.length === 0) {
+      const target = await this.documents.findVersionTarget(input.orgId, input.targetDocumentId as string);
+      if (!target) {
         throw ApiError.notFound('document');
       }
-      if (target[0].state === 'retired') {
+      if (target.state === 'retired') {
         throw ApiError.conflict('version upload to a retired document is not allowed', { reason: 'version_target_retired' });
       }
-      targetDocumentId = target[0].id;
+      targetDocumentId = target.id;
     }
     // E-2: slug intent is validated + reserved NOW (fail fast at authorize
     // time, not deep in the ingestion worker). NULL = derive at ingestion.
@@ -120,14 +118,7 @@ export class ArtifactsService {
     let sourceSlug: string | null = null;
     if (targetDocumentId === null && input.sourceSlug !== undefined && input.sourceSlug !== null && input.sourceSlug !== '') {
       sourceSlug = normalizeSourceSlug(input.sourceSlug);
-      const clash = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .select({ id: documents.id })
-          .from(documents)
-          .where(and(eq(documents.organizationId, input.orgId), eq(documents.sourceSlug, sourceSlug as string)))
-          .limit(1),
-      );
-      if (clash.length > 0) {
+      if (await this.documents.isSourceSlugTaken(input.orgId, sourceSlug)) {
         throw ApiError.conflict('source_slug is already taken in this organization', { reason: 'source_slug_taken' });
       }
     }
@@ -157,40 +148,32 @@ export class ArtifactsService {
       metadata: { sha256: input.sha256Hex.toLowerCase(), artifact_id: artifactId },
     });
 
-    const result = await this.db.withOrg(input.orgId, async (tx) => {
-      const artifactRows = await tx
-        .insert(artifacts)
-        .values({
-          id: artifactId,
-          organizationId: input.orgId,
-          purpose: input.purpose,
-          objectKey,
-          contentTypeDeclared: input.mediaType,
-          byteLength: input.byteLength,
-          sha256: Buffer.from(input.sha256Hex, 'hex'),
-          createdBy: input.createdBy,
-          expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(), // unfinished uploads age out
-        })
-        .returning();
-      const sessionRows = await tx
-        .insert(uploadSessions)
-        .values({
-          id: sessionId,
-          organizationId: input.orgId,
-          purpose: input.purpose,
-          artifactId: artifactRows[0].id,
-          mediaType: input.mediaType,
-          byteLength: input.byteLength,
-          state: 'CREATED',
-          sourceSlug,
-          title,
-          targetDocumentId,
-          expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-          createdBy: input.createdBy,
-        })
-        .returning();
-      return { session: sessionRows[0], artifact: artifactRows[0] };
-    });
+    const newArtifact: NewArtifact = {
+      id: artifactId,
+      organizationId: input.orgId,
+      purpose: input.purpose,
+      objectKey,
+      contentTypeDeclared: input.mediaType,
+      byteLength: input.byteLength,
+      sha256: Buffer.from(input.sha256Hex, 'hex'),
+      createdBy: input.createdBy,
+      expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(), // unfinished uploads age out
+    };
+    const newSession: NewUploadSession = {
+      id: sessionId,
+      organizationId: input.orgId,
+      purpose: input.purpose,
+      artifactId,
+      mediaType: input.mediaType,
+      byteLength: input.byteLength,
+      state: 'CREATED',
+      sourceSlug,
+      title,
+      targetDocumentId,
+      expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      createdBy: input.createdBy,
+    };
+    const result = await this.sessions.createWithArtifact(input.orgId, newArtifact, newSession);
 
     await this.audit.add({
       action: 'artifact.upload_authorized',
@@ -213,52 +196,40 @@ export class ArtifactsService {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.sessionId, 'sessionId');
     this.storage.requireAvailable();
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx.select().from(uploadSessions).where(eq(uploadSessions.id, input.sessionId)).limit(1);
-      if (rows.length === 0) {
-        throw ApiError.notFound('upload session');
-      }
-      const session = rows[0];
-      if (session.state !== 'CREATED') {
-        throw ApiError.conflict('upload session is not awaiting completion', { state: session.state });
-      }
-      const artifactRows = await tx.select().from(artifacts).where(eq(artifacts.id, session.artifactId)).limit(1);
-      if (artifactRows.length === 0) {
-        throw ApiError.internal();
-      }
-      const artifact = artifactRows[0];
+    const pair = await this.sessions.getSessionWithArtifact(input.orgId, input.sessionId);
+    if (!pair) {
+      throw ApiError.notFound('upload session');
+    }
+    const { session, artifact } = pair;
+    if (session.state !== 'CREATED') {
+      throw ApiError.conflict('upload session is not awaiting completion', { state: session.state });
+    }
 
-      const head = await this.storage.headObject(artifact.objectKey);
-      if (!head) {
-        throw ApiError.validation({ upload: 'object not found — upload has not completed' });
-      }
-      if (head.contentLength !== artifact.byteLength) {
-        throw ApiError.validation({ upload: `byte length mismatch: declared ${artifact.byteLength}, stored ${head.contentLength}` });
-      }
-      const storedSha = head.metadata['sha256'];
-      const declaredSha = Buffer.from(artifact.sha256).toString('hex');
-      if (storedSha !== declaredSha) {
-        throw ApiError.validation({ upload: 'bound sha256 metadata mismatch — object does not match the signed policy' });
-      }
+    const head = await this.storage.headObject(artifact.objectKey);
+    if (!head) {
+      throw ApiError.validation({ upload: 'object not found — upload has not completed' });
+    }
+    if (head.contentLength !== artifact.byteLength) {
+      throw ApiError.validation({ upload: `byte length mismatch: declared ${artifact.byteLength}, stored ${head.contentLength}` });
+    }
+    const storedSha = head.metadata['sha256'];
+    const declaredSha = Buffer.from(artifact.sha256).toString('hex');
+    if (storedSha !== declaredSha) {
+      throw ApiError.validation({ upload: 'bound sha256 metadata mismatch — object does not match the signed policy' });
+    }
 
-      const updated = await tx
-        .update(uploadSessions)
-        .set({ state: 'UPLOADED', updatedAt: new Date().toISOString() })
-        .where(eq(uploadSessions.id, session.id))
-        .returning();
-      await tx
-        .update(artifacts)
-        .set({ contentTypeDetected: artifact.contentTypeDeclared, updatedAt: new Date().toISOString() })
-        .where(eq(artifacts.id, artifact.id));
-      return updated[0];
-    });
+    const claimed = await this.sessions.claimUploaded(input.orgId, input.sessionId, artifact.contentTypeDeclared);
+    if (!claimed) {
+      throw ApiError.conflict('upload session is not awaiting completion', { state: session.state });
+    }
+    return claimed;
   }
 
   async getUploadSession(orgId: string, sessionId: string): Promise<UploadSession | null> {
     assertUuid(orgId, 'orgId');
     assertUuid(sessionId, 'sessionId');
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(uploadSessions).where(eq(uploadSessions.id, sessionId)).limit(1));
-    return rows[0] ?? null;
+    const pair = await this.sessions.getSessionWithArtifact(orgId, sessionId);
+    return pair?.session ?? null;
   }
 
   // ── Documents (E-2 mapping surface) ─────────────────────────────────────
@@ -267,17 +238,18 @@ export class ArtifactsService {
   async listDocuments(orgId: string, limit?: number): Promise<Array<Record<string, unknown>>> {
     assertUuid(orgId, 'orgId');
     const take = Math.min(Math.max(1, limit ?? 50), 200);
-    return this.db.withOrg(orgId, async (tx) => {
-      const rows = await tx.execute(sql`
-        select d.id, d.source_slug, d.title, d.state, d.updated_at,
-               (select max(dv.version) from document_versions dv where dv.document_id = d.id) as latest_version
-        from documents d
-        where d.organization_id = ${orgId}::uuid
-        order by d.updated_at desc
-        limit ${take}
-      `);
-      return rows.rows as Array<Record<string, unknown>>;
-    });
+    const rows = await this.documents.listInventory(orgId, take);
+    // Fresh literals keep the legacy raw-SQL column set exactly
+    // (interfaces without an index signature are not assignable to the
+    // declared Array<Record<string, unknown>> return type).
+    return rows.map((r) => ({
+      id: r.id,
+      source_slug: r.source_slug,
+      title: r.title,
+      state: r.state,
+      updated_at: r.updated_at,
+      latest_version: r.latest_version,
+    }));
   }
 
   /**
@@ -290,31 +262,16 @@ export class ArtifactsService {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.documentId, 'documentId');
     const slug = normalizeSourceSlug(input.sourceSlug);
-    await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .select({ id: documents.id, sourceSlug: documents.sourceSlug })
-        .from(documents)
-        .where(and(eq(documents.id, input.documentId), eq(documents.organizationId, input.orgId)))
-        .limit(1);
-      if (!rows[0]) {
-        throw ApiError.notFound('document');
-      }
-      if (rows[0].sourceSlug === slug) {
-        return;
-      }
-      const clash = await tx
-        .select({ id: documents.id })
-        .from(documents)
-        .where(and(eq(documents.organizationId, input.orgId), eq(documents.sourceSlug, slug)))
-        .limit(1);
-      if (clash.length > 0) {
-        throw ApiError.conflict('source_slug is already taken in this organization', { reason: 'source_slug_taken' });
-      }
-      await tx
-        .update(documents)
-        .set({ sourceSlug: slug, updatedAt: new Date().toISOString() })
-        .where(eq(documents.id, input.documentId));
-    });
+    const outcome = await this.documents.renameSourceSlug(input.orgId, input.documentId, slug);
+    if (outcome === 'not_found') {
+      throw ApiError.notFound('document');
+    }
+    if (outcome === 'slug_taken') {
+      throw ApiError.conflict('source_slug is already taken in this organization', { reason: 'source_slug_taken' });
+    }
+    if (outcome === 'unchanged') {
+      return;
+    }
     await this.audit.add({
       action: 'document.source_slug_renamed',
       resourceType: 'document',
@@ -356,78 +313,28 @@ export class ArtifactsService {
     assertUuid(input.documentId, 'documentId');
     assertUuid(input.accountId, 'accountId');
     const chunkLimit = Math.min(Math.max(1, input.chunkLimit ?? 10), 50);
-    const sourceAclFilter = buildSourceAclFilter({
+    const preview = await this.documents.readPreview({
       orgId: input.orgId,
+      documentId: input.documentId,
       accountId: input.accountId,
-      emails: input.callerEmails ?? [],
+      callerEmails: input.callerEmails ?? [],
+      chunkLimit,
     });
-    return this.db.withOrg(input.orgId, async (tx) => {
-      // A4-12 gate — byte-identical shape to retrieval's aclPredicate:
-      // authorization before any chunk text is touched.
-      const gated = await tx.execute(sql`
-        select 1
-        from documents d
-        join artifacts a on a.id = d.source_artifact_id
-        left join retrieval_acl acl
-          on acl.organization_id = d.organization_id
-          and acl.resource_type = 'document'
-          and acl.resource_id = d.id
-        where d.id = ${input.documentId}::uuid
-          and d.organization_id = ${input.orgId}::uuid
-          and d.state = 'ready'
-          and a.state = 'active'
-          and (a.scan_status in ('clean', 'skipped'))
-          and (a.expires_at is null or a.expires_at > now())
-          and (acl.visibility = 'organization' or (acl.visibility = 'private' and acl.scope_account_id = ${input.accountId}::uuid))
-          ${sourceAclFilter}
-        limit 1
-      `);
-      if (gated.rows.length === 0) {
-        throw ApiError.notFound('document');
-      }
-      const docs = await tx
-        .select({ id: documents.id, sourceSlug: documents.sourceSlug, title: documents.title, state: documents.state })
-        .from(documents)
-        .where(and(eq(documents.id, input.documentId), eq(documents.organizationId, input.orgId)))
-        .limit(1);
-      const doc = docs[0];
-      if (!doc) {
-        throw ApiError.notFound('document');
-      }
-      const versions = await tx
-        .select({ id: documentVersions.id, version: documentVersions.version })
-        .from(documentVersions)
-        .where(and(eq(documentVersions.documentId, doc.id), eq(documentVersions.organizationId, input.orgId)))
-        .orderBy(desc(documentVersions.version))
-        .limit(1);
-      const version = versions[0] ?? null;
-      let totalChunks = 0;
-      let rows: Array<{ sequence: number; text: string; sourceRange: unknown }> = [];
-      if (version) {
-        const counted = await tx.execute(
-          sql`select count(*)::int as n from chunks where document_version_id = ${version.id}::uuid and organization_id = ${input.orgId}::uuid`,
-        );
-        totalChunks = Number((counted.rows[0] as { n: number } | undefined)?.n ?? 0);
-        rows = await tx
-          .select({ sequence: chunks.sequence, text: chunks.text, sourceRange: chunks.sourceRange })
-          .from(chunks)
-          .where(and(eq(chunks.documentVersionId, version.id), eq(chunks.organizationId, input.orgId)))
-          .orderBy(asc(chunks.sequence))
-          .limit(chunkLimit);
-      }
-      return {
-        document: {
-          id: doc.id,
-          source_slug: doc.sourceSlug,
-          title: doc.title,
-          state: doc.state,
-          latest_version: version?.version ?? null,
-        },
-        total_chunks: totalChunks,
-        truncated: totalChunks > rows.length,
-        chunks: rows.map((r) => ({ sequence: r.sequence, text: r.text, source_range: r.sourceRange })),
-      };
-    });
+    if (!preview) {
+      throw ApiError.notFound('document');
+    }
+    return {
+      document: {
+        id: preview.id,
+        source_slug: preview.source_slug,
+        title: preview.title,
+        state: preview.state,
+        latest_version: preview.version,
+      },
+      total_chunks: preview.chunkCount,
+      truncated: preview.chunkCount > preview.chunks.length,
+      chunks: preview.chunks.map((c) => ({ sequence: c.sequence, text: c.text, source_range: c.sourceRange })),
+    };
   }
 
   /**
@@ -439,26 +346,11 @@ export class ArtifactsService {
   async retireDocument(input: { orgId: string; documentId: string; actor: string }): Promise<void> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.documentId, 'documentId');
-    const changed = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .select({ id: documents.id, state: documents.state })
-        .from(documents)
-        .where(and(eq(documents.id, input.documentId), eq(documents.organizationId, input.orgId)))
-        .limit(1);
-      const doc = rows[0];
-      if (!doc) {
-        throw ApiError.notFound('document');
-      }
-      if (doc.state === 'retired') {
-        return false;
-      }
-      await tx
-        .update(documents)
-        .set({ state: 'retired', updatedAt: new Date().toISOString() })
-        .where(eq(documents.id, input.documentId));
-      return true;
-    });
-    if (changed) {
+    const outcome = await this.documents.retire(input.orgId, input.documentId);
+    if (outcome === 'not_found') {
+      throw ApiError.notFound('document');
+    }
+    if (outcome === 'retired') {
       await this.audit.add({
         action: 'document.retired',
         resourceType: 'document',
@@ -489,10 +381,7 @@ export class ArtifactsService {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.artifactId, 'artifactId');
 
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(artifacts).where(and(eq(artifacts.id, input.artifactId), eq(artifacts.organizationId, input.orgId))).limit(1),
-    );
-    const artifact = rows[0];
+    const artifact = await this.artifactsRepo.findById(input.orgId, input.artifactId);
     // (1) exists — DDL enforces the purpose allowlist, so existence covers it.
     if (!artifact) {
       throw ApiError.notFound('artifact');

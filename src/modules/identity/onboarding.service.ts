@@ -1,10 +1,9 @@
-import { eq, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
-import { accountOnboarding } from './schema';
+import { ONBOARDING_REPOSITORY } from './repositories/repository-tokens';
+import type { IOnboardingRepository, OnboardingState as OnboardingRepoState } from './repositories/onboarding.repository';
 
 /**
  * First-run onboarding state (first-run ledger F1-7): the ONE durable truth
@@ -40,11 +39,7 @@ export interface OnboardingState {
 }
 
 /** The columns the gate actually reads (keeps the resolver pure/testable). */
-export interface OnboardingRow {
-  welcomeCompletedAt: string | null;
-  welcomeSkipped: boolean;
-  consentVersion: string | null;
-}
+export type OnboardingRow = OnboardingRepoState;
 
 export interface CompleteOnboardingInput {
   accountId: string;
@@ -81,24 +76,16 @@ export function resolveOnboardingState(
 @Injectable()
 export class OnboardingService {
   constructor(
-    private readonly db: DbService,
+    @Inject(ONBOARDING_REPOSITORY) private readonly onboarding: IOnboardingRepository,
     private readonly audit: AuditService,
   ) {}
 
   /** The onboarding block carried by GET /auth/me (one primary-key lookup). */
   async stateFor(accountId: string): Promise<OnboardingState> {
-    const rows = await this.db.root
-      // Justification (db.root): platform-plane row filtered to the caller's
-      // own account id — this table has no tenant dimension to isolate.
-      .select({
-        welcomeCompletedAt: accountOnboarding.welcomeCompletedAt,
-        welcomeSkipped: accountOnboarding.welcomeSkipped,
-        consentVersion: accountOnboarding.consentVersion,
-      })
-      .from(accountOnboarding)
-      .where(eq(accountOnboarding.accountId, accountId))
-      .limit(1);
-    return this.withCopy(resolveOnboardingState(rows[0], env.LEGAL__TERMS_VERSION));
+    // Platform-plane row filtered to the caller's own account id — this
+    // table has no tenant dimension to isolate.
+    const row = await this.onboarding.findState(accountId);
+    return this.withCopy(resolveOnboardingState(row ?? undefined, env.LEGAL__TERMS_VERSION));
   }
 
   /**
@@ -122,33 +109,19 @@ export class OnboardingService {
       });
     }
     const now = new Date().toISOString();
-    const rows = await this.db.root
-      .insert(accountOnboarding)
-      .values({
-        accountId: input.accountId,
-        welcomeCompletedAt: now,
-        welcomeSkipped: input.skipped,
-        consentVersion: current,
-        consentAcceptedAt: now,
-        consentSource: 'welcome',
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: accountOnboarding.accountId,
-        set: {
-          welcomeCompletedAt: sql`coalesce(${accountOnboarding.welcomeCompletedAt}, excluded.welcome_completed_at)`,
-          welcomeSkipped: input.skipped,
-          consentVersion: current,
-          consentAcceptedAt: now,
-          consentSource: 'welcome',
-          updatedAt: now,
-        },
-      })
-      .returning({
-        welcomeCompletedAt: accountOnboarding.welcomeCompletedAt,
-        welcomeSkipped: accountOnboarding.welcomeSkipped,
-        consentVersion: accountOnboarding.consentVersion,
-      });
+    // Idempotence (this route also carries @Idempotent, but the row itself
+    // must be safe on its own): the FIRST completion stamp wins — a retry,
+    // a stale tab, or a double submit can never move when the account was
+    // onboarded — while the consent columns always carry the LATEST
+    // acceptance, which is exactly what a terms bump needs.
+    const row = await this.onboarding.complete(input.accountId, {
+      welcomeCompletedAt: now,
+      skipped: input.skipped,
+      termsVersion: current,
+      consentAcceptedAt: now,
+      consentSource: 'welcome',
+      updatedAt: now,
+    });
 
     // Evidence trail (append-only audit chain): which terms version this
     // account agreed to, and whether it personalized. Actor = the account.
@@ -166,7 +139,7 @@ export class OnboardingService {
       },
     });
 
-    return this.withCopy(resolveOnboardingState(rows[0], current));
+    return this.withCopy(resolveOnboardingState(row, current));
   }
 
   /** Attach the deployment copy (version + links) to the resolved gate. */

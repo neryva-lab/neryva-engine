@@ -1,6 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger, Optional } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
 import { uuidv7 } from '../../common/ids/uuidv7';
@@ -14,7 +12,9 @@ import { verifyTurnstile } from '../../common/http/turnstile';
 import { ConversationsService } from '../conversations/conversations.service';
 import { EscalationsService } from '../conversations/escalations.service';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
-import { channelSessions, channelIdentities, messageReceipts, ChannelAccount, ChannelSession, ChannelConfig } from './schema';
+import type { ChannelAccount, ChannelSession, ChannelConfig } from './schema';
+import { CHANNEL_SESSION_REPOSITORY } from './repositories/repository-tokens';
+import type { IChannelSessionRepository } from './repositories/channel-session.repository';
 
 /**
  * Website widget plane (Phase C4). The public, unauthenticated surface — the
@@ -23,6 +23,9 @@ import { channelSessions, channelIdentities, messageReceipts, ChannelAccount, Ch
  * allowlist per account, per-session/per-IP Redis caps, and a single
  * conversation bound to each session. Sessions NEVER accept a conversation
  * id from the client — the binding is server-side state.
+ *
+ * Persistence goes through `IChannelSessionRepository` (provider-blind P3
+ * port). This service holds no provider, Drizzle, or SQL references.
  */
 
 export interface WidgetSessionContext {
@@ -35,7 +38,7 @@ export class WidgetService {
   private static readonly logger = new Logger(WidgetService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(CHANNEL_SESSION_REPOSITORY) private readonly sessions: IChannelSessionRepository,
     private readonly conversations: ConversationsService,
     private readonly escalations: EscalationsService,
     private readonly purge: RetentionPurgeService,
@@ -83,29 +86,16 @@ export class WidgetService {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + env.CHANNELS__WEB_SESSION_TTL_SECONDS * 1000);
 
-    await this.db.withBypass(async (tx) => {
-      await tx.insert(channelIdentities).values({
-        id: identityId,
-        organizationId: account.organizationId,
-        channelAccountId: account.id,
-        platform: 'web',
-        externalUserId: `web-visitor:${sessionId}`,
-        displayName: null,
-        locale: null,
-        lastInboundAt: now.toISOString(),
-        windowExpiresAt: null, // no Meta window on web
-      });
-      await tx.insert(channelSessions).values({
-        id: sessionId,
-        organizationId: account.organizationId,
-        channelAccountId: account.id,
-        identityId,
-        tokenHash: sha256Hex(token),
-        status: 'active',
-        expiresAt: expiresAt.toISOString(),
-        createdIpHash: input.ipHash,
-        userAgentHash: input.userAgentHash,
-      });
+    await this.sessions.mintSession({
+      orgId: account.organizationId,
+      accountId: account.id,
+      sessionId,
+      identityId,
+      visitorRef: `web-visitor:${sessionId}`,
+      tokenHash: sha256Hex(token),
+      expiresAt: expiresAt.toISOString(),
+      ipHash: input.ipHash,
+      userAgentHash: input.userAgentHash,
     });
 
     WidgetService.logger.log(`widget session minted for account ${account.id} (origin ${input.origin})`);
@@ -116,37 +106,27 @@ export class WidgetService {
    * Resolve + touch a session from its raw token (cookie or header).
    * Same FORCE-RLS root-read class as the G1 getByPublicKey fix: sessions
    * resolve by exact token hash + account id (the token IS the capability),
-   * so the bypass vehicle applies — single tx for read + sliding-TTL touch.
+   * so the bypass vehicle applies — read + sliding-TTL touch.
    */
   async resolveSession(account: ChannelAccount, token: string | undefined | null): Promise<WidgetSessionContext> {
     if (!token || token.length < 20 || token.length > 128) {
       throw new ApiError(401, 'unauthenticated', 'missing widget session');
     }
-    return this.db.withBypass(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(channelSessions)
-        .where(and(eq(channelSessions.tokenHash, sha256Hex(token)), eq(channelSessions.channelAccountId, account.id)))
-        .limit(1);
-      const session = rows[0];
-      if (!session || session.status !== 'active') {
-        throw new ApiError(401, 'unauthenticated', 'widget session is not active');
-      }
-      if (Date.parse(session.expiresAt) <= Date.now()) {
-        throw new ApiError(401, 'unauthenticated', 'widget session expired');
-      }
-      // Sliding TTL: extend on activity, never past mint + 24h hard cap.
-      const nextExpiry = new Date(Date.now() + env.CHANNELS__WEB_SESSION_TTL_SECONDS * 1000);
-      const hardCap = new Date(Date.parse(session.createdAt) + 24 * 3600 * 1000);
-      const effective = nextExpiry > hardCap ? hardCap : nextExpiry;
-      if (Date.parse(session.expiresAt) < effective.getTime()) {
-        await tx
-          .update(channelSessions)
-          .set({ expiresAt: effective.toISOString(), lastActiveAt: new Date().toISOString() })
-          .where(eq(channelSessions.id, session.id));
-      }
-      return { session, account };
-    });
+    const session = await this.sessions.findSessionByTokenHash(account.id, sha256Hex(token));
+    if (!session || session.status !== 'active') {
+      throw new ApiError(401, 'unauthenticated', 'widget session is not active');
+    }
+    if (Date.parse(session.expiresAt) <= Date.now()) {
+      throw new ApiError(401, 'unauthenticated', 'widget session expired');
+    }
+    // Sliding TTL: extend on activity, never past mint + 24h hard cap.
+    const nextExpiry = new Date(Date.now() + env.CHANNELS__WEB_SESSION_TTL_SECONDS * 1000);
+    const hardCap = new Date(Date.parse(session.createdAt) + 24 * 3600 * 1000);
+    const effective = nextExpiry > hardCap ? hardCap : nextExpiry;
+    if (Date.parse(session.expiresAt) < effective.getTime()) {
+      await this.sessions.touchSession(session.id, effective.toISOString(), new Date().toISOString());
+    }
+    return { session, account };
   }
 
   // ── Messaging ─────────────────────────────────────────────────────────────
@@ -198,10 +178,7 @@ export class WidgetService {
     if (ctx.session.conversationId) {
       await this.purge.assertNotTombstoned('conversation', ctx.session.conversationId);
       // An archived conversation starts a fresh one.
-      const rows = await this.db.withOrg(ctx.account.organizationId, (tx) =>
-        tx.execute(sql`select status from conversations where id = ${ctx.session.conversationId}::uuid and organization_id = ${ctx.account.organizationId}::uuid limit 1`),
-      );
-      const status = (rows.rows[0] as { status: string } | undefined)?.status;
+      const status = await this.sessions.getConversationStatus(ctx.account.organizationId, ctx.session.conversationId);
       if (status === 'active') {
         return ctx.session.conversationId;
       }
@@ -217,12 +194,7 @@ export class WidgetService {
       },
       participantScope: 'channel',
     });
-    await this.db.withBypass((tx) =>
-      tx
-        .update(channelSessions)
-        .set({ conversationId: created.id })
-        .where(and(eq(channelSessions.id, ctx.session.id), eq(channelSessions.organizationId, ctx.account.organizationId))),
-    );
+    await this.sessions.bindSessionConversation(ctx.account.organizationId, ctx.session.id, created.id);
     ctx.session.conversationId = created.id;
     return created.id;
   }
@@ -233,10 +205,7 @@ export class WidgetService {
       throw ApiError.validation({ run_id: 'must be a uuid' });
     }
     const conversationId = await this.ensureConversation(ctx);
-    const rows = await this.db.withOrg(ctx.account.organizationId, (tx) =>
-      tx.execute(sql`select conversation_id from runs where id = ${runId}::uuid and organization_id = ${ctx.account.organizationId}::uuid limit 1`),
-    );
-    const runConversation = (rows.rows[0] as { conversation_id: string } | undefined)?.conversation_id;
+    const runConversation = await this.sessions.getRunConversationId(ctx.account.organizationId, runId);
     if (!runConversation || runConversation !== conversationId) {
       throw new ApiError(404, 'not_found', 'unknown run');
     }
@@ -254,35 +223,10 @@ export class WidgetService {
    */
   async markSessionRead(ctx: WidgetSessionContext, account: ChannelAccount): Promise<number> {
     const conversationId = await this.ensureConversation(ctx);
-    return this.db.withOrg(account.organizationId, async (tx) => {
-      const rows = await tx.execute(sql`
-        select id from messages
-        where conversation_id = ${conversationId}::uuid
-          and organization_id = ${account.organizationId}::uuid
-          and role = 'assistant'
-          and superseded_by is null
-        order by sequence desc
-        limit 50
-      `);
-      let added = 0;
-      for (const row of rows.rows as Array<{ id: string }>) {
-        const inserted = await tx
-          .insert(messageReceipts)
-          .values({
-            id: uuidv7(),
-            organizationId: account.organizationId,
-            conversationId,
-            messageId: row.id,
-            channelAccountId: account.id,
-            platform: 'web',
-            state: 'read',
-            occurredAt: new Date().toISOString(),
-          })
-          .onConflictDoNothing()
-          .returning({ id: messageReceipts.id });
-        added += inserted.length;
-      }
-      return added;
+    return this.sessions.markRecentAssistantMessagesRead({
+      orgId: account.organizationId,
+      conversationId,
+      accountId: account.id,
     });
   }
 

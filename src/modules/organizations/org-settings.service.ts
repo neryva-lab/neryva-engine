@@ -1,22 +1,21 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
-import { legacyTenants } from '../../common/infra/db/legacy-schema';
-import { getOrgBrief } from './org-info';
 import { ProjectsService } from './projects.service';
-import { orgSettings, projects } from './schema';
+import { ORG_INFO_REPOSITORY, ORG_SETTINGS_REPOSITORY } from './repositories/repository-tokens';
+import type { IOrgInfoRepository } from './repositories/org-info.repository';
+import type { IOrgSettingsRepository } from './repositories/org-settings.repository';
+import type { orgSettings } from './schema';
+import type { ProjectRow } from './repositories/project.repository';
 
 /**
  * Org profile + settings (eng-0009). The org's identity row is the
  * Python-owned `tenants` table (name, slug, region, retention) — the engine
- * writes name/region/retention through the documented dual-write seam
- * (same family as the deletion features-jsonb mark; DDL stays Python's
- * until handover A-1). Engine-owned presentation state (branding, support
- * email, default project, workspace preferences) lives in org_settings,
- * created lazily on first write.
+ * writes name/region/retention through `IOrgInfoRepository` (the documented
+ * dual-write seam; DDL stays Python's until handover A-1). Engine-owned
+ * presentation state (branding, support email, default project, workspace
+ * preferences) lives in org_settings, created lazily on first write.
  */
 export interface BrandingInput {
   logo_dataurl?: string | null;
@@ -51,7 +50,8 @@ const RETENTION_BOUNDS = { min: 1, max: 3650 };
 @Injectable()
 export class OrgSettingsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(ORG_SETTINGS_REPOSITORY) private readonly settings: IOrgSettingsRepository,
+    @Inject(ORG_INFO_REPOSITORY) private readonly orgInfo: IOrgInfoRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly projectsService: ProjectsService,
@@ -76,16 +76,11 @@ export class OrgSettingsService {
       preferences: Record<string, unknown>;
     };
   }> {
-    const brief = await getOrgBrief(this.db, orgId);
+    const brief = await this.orgInfo.getBrief(orgId);
     if (!brief) {
       throw new NotFoundException('organization');
     }
-    const tenant = await this.db.root.execute<{
-      region: string | null;
-      retention_days: number | null;
-    }>(sql`
-      select region, retention_days from tenants where id = ${orgId} limit 1
-    `);
+    const tenant = await this.orgInfo.getTenantFields(orgId);
     const settings = await this.ensureRow(orgId);
     const defaultProject = settings.defaultProjectId
       ? await this.projectsService.get(orgId, settings.defaultProjectId).catch(() => null)
@@ -95,8 +90,8 @@ export class OrgSettingsService {
         id: brief.id,
         name: brief.name,
         slug: brief.slug,
-        region: tenant.rows[0]?.region ?? null,
-        retentionDays: tenant.rows[0]?.retention_days ?? null,
+        region: tenant?.region ?? null,
+        retentionDays: tenant?.retentionDays ?? null,
         createdAt: brief.createdAt,
         markedDeleted: brief.markedDeleted,
       },
@@ -133,35 +128,29 @@ export class OrgSettingsService {
       if (name.length < 1) {
         throw ApiError.validation({ name: 'organization name is required' });
       }
-      const current = await getOrgBrief(this.db, input.orgId);
+      const current = await this.orgInfo.getBrief(input.orgId);
       if (!current) {
         throw ApiError.notFound('organization');
       }
       if (name !== current.name) {
-        await this.db.root
-          .update(legacyTenants)
-          .set({ name, updated_at: new Date().toISOString() })
-          .where(eq(legacyTenants.id, input.orgId));
+        await this.orgInfo.updateTenantProfile(input.orgId, { name });
         changes.name = { from: current.name, to: name };
       }
     }
 
     if (input.region !== undefined || input.retentionDays !== undefined) {
-      const current = await this.db.root.execute<{
-        region: string | null;
-        retention_days: number | null;
-      }>(sql`
-        select region, retention_days from tenants where id = ${input.orgId} limit 1
-      `);
-      const tenantUpdate: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      // Read-before-write: the current tenant fields drive the from→to
+      // audit diff (the pg lane read them in the same transaction).
+      const current = await this.orgInfo.getTenantFields(input.orgId);
+      const patch: { region?: string; retentionDays?: number } = {};
       if (input.region !== undefined) {
         const region = input.region.trim().slice(0, 32);
         if (region.length < 1) {
           throw ApiError.validation({ region: 'region cannot be empty when provided' });
         }
-        tenantUpdate.region = region;
-        if (region !== current.rows[0]?.region) {
-          changes.region = { from: current.rows[0]?.region ?? null, to: region };
+        patch.region = region;
+        if (region !== current?.region) {
+          changes.region = { from: current?.region ?? null, to: region };
         }
       }
       if (input.retentionDays !== undefined) {
@@ -171,18 +160,24 @@ export class OrgSettingsService {
             retention_days: `must be ${RETENTION_BOUNDS.min}–${RETENTION_BOUNDS.max} days`,
           });
         }
-        tenantUpdate.retentionDays = days;
-        if (days !== current.rows[0]?.retention_days) {
-          changes.retention_days = { from: current.rows[0]?.retention_days ?? null, to: days };
+        // The pg lane maps this to the `retention_days` column (the old
+        // service's `tenantUpdate.retentionDays` property never matched the
+        // legacy schema — the contract's pg implementation maps it
+        // correctly).
+        patch.retentionDays = days;
+        if (days !== current?.retentionDays) {
+          changes.retention_days = { from: current?.retentionDays ?? null, to: days };
         }
       }
-      await this.db.root
-        .update(legacyTenants)
-        .set(tenantUpdate)
-        .where(eq(legacyTenants.id, input.orgId));
+      await this.orgInfo.updateTenantProfile(input.orgId, patch);
     }
 
-    const settingsUpdate: Record<string, unknown> = {};
+    const settingsUpdate: {
+      supportEmail?: string | null;
+      defaultProjectId?: string | null;
+      branding?: Record<string, unknown>;
+      preferences?: Record<string, unknown>;
+    } = {};
     if (input.supportEmail !== undefined) {
       if (input.supportEmail === null || input.supportEmail === '') {
         settingsUpdate.supportEmail = null;
@@ -201,20 +196,19 @@ export class OrgSettingsService {
         settingsUpdate.defaultProjectId = null;
         changes.default_project_id = null;
       } else {
-        const project = await this.db.withOrg(input.orgId, (tx) =>
-          tx
-            .select({ id: projects.id, name: projects.name })
-            .from(projects)
-            .where(
-              and(
-                eq(projects.id, input.defaultProjectId!),
-                eq(projects.orgId, input.orgId),
-                isNull(projects.archivedAt),
-              ),
-            )
-            .limit(1),
-        );
-        if (!project[0]) {
+        // No direct projects persistence here — the check goes through
+        // ProjectsService (same read the controllers use). Only
+        // NotFoundException maps to the validation error; anything else
+        // (a persistence failure) propagates like the original.
+        let project: ProjectRow | null = null;
+        try {
+          project = await this.projectsService.get(input.orgId, input.defaultProjectId);
+        } catch (err) {
+          if (!(err instanceof NotFoundException)) {
+            throw err;
+          }
+        }
+        if (!project || project.archivedAt) {
           throw ApiError.validation({
             default_project_id: 'must be an active project in this organization',
           });
@@ -251,13 +245,10 @@ export class OrgSettingsService {
     }
 
     if (Object.keys(settingsUpdate).length > 0) {
-      settingsUpdate.updatedAt = new Date().toISOString();
-      await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .insert(orgSettings)
-          .values({ orgId: input.orgId, ...settingsUpdate } as typeof orgSettings.$inferInsert)
-          .onConflictDoUpdate({ target: orgSettings.orgId, set: settingsUpdate as never }),
-      );
+      await this.settings.updateSettings(input.orgId, {
+        ...settingsUpdate,
+        updatedAt: new Date().toISOString(),
+      });
     }
 
     if (Object.keys(changes).length > 0) {
@@ -279,20 +270,7 @@ export class OrgSettingsService {
 
   /** Settings row read (creating the lazy default on first touch). */
   async ensureRow(orgId: string): Promise<typeof orgSettings.$inferSelect> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .insert(orgSettings)
-        .values({ orgId })
-        .onConflictDoNothing({ target: orgSettings.orgId })
-        .returning(),
-    );
-    if (rows[0]) {
-      return rows[0];
-    }
-    const existing = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(orgSettings).where(eq(orgSettings.orgId, orgId)).limit(1),
-    );
-    return existing[0];
+    return this.settings.ensureRow(orgId);
   }
 
   private validateBranding(input: BrandingInput): Record<string, string> {

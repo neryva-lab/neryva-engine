@@ -1,11 +1,10 @@
 import { randomInt } from 'node:crypto';
-import { and, desc, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { RedisService } from '../../common/infra/redis.service';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
 import { env } from '../../common/config/env';
-import { emailLoginCodes } from './schema';
+import { EMAIL_CODE_REPOSITORY } from './repositories/repository-tokens';
+import type { IEmailCodeRepository } from './repositories/email-code.repository';
 
 /**
  * Email one-time codes — the PRIMARY login path (Δ1). Security model:
@@ -17,6 +16,9 @@ import { emailLoginCodes } from './schema';
  *  - enumeration-resistant by construction: an unknown email still returns
  *    "code sent" (the caller upserts an account on first login, so there
  *    is no "user does not exist" signal to leak at this layer anyway).
+ *
+ * Persistence goes through `IEmailCodeRepository` (provider-blind); the
+ * expiry / attempt-ceiling policy stays here, in the service.
  */
 const CODE_DIGITS = 8;
 const MAX_ATTEMPTS = env.IDENTITY_EMAIL_CODE_MAX_ATTEMPTS;
@@ -27,7 +29,7 @@ export type VerifyResult = { ok: true; accountId: string } | { ok: false; reason
 @Injectable()
 export class EmailCodeService {
   constructor(
-    private readonly db: DbService,
+    @Inject(EMAIL_CODE_REPOSITORY) private readonly codes: IEmailCodeRepository,
     private readonly redis: RedisService,
   ) {}
 
@@ -37,31 +39,13 @@ export class EmailCodeService {
       return { ok: false, reason: budget };
     }
     const code = String(randomInt(0, 100_000_000)).padStart(CODE_DIGITS, '0');
+    const now = new Date().toISOString();
     const expiresAt = new Date(Date.now() + env.IDENTITY_EMAIL_CODE_TTL_SECONDS * 1000).toISOString();
 
     // A fresh issue voids previous unconsumed codes for the account, and
     // dead rows (consumed or expired) are purged so the per-account history
     // stays bounded — verify() only inspects the newest rows.
-    await this.db.root
-      .update(emailLoginCodes)
-      .set({ consumedAt: new Date().toISOString() })
-      .where(eq(emailLoginCodes.accountId, accountId));
-
-    await this.db.root
-      .delete(emailLoginCodes)
-      .where(
-        and(
-          eq(emailLoginCodes.accountId, accountId),
-          or(isNotNull(emailLoginCodes.consumedAt), lt(emailLoginCodes.expiresAt, new Date().toISOString())),
-        ),
-      );
-
-    await this.db.root.insert(emailLoginCodes).values({
-      accountId,
-      codeHash: sha256Hex(code),
-      requestIp: requestIp ?? null,
-      expiresAt,
-    });
+    await this.codes.issue(accountId, sha256Hex(code), requestIp ?? null, expiresAt, now);
     return { ok: true, code };
   }
 
@@ -69,16 +53,9 @@ export class EmailCodeService {
     if (presentedCode.length !== CODE_DIGITS || !/^\d+$/.test(presentedCode)) {
       return { ok: false, reason: 'invalid' };
     }
-    const hash = sha256Hex(presentedCode);
     // Newest first: the live code is always at the head even for accounts
     // with a long history (an unordered LIMIT could miss it entirely).
-    const rows = await this.db.root
-      .select()
-      .from(emailLoginCodes)
-      .where(eq(emailLoginCodes.accountId, accountId))
-      .orderBy(desc(emailLoginCodes.createdAt))
-      .limit(20);
-    const row = rows.find((r) => r.codeHash === hash && !r.consumedAt);
+    const row = await this.codes.findLive(accountId, sha256Hex(presentedCode));
     if (!row) {
       return { ok: false, reason: 'invalid' };
     }
@@ -94,20 +71,12 @@ export class EmailCodeService {
 
   /** Atomically consume a verified code; false when raced/consumed. */
   async consume(accountId: string, code: string): Promise<boolean> {
-    const result = await this.db.root
-      .update(emailLoginCodes)
-      .set({ consumedAt: new Date().toISOString() })
-      .where(and(eq(emailLoginCodes.codeHash, sha256Hex(code)), eq(emailLoginCodes.accountId, accountId), isNull(emailLoginCodes.consumedAt)))
-      .returning({ id: emailLoginCodes.id });
-    return result.length === 1;
+    return this.codes.consume(accountId, sha256Hex(code));
   }
 
   /** Record a failed verification attempt against the account's live codes. */
   async registerFailedAttempt(accountId: string): Promise<void> {
-    await this.db.root
-      .update(emailLoginCodes)
-      .set({ attempts: sql`${emailLoginCodes.attempts} + 1` })
-      .where(and(eq(emailLoginCodes.accountId, accountId), isNull(emailLoginCodes.consumedAt)));
+    await this.codes.registerFailedAttempt(accountId);
   }
 
   // ── Rate budgets: N codes/account/hour, M/IP/hour (fixed window) ────────

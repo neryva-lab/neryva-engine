@@ -1,9 +1,8 @@
-import { and, isNotNull, lt, eq } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
-import { productEntitlements } from '../organizations/schema';
 import { EntitlementsService } from '../organizations/entitlements.service';
+import { BILLING_REFERENCE_REPOSITORY } from './repositories/repository-tokens';
+import type { IBillingReferenceRepository } from './repositories/billing-reference.repository';
 
 /**
  * The trial-expiry sweep (H-3): trials carry a `period_end` (set by the
@@ -23,18 +22,13 @@ export class TrialExpiryService {
   private static readonly logger = new Logger(TrialExpiryService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(BILLING_REFERENCE_REPOSITORY) private readonly refs: IBillingReferenceRepository,
     private readonly entitlements: EntitlementsService,
     private readonly events: EventBus,
   ) {}
 
   async sweep(now = new Date()): Promise<{ scanned: number; expired: number }> {
-    const rows = await this.db.withBypass((tx) =>
-      tx
-        .select({ id: productEntitlements.id, orgId: productEntitlements.orgId, product: productEntitlements.product })
-        .from(productEntitlements)
-        .where(and(eq(productEntitlements.status, 'trial'), isNotNull(productEntitlements.periodEnd), lt(productEntitlements.periodEnd, now.toISOString()))),
-    );
+    const rows = await this.refs.findExpiredTrials(now.toISOString());
 
     let expired = 0;
     for (const row of rows) {

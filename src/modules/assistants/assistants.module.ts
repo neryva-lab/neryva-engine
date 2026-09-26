@@ -24,18 +24,23 @@ import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { ConversationsModule } from '../conversations/conversations.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AssistantRepositoriesModule } from './repositories/assistant-repositories.module';
 
 @Module({
   // ConversationsModule (ConversationsService) backs the REL-2.4 test-run
   // endpoint; the conversations cone does not import this module, so no cycle.
   // NotificationsModule (P6 compromise alerts): imports Corporate/Identity/
   // Organizations — none import this module, so no cycle either.
+  // Persistence ports live in AssistantRepositoriesModule (separate module so
+  // other cones — e.g. knowledge's EvalService — can inject the tokens
+  // without importing this module, which would be a cycle).
   imports: [
     ConfigPublishModule,
     KnowledgeModule,
     OrganizationsModule,
     ConversationsModule,
     NotificationsModule,
+    AssistantRepositoriesModule,
   ],
   controllers: [
     AssistantsController,

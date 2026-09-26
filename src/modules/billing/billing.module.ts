@@ -26,6 +26,7 @@ import { UsageQueryService } from './usage-query.service';
 import { UsageLedgerConsumer } from '../../workers/usage-ledger.consumer';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AssistantsModule } from '../assistants/assistants.module';
+import { BillingRepositoriesModule } from './repositories/billing-repositories.module';
 
 /**
  * The billing & metering module (ledger billing-metering B-1…B-3, B-5):
@@ -44,7 +45,7 @@ import { AssistantsModule } from '../assistants/assistants.module';
 // ledger/conversations reads) — and the deferred callback also breaks the
 // CJS load-cycle TDZ.
 @Module({
-  imports: [forwardRef(() => ConsoleModule), forwardRef(() => AssistantsModule), OrganizationsModule, NotificationsModule],
+  imports: [forwardRef(() => ConsoleModule), forwardRef(() => AssistantsModule), OrganizationsModule, NotificationsModule, BillingRepositoriesModule],
   controllers: [MeteringController, UsageController, BillingController, BillingExtensionController, PriceCatalogController, StripeWebhookController],
   providers: [
     SpendIngestService,

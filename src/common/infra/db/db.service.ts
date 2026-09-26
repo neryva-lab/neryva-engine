@@ -5,6 +5,22 @@ import { sql } from 'drizzle-orm';
 import { env } from '../../config/env';
 import './pg-types';
 
+/**
+ * Fail-closed DATABASE_URL accessor for the postgres lane. The env
+ * superRefine already requires DATABASE_URL when DB_PROVIDER=postgres;
+ * this is the actionable error at the point of use.
+ */
+function requireDatabaseUrl(): string {
+  const url = env.DATABASE_URL;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL is not set: DB_PROVIDER=postgres requires a PostgreSQL ' +
+        'connection string, e.g. postgresql://neryva_app:<password>@127.0.0.1:5432/neryva',
+    );
+  }
+  return url;
+}
+
 export interface TxOptions {
   /** Per-transaction statement_timeout in ms (default 10_000). */
   statementTimeoutMs?: number;
@@ -40,8 +56,16 @@ export class DbService implements OnModuleDestroy {
   readonly db: NodePgDatabase;
 
   constructor() {
+    // Inert on the Mongo lane (mirrors MongoDbService on the postgres lane):
+    // repository modules select the Mongo implementations when
+    // DB_PROVIDER=mongodb, so this pool is never used there. pg Pool does not
+    // connect in its constructor; the placeholder URL is never dialed.
+    const connectionString =
+      env.DB_PROVIDER === 'postgres'
+        ? requireDatabaseUrl()
+        : 'postgresql://127.0.0.1:1/neryva-inert';
     this.pool = new Pool({
-      connectionString: env.DATABASE_URL,
+      connectionString,
       max: env.DATABASE_POOL_MAX,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,

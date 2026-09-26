@@ -62,3 +62,5 @@ var/keys
 !dev_scripts/README.md
 !dev_scripts/.env.windows.example
 dev_scripts/bin
+# cutover CLI resume state (never commit)
+.cutover-state.json

@@ -1,14 +1,19 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, desc, eq, like, lte } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
-import { legacyApiKeys, legacyAuditEvents } from '../../common/infra/db/legacy-schema';
-import { studioProjectKeys } from '../studio-furniture/schema';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  API_KEY_REPOSITORY,
+  STUDIO_PROJECT_KEY_REPOSITORY,
+} from './repositories/repository-tokens';
+import type {
+  ApiKeyPatch,
+  IApiKeyRepository,
+  IStudioProjectKeyRepository,
+} from './repositories/keys.repository';
 
 /**
  * Key/token authority — ENGINE side of handover A-1 (ledger agent-runtime).
@@ -27,6 +32,11 @@ import { NotificationsService } from '../notifications/notifications.service';
  * arrive with Python Alembic 0017 (plan P3) — until then the engine writes
  * only the existing columns; this service is the single choke point so the
  * columns land here, nowhere else.
+ *
+ * Persistence (P3): all database work goes through the `IApiKeyRepository`
+ * / `IStudioProjectKeyRepository` ports. This service owns validation,
+ * key-material generation, audit writes, event-bus hints, and
+ * notifications. Public method signatures and behavior are unchanged.
  */
 export const L2_KEY_PREFIX = 'nrv_live_';
 /** Roles the engine may mint for org keys (platform staff roles excluded — those are operator-issued). */
@@ -35,7 +45,8 @@ export const ORG_KEY_ROLES = ['operator', 'auditor'] as const;
 @Injectable()
 export class KeysService {
   constructor(
-    private readonly db: DbService,
+    @Inject(API_KEY_REPOSITORY) private readonly apiKeys: IApiKeyRepository,
+    @Inject(STUDIO_PROJECT_KEY_REPOSITORY) private readonly projectKeys: IStudioProjectKeyRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly notifications: NotificationsService,
@@ -55,9 +66,7 @@ export class KeysService {
       createdAt: string;
     }>
   > {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(legacyApiKeys).where(eq(legacyApiKeys.tenant_id, orgId)).orderBy(desc(legacyApiKeys.created_at)).limit(200),
-    );
+    const rows = await this.apiKeys.listKeys(orgId);
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
@@ -106,30 +115,22 @@ export class KeysService {
 
     const raw = `${L2_KEY_PREFIX}${randomBytes(32).toString('base64url')}`;
     const now = new Date().toISOString();
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(legacyApiKeys)
-        .values({
-          id: randomUUID(),
-          name,
-          key_hash: sha256Hex(raw),
-          prefix: `${L2_KEY_PREFIX}${raw.slice(L2_KEY_PREFIX.length, L2_KEY_PREFIX.length + 8)}`,
-          role: input.role,
-          tenant_id: input.orgId,
-          scopes: input.scopes,
-          expires_at: input.expiresAt,
-          revoked: false,
-          usage_count: 0,
-          mfa_enabled: false,
-          created_at: now,
-          updated_at: now,
-        })
-        .returning({ id: legacyApiKeys.id }),
-    );
+    const created = await this.apiKeys.createKey({
+      id: randomUUID(),
+      orgId: input.orgId,
+      name,
+      keyHash: sha256Hex(raw),
+      prefix: `${L2_KEY_PREFIX}${raw.slice(L2_KEY_PREFIX.length, L2_KEY_PREFIX.length + 8)}`,
+      role: input.role,
+      scopes: input.scopes,
+      expiresAt: input.expiresAt,
+      createdAt: now,
+      updatedAt: now,
+    });
     await this.audit.add({
       action: 'key.created',
       resourceType: 'api_key',
-      resourceId: inserted[0].id,
+      resourceId: created.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
@@ -138,24 +139,19 @@ export class KeysService {
     // K-2: optional project binding AT ISSUE TIME (the engine-owned binding
     // table — one step instead of create-then-bind).
     if (input.projectId) {
-      await this.db.withOrg(input.orgId, (tx) =>
-        tx.insert(studioProjectKeys).values({ orgId: input.orgId, apiKeyId: inserted[0].id, projectId: input.projectId as string, boundBy: input.actorId }).onConflictDoNothing(),
-      );
+      await this.projectKeys.bindKeyToProject({
+        orgId: input.orgId,
+        apiKeyId: created.id,
+        projectId: input.projectId,
+        boundBy: input.actorId,
+      });
     }
     await this.notifyKeyEvent(input.orgId, 'API key created', `The key "${name}" was created.`, 'created');
-    return { key: raw, id: inserted[0].id };
+    return { key: raw, id: created.id };
   }
 
   async revoke(input: { orgId: string; keyId: string; actorId: string }): Promise<void> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select({ id: legacyApiKeys.id }).from(legacyApiKeys).where(and(eq(legacyApiKeys.id, input.keyId), eq(legacyApiKeys.tenant_id, input.orgId))).limit(1),
-    );
-    if (!rows[0]) {
-      throw ApiError.notFound('api key');
-    }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(legacyApiKeys).set({ revoked: true, updated_at: new Date().toISOString() }).where(eq(legacyApiKeys.id, input.keyId)),
-    );
+    await this.apiKeys.revokeKey(input.orgId, input.keyId);
     await this.audit.add({
       action: 'key.revoked',
       resourceType: 'api_key',
@@ -190,8 +186,9 @@ export class KeysService {
     if (!/^[0-9a-f]{64}$/.test(keyHash)) {
       throw ApiError.validation({ key_hash: 'must be a 64-char sha-256 hex digest' });
     }
-    const rows = await this.db.root.select().from(legacyApiKeys).where(eq(legacyApiKeys.key_hash, keyHash)).limit(1);
-    const row = rows[0];
+    // Unauthenticated auth path: the port resolves the row by hash alone;
+    // the org comes from the row's tenant_id.
+    const row = await this.apiKeys.findByKeyHash(keyHash);
     if (!row) {
       return response({ reason: 'unknown' });
     }
@@ -215,14 +212,7 @@ export class KeysService {
   // -- K-1: update (rename / scope change) ----------------------------------
 
   async update(input: { orgId: string; keyId: string; name?: string; scopes?: string[]; actorId: string }): Promise<void> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(legacyApiKeys).where(and(eq(legacyApiKeys.id, input.keyId), eq(legacyApiKeys.tenant_id, input.orgId))).limit(1),
-    );
-    const key = rows[0];
-    if (!key || key.revoked) {
-      throw ApiError.notFound('api key');
-    }
-    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    const patch: ApiKeyPatch = {};
     if (input.name !== undefined) {
       const name = input.name.trim().slice(0, 128);
       if (name.length < 1) {
@@ -236,7 +226,9 @@ export class KeysService {
       }
       patch.scopes = input.scopes;
     }
-    await this.db.withOrg(input.orgId, (tx) => tx.update(legacyApiKeys).set(patch).where(eq(legacyApiKeys.id, input.keyId)));
+    // The port reads the row (not_found when missing or revoked) and applies
+    // the patch with an updated_at bump.
+    await this.apiKeys.updateKey(input.orgId, input.keyId, patch);
     await this.audit.add({
       action: 'key.updated',
       resourceType: 'api_key',
@@ -251,25 +243,13 @@ export class KeysService {
   // -- Rotation (Stripe semantics): same row, new secret, old key dies now --
 
   async rotate(input: { orgId: string; keyId: string; actorId: string }): Promise<{ key: string }> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(legacyApiKeys).where(and(eq(legacyApiKeys.id, input.keyId), eq(legacyApiKeys.tenant_id, input.orgId))).limit(1),
-    );
-    const existing = rows[0];
-    if (!existing || existing.revoked) {
-      throw ApiError.notFound('api key');
-    }
     const raw = `${L2_KEY_PREFIX}${randomBytes(32).toString('base64url')}`;
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(legacyApiKeys)
-        .set({
-          key_hash: sha256Hex(raw),
-          prefix: `${L2_KEY_PREFIX}${raw.slice(L2_KEY_PREFIX.length, L2_KEY_PREFIX.length + 8)}`,
-          usage_count: 0,
-          updated_at: new Date().toISOString(),
-        })
-        .where(eq(legacyApiKeys.id, input.keyId)),
-    );
+    // The port reads the row (not_found when missing or revoked), swaps the
+    // secret hash + prefix, and resets usage_count.
+    const existing = await this.apiKeys.rotateKey(input.orgId, input.keyId, {
+      keyHash: sha256Hex(raw),
+      prefix: `${L2_KEY_PREFIX}${raw.slice(L2_KEY_PREFIX.length, L2_KEY_PREFIX.length + 8)}`,
+    });
     await this.audit.add({
       action: 'key.rotated',
       resourceType: 'api_key',
@@ -288,21 +268,13 @@ export class KeysService {
   // -- K-3: per-key detail - row + binding + counters + event trail ----------
 
   async detail(orgId: string, keyId: string): Promise<Record<string, unknown>> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(legacyApiKeys).where(and(eq(legacyApiKeys.id, keyId), eq(legacyApiKeys.tenant_id, orgId))).limit(1),
-    );
-    const key = rows[0];
+    const key = await this.apiKeys.getKey(orgId, keyId);
     if (!key) {
       throw ApiError.notFound('api key');
     }
-    const [bindingRows, eventRows] = await Promise.all([
-      this.db.withOrg(orgId, (tx) => tx.select().from(studioProjectKeys).where(eq(studioProjectKeys.apiKeyId, keyId)).limit(1)),
-      this.db.root
-        .select({ action: legacyAuditEvents.action, actor_id: legacyAuditEvents.actor_id, created_at: legacyAuditEvents.created_at, details: legacyAuditEvents.details })
-        .from(legacyAuditEvents)
-        .where(and(eq(legacyAuditEvents.resource_id, keyId), like(legacyAuditEvents.action, 'key.%')))
-        .orderBy(desc(legacyAuditEvents.created_at))
-        .limit(50),
+    const [binding, events] = await Promise.all([
+      this.projectKeys.getBindingByKeyId(orgId, keyId),
+      this.apiKeys.listKeyEvents(keyId),
     ]);
     const daysToExpiry = key.expires_at ? Math.ceil((Date.parse(key.expires_at) - Date.now()) / 86_400_000) : null;
     return {
@@ -317,8 +289,8 @@ export class KeysService {
       created_at: key.created_at,
       usage_count: key.usage_count,
       last_used_at: key.last_used_at,
-      project_binding: bindingRows[0] ? { project_id: bindingRows[0].projectId } : null,
-      events: eventRows,
+      project_binding: binding ? { project_id: binding.projectId } : null,
+      events,
     };
   }
 
@@ -326,18 +298,13 @@ export class KeysService {
 
   async notifyExpiringKeys(withinDays: number): Promise<number> {
     const horizon = new Date(Date.now() + withinDays * 86_400_000).toISOString();
-    const rows = await this.db.withBypass((tx) =>
-      tx
-        .select({ id: legacyApiKeys.id, name: legacyApiKeys.name, tenant_id: legacyApiKeys.tenant_id, expires_at: legacyApiKeys.expires_at })
-        .from(legacyApiKeys)
-        .where(and(eq(legacyApiKeys.revoked, false), lte(legacyApiKeys.expires_at, horizon))),
-    );
+    const rows = await this.apiKeys.scanExpiringKeys(horizon);
     let sent = 0;
     for (const row of rows) {
-      const days = Math.ceil((Date.parse(row.expires_at as string) - Date.now()) / 86_400_000);
-      if (row.tenant_id) {
+      const days = Math.ceil((Date.parse(row.expiresAt as string) - Date.now()) / 86_400_000);
+      if (row.tenantId) {
         await this.notifications
-          .notifyOrgRoles(row.tenant_id, ['owner', 'admin'], {
+          .notifyOrgRoles(row.tenantId, ['owner', 'admin'], {
             kind: 'system',
             severity: days <= 3 ? 'warn' : 'info',
             title: `API key "${row.name}" expires in ${days} day(s)`,

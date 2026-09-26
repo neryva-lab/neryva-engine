@@ -13,6 +13,7 @@ import { InboxController } from './inbox.controller';
 import { NewsletterService } from './newsletter.service';
 import { PublicController } from './public.controller';
 import { SuppressionService } from './suppression.service';
+import { CorporateRepositoriesModule } from './repositories/corporate-repositories.module';
 
 /**
  * The corporate module (ADR-004 D3 + ADR-007 D3: fresh NestJS, no Express
@@ -33,6 +34,7 @@ import { SuppressionService } from './suppression.service';
  * neryva_backend retirement.
  */
 @Module({
+  imports: [CorporateRepositoriesModule],
   controllers: [PublicController, ContentController, InboxController],
   providers: [
     EmailService,

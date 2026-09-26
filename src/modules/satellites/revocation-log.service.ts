@@ -1,8 +1,8 @@
-import { and, asc, gt, sql } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
-import { revocationEvents, RevocationEventRow } from './satellite.schema';
+import { REVOCATION_LOG_REPOSITORY } from './repositories/repository-tokens';
+import type { IRevocationLogRepository } from './repositories/revocation-log.repository';
+import { RevocationEventRow } from './satellite.schema';
 
 /**
  * The revocation recorder + feed (A-2's missing surface, gap X-1).
@@ -25,7 +25,8 @@ export class RevocationLogService implements OnModuleInit {
   private static readonly logger = new Logger(RevocationLogService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(REVOCATION_LOG_REPOSITORY)
+    private readonly revocations: IRevocationLogRepository,
     private readonly events: EventBus,
   ) {}
 
@@ -49,7 +50,7 @@ export class RevocationLogService implements OnModuleInit {
 
   async record(kind: 'session' | 'account_all' | 'key', subjectId: string, payload: Record<string, unknown>): Promise<void> {
     try {
-      await this.db.root.insert(revocationEvents).values({ kind, subjectId, payload });
+      await this.revocations.appendRevocation({ kind, subjectId, payload });
     } catch (err) {
       RevocationLogService.logger.error(`revocation log append failed (${kind}/${subjectId}): ${(err as Error).message}`);
     }
@@ -76,16 +77,7 @@ export class RevocationLogService implements OnModuleInit {
       }
     }
 
-    const rows = await this.db.root
-      .select()
-      .from(revocationEvents)
-      .where(
-        id
-          ? sql`(${revocationEvents.occurredAt}, ${revocationEvents.id}) > (${occurredAt}::timestamptz, ${id}::uuid)`
-          : gt(revocationEvents.occurredAt, occurredAt),
-      )
-      .orderBy(asc(revocationEvents.occurredAt), asc(revocationEvents.id))
-      .limit(capped);
+    const rows = await this.revocations.listSince(occurredAt, id, capped);
 
     const last = rows[rows.length - 1];
     return {
@@ -96,11 +88,6 @@ export class RevocationLogService implements OnModuleInit {
 
   /** Rows in a time window (ops/verification view). */
   async between(fromIso: string, toIso: string, limit = 200): Promise<RevocationEventRow[]> {
-    return this.db.root
-      .select()
-      .from(revocationEvents)
-      .where(and(sql`${revocationEvents.occurredAt} >= ${fromIso}::timestamptz`, sql`${revocationEvents.occurredAt} <= ${toIso}::timestamptz`))
-      .orderBy(asc(revocationEvents.occurredAt))
-      .limit(Math.min(limit, 1000));
+    return this.revocations.listBetween(fromIso, toIso, limit);
   }
 }

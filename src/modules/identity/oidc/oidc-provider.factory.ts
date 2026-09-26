@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { env } from '../../../common/config/env';
-import { OidcDrizzleAdapter } from './oidc-adapter';
+import { OidcRepositoryAdapter } from './oidc-adapter';
 import { interactionEntryUrl } from './interaction-route.helper';
 import { socialProvider } from '../social/social.config';
 import { JwksCustody } from './jwks-custody';
@@ -28,7 +28,7 @@ export class OidcProviderFactory {
   private readonly logger = new Logger(OidcProviderFactory.name);
 
   constructor(
-    private readonly adapter: OidcDrizzleAdapter,
+    private readonly adapter: OidcRepositoryAdapter,
     private readonly custody: JwksCustody,
     private readonly accounts: AccountsService,
   ) {}

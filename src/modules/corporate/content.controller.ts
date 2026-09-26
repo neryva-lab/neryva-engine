@@ -1,17 +1,16 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
 import { AuthLayer, CurrentPrincipal, RequireScopes } from '../../common/auth/decorators';
 import { L1Principal, L2Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
 import { RateLimit } from '../../common/http/rate-limit';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { AuditService } from '../../common/audit/audit.service';
-import { DbService } from '../../common/infra/db/db.service';
 import { ContentService } from './content.service';
 import { ContentStaffGuard } from './content-staff.guard';
 import { ContentPostDto } from './dto';
-import { corporateContentStaff } from './public.schema';
+import { CONTENT_STAFF_REPOSITORY } from './repositories/repository-tokens';
+import type { IContentStaffRepository } from './repositories/content-staff.repository';
 
 /**
  * Content admin (corporate E-3). Two protected zones:
@@ -24,7 +23,7 @@ export class ContentController {
   constructor(
     private readonly content: ContentService,
     private readonly audit: AuditService,
-    private readonly db: DbService,
+    @Inject(CONTENT_STAFF_REPOSITORY) private readonly staff: IContentStaffRepository,
     private readonly storage: StorageService,
   ) {}
 
@@ -181,8 +180,8 @@ export class ContentController {
   @AuthLayer('l2')
   @RequireScopes('*')
   async listStaff(): Promise<{ staff: string[] }> {
-    const rows = await this.db.root.select().from(corporateContentStaff);
-    return { staff: rows.map((r) => r.accountId) };
+    const grants = await this.staff.listGrants();
+    return { staff: grants.map((g) => g.accountId) };
   }
 
   @Post('staff/:accountId')
@@ -192,10 +191,7 @@ export class ContentController {
     if (principal.role !== 'super_admin') {
       throw ApiError.forbidden('Only platform super_admin may grant content staff');
     }
-    await this.db.root
-      .insert(corporateContentStaff)
-      .values({ accountId, grantedBy: principal.id })
-      .onConflictDoNothing({ target: corporateContentStaff.accountId });
+    await this.staff.grantStaff({ accountId, grantedBy: principal.id });
     await this.audit.add({
       action: 'content.staff_granted',
       resourceType: 'corporate_content_staff',
@@ -214,7 +210,7 @@ export class ContentController {
     if (principal.role !== 'super_admin') {
       throw ApiError.forbidden('Only platform super_admin may revoke content staff');
     }
-    await this.db.root.delete(corporateContentStaff).where(eq(corporateContentStaff.accountId, accountId));
+    await this.staff.revokeStaff(accountId);
     await this.audit.add({
       action: 'content.staff_revoked',
       resourceType: 'corporate_content_staff',

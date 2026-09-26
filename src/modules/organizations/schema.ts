@@ -169,10 +169,10 @@ export const orgServiceAccounts = pgTable('org_service_accounts', {
   index('ix_org_service_accounts_org').on(t.orgId),
 ]);
 
-export type OrgRole = 'owner' | 'admin' | 'billing' | 'developer' | 'reader';
-export const ORG_ROLES: readonly OrgRole[] = ['owner', 'admin', 'billing', 'developer', 'reader'] as const;
-/** Roles that may be granted by invitation — ownership arrives only via transfer. */
-export const INVITABLE_ROLES: readonly OrgRole[] = ['admin', 'billing', 'developer', 'reader'] as const;
+// The role model lives in ./roles (persistence-free); re-exported here so
+// existing `from './schema'` import sites keep working.
+export type { OrgRole } from './roles';
+export { ORG_ROLES, INVITABLE_ROLES } from './roles';
 
 /**
  * Staged org deletion (eng-0012): request → grace window (cancel-able) →

@@ -1,11 +1,10 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EmailService } from './email/email.service';
 import { SuppressionService } from './suppression.service';
-import { careerApplications, careerJobs } from './public.schema';
+import { CAREERS_REPOSITORY } from './repositories/repository-tokens';
+import type { CareerApplicationRow, CareerJobRow, ICareersRepository } from './repositories/careers.repository';
 
 /**
  * Careers v2 (E-2 to production grade): JOB POSTINGS as managed content
@@ -13,6 +12,9 @@ import { careerApplications, careerJobs } from './public.schema';
  * plus the full APPLICATIONS pipeline (new → reviewed → interviewed →
  * offered | rejected | withdrawn) with notes, filters, and an
  * acknowledgment email to every applicant (suppression-aware).
+ *
+ * Persistence-blind (P3): all storage goes through `ICareersRepository`.
+ * Corporate tables are global (non-tenant).
  */
 const JOB_STATUSES = ['draft', 'published', 'archived'] as const;
 export const APPLICATION_STATUSES = ['new', 'reviewed', 'interviewed', 'offered', 'rejected', 'withdrawn'] as const;
@@ -30,7 +32,7 @@ const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'internship'] as
 @Injectable()
 export class CareersService {
   constructor(
-    private readonly db: DbService,
+    @Inject(CAREERS_REPOSITORY) private readonly careers: ICareersRepository,
     private readonly audit: AuditService,
     private readonly email: EmailService,
     private readonly suppressions: SuppressionService,
@@ -39,31 +41,22 @@ export class CareersService {
   // ── public: jobs ───────────────────────────────────────────────────────────
 
   async publishedJobs(): Promise<unknown[]> {
-    const rows = await this.db.root
-      .select()
-      .from(careerJobs)
-      .where(eq(careerJobs.status, 'published'))
-      .orderBy(desc(careerJobs.publishedAt))
-      .limit(200);
+    const rows = await this.careers.publishedJobs();
     return rows.map((job) => this.jobView(job));
   }
 
   async publishedJobBySlug(slug: string): Promise<unknown> {
-    const rows = await this.db.root
-      .select()
-      .from(careerJobs)
-      .where(and(eq(careerJobs.slug, slug), eq(careerJobs.status, 'published')))
-      .limit(1);
-    if (!rows[0]) {
+    const row = await this.careers.publishedJobBySlug(slug);
+    if (!row) {
       throw ApiError.notFound('job');
     }
-    return this.jobView(rows[0]);
+    return this.jobView(row);
   }
 
   // ── staff: jobs CRUD ───────────────────────────────────────────────────────
 
   async listJobs(): Promise<unknown[]> {
-    const rows = await this.db.root.select().from(careerJobs).orderBy(desc(careerJobs.createdAt)).limit(200);
+    const rows = await this.careers.listJobs();
     return rows.map((job) => this.jobView(job));
   }
 
@@ -81,78 +74,41 @@ export class CareersService {
       throw ApiError.validation({ slug: 'lowercase kebab-case' });
     }
     const employmentType = EMPLOYMENT_TYPES.includes(input.employmentType as never) ? input.employmentType! : 'full_time';
-    const existing = await this.db.root.select().from(careerJobs).where(eq(careerJobs.slug, input.slug)).limit(1);
-    if (existing[0]) {
-      const updated = await this.db.root
-        .update(careerJobs)
-        .set({
-          title: input.title,
-          department: input.department,
-          location: input.location,
-          employmentType,
-          descriptionMd: input.descriptionMd,
-          applyInstructions: input.applyInstructions ?? null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(careerJobs.id, existing[0].id))
-        .returning();
-      await this.audit.add({
-        action: 'corporate.job_updated',
-        resourceType: 'career_job',
-        resourceId: existing[0].id,
-        actorType: 'account',
-        actorId: input.actorId,
-        details: { slug: input.slug },
-      });
-      return this.jobView(updated[0]);
-    }
-    const inserted = await this.db.root
-      .insert(careerJobs)
-      .values({
-        slug: input.slug,
-        title: input.title,
-        department: input.department,
-        location: input.location,
-        employmentType,
-        descriptionMd: input.descriptionMd,
-        applyInstructions: input.applyInstructions ?? null,
-      })
-      .onConflictDoNothing({ target: careerJobs.slug })
-      .returning();
-    if (!inserted[0]) {
-      throw ApiError.conflict('slug already exists');
-    }
+    const { row, created } = await this.careers.upsertJob({
+      slug: input.slug,
+      title: input.title,
+      department: input.department,
+      location: input.location,
+      employmentType,
+      descriptionMd: input.descriptionMd,
+      applyInstructions: input.applyInstructions ?? null,
+    });
     await this.audit.add({
-      action: 'corporate.job_created',
+      action: created ? 'corporate.job_created' : 'corporate.job_updated',
       resourceType: 'career_job',
-      resourceId: inserted[0].id,
+      resourceId: row.id,
       actorType: 'account',
       actorId: input.actorId,
       details: { slug: input.slug },
     });
-    return this.jobView(inserted[0]);
+    return this.jobView(row);
   }
 
   async setJobStatus(input: { slug: string; status: 'draft' | 'published' | 'archived'; actorId: string }) {
     if (!JOB_STATUSES.includes(input.status)) {
       throw ApiError.validation({ status: `one of ${JOB_STATUSES.join(', ')}` });
     }
-    const rows = await this.db.root.select().from(careerJobs).where(eq(careerJobs.slug, input.slug)).limit(1);
-    if (!rows[0]) {
+    const row = await this.careers.getJobBySlug(input.slug);
+    if (!row) {
       throw ApiError.notFound('job');
     }
-    await this.db.root
-      .update(careerJobs)
-      .set({
-        status: input.status,
-        publishedAt: input.status === 'published' ? rows[0].publishedAt ?? new Date().toISOString() : rows[0].publishedAt,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(careerJobs.id, rows[0].id));
+    const keepPublishedAt =
+      input.status === 'published' ? (row.publishedAt ?? new Date().toISOString()) : row.publishedAt;
+    await this.careers.setJobStatus({ jobId: row.id, status: input.status, keepPublishedAt });
     await this.audit.add({
       action: `corporate.job_${input.status}`,
       resourceType: 'career_job',
-      resourceId: rows[0].id,
+      resourceId: row.id,
       actorType: 'account',
       actorId: input.actorId,
       details: { slug: input.slug },
@@ -175,15 +131,11 @@ export class CareersService {
   }): Promise<void> {
     let jobId: string | null = null;
     if (input.jobSlug) {
-      const jobRows = await this.db.root
-        .select({ id: careerJobs.id })
-        .from(careerJobs)
-        .where(and(eq(careerJobs.slug, input.jobSlug), eq(careerJobs.status, 'published')))
-        .limit(1);
-      if (!jobRows[0]) {
+      const found = await this.careers.findPublishedJobIdBySlug(input.jobSlug);
+      if (!found) {
         throw ApiError.validation({ job_slug: 'unknown or unpublished job' });
       }
-      jobId = jobRows[0].id;
+      jobId = found;
     }
     // Anti-spam heuristics beyond the honeypot: link-stuffed cover notes die here.
     if (input.coverNote && (input.coverNote.match(/https?:\/\//g)?.length ?? 0) > 5) {
@@ -191,7 +143,7 @@ export class CareersService {
     }
 
     const email = input.email.toLowerCase();
-    await this.db.root.insert(careerApplications).values({
+    await this.careers.insertApplication({
       name: input.name,
       email,
       position: input.position,
@@ -201,7 +153,7 @@ export class CareersService {
       portfolioUrl: input.portfolioUrl ?? null,
       coverNote: input.coverNote ?? null,
       fileRef: input.fileRef ?? null,
-      requestIp: input.ip,
+      requestIp: input.ip ?? null,
     });
     await this.audit.add({
       action: 'corporate.submission',
@@ -224,40 +176,20 @@ export class CareersService {
   }
 
   async listApplications(filter: { status?: string; jobSlug?: string; limit?: number; offset?: number }) {
-    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-    const offset = Math.max(filter.offset ?? 0, 0);
-    const rows = await this.db.root.execute<Record<string, unknown>>(sql`
-      select a.id, a.name, a.email, a.position, j.slug as job_slug, a.phone, a.linkedin_url,
-             a.portfolio_url, a.cover_note, a.file_ref, a.status, a.notes, a.created_at
-      from career_applications a
-      left join career_jobs j on j.id = a.job_id
-      where (${filter.status ?? null}::varchar is null or a.status = ${filter.status ?? null})
-        and (${filter.jobSlug ?? null}::varchar is null or j.slug = ${filter.jobSlug ?? null})
-      order by a.created_at desc
-      limit ${limit} offset ${offset}
-    `);
-    const total = await this.db.root.execute<{ count: number }>(sql`
-      select count(*)::int as count from career_applications a
-      left join career_jobs j on j.id = a.job_id
-      where (${filter.status ?? null}::varchar is null or a.status = ${filter.status ?? null})
-        and (${filter.jobSlug ?? null}::varchar is null or j.slug = ${filter.jobSlug ?? null})
-    `);
-    return { applications: rows.rows, total: total.rows[0]?.count ?? 0, limit, offset };
+    return this.careers.listApplications(filter);
   }
 
   /** Single application for staff drill-down (attachment download source). */
-  async applicationById(applicationId: string): Promise<typeof careerApplications.$inferSelect | null> {
+  async applicationById(applicationId: string): Promise<CareerApplicationRow | null> {
     if (!/^[0-9a-f-]{36}$/i.test(applicationId)) {
       throw ApiError.validation({ application_id: 'must be a uuid' });
     }
-    const rows = await this.db.root.select().from(careerApplications).where(eq(careerApplications.id, applicationId)).limit(1);
-    return rows[0] ?? null;
+    return this.careers.getApplicationById(applicationId);
   }
 
   /** Pipeline transition: validated against the explicit table, audited, noted. */
   async transitionApplication(input: { applicationId: string; target: ApplicationStatus; notes?: string; actorId: string }) {
-    const rows = await this.db.root.select().from(careerApplications).where(eq(careerApplications.id, input.applicationId)).limit(1);
-    const application = rows[0];
+    const application = await this.careers.getApplicationById(input.applicationId);
     if (!application) {
       throw ApiError.notFound('application');
     }
@@ -267,13 +199,11 @@ export class CareersService {
     if (application.status !== input.target && !APPLICATION_TRANSITIONS[application.status as ApplicationStatus].includes(input.target)) {
       throw ApiError.conflict(`invalid application transition ${application.status} -> ${input.target}`);
     }
-    await this.db.root
-      .update(careerApplications)
-      .set({
-        status: input.target,
-        ...(input.notes !== undefined ? { notes: input.notes.slice(0, 8000) } : {}),
-      })
-      .where(eq(careerApplications.id, input.applicationId));
+    await this.careers.transitionApplication({
+      applicationId: input.applicationId,
+      target: input.target,
+      notes: input.notes,
+    });
     await this.audit.add({
       action: 'corporate.application_transitioned',
       resourceType: 'career_application',
@@ -284,7 +214,7 @@ export class CareersService {
     });
   }
 
-  private jobView(job: typeof careerJobs.$inferSelect) {
+  private jobView(job: CareerJobRow) {
     return {
       slug: job.slug,
       title: job.title,

@@ -1,18 +1,22 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { and, eq, isNull, sql } from 'drizzle-orm';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { RedisService } from '../../common/infra/redis.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
 import { platformStaffCacheKey } from '../../common/auth/platform-staff.directory';
-import { platformStaff, type PlatformStaffRow } from '../../common/auth/platform-staff.schema';
 import { AccountsService } from '../identity/accounts.service';
-import { accounts } from '../identity/schema';
-
-export type PlatformStaffRole = 'super_admin' | 'tenant_admin' | 'operator' | 'auditor';
+import { PLATFORM_STAFF_REPOSITORY } from './repositories/repository-tokens';
+import type {
+  IPlatformStaffRepository,
+  PlatformStaff,
+  PlatformStaffListRow,
+  PlatformStaffRole,
+} from './repositories/platform-staff.repository';
 
 export const PLATFORM_STAFF_ROLES: readonly PlatformStaffRole[] = ['super_admin', 'tenant_admin', 'operator', 'auditor'] as const;
+
+// Re-exported for the controller (the canonical type lives on the port).
+export type { PlatformStaffRole };
 
 /**
  * Management surface for the platform staff binding (auth_plan.md D1) — the
@@ -32,7 +36,7 @@ export class PlatformStaffAdminService implements OnModuleInit {
   private static readonly logger = new Logger(PlatformStaffAdminService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(PLATFORM_STAFF_REPOSITORY) private readonly staffRepo: IPlatformStaffRepository,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
     private readonly accounts: AccountsService,
@@ -102,10 +106,7 @@ export class PlatformStaffAdminService implements OnModuleInit {
     if (existing.role === 'super_admin' && (await this.countActiveSuperAdmins()) <= 1) {
       throw ApiError.conflict('cannot revoke the last active super_admin — grant another first');
     }
-    await this.db.root
-      .update(platformStaff)
-      .set({ revokedAt: new Date().toISOString(), revokeReason: input.reason })
-      .where(eq(platformStaff.accountId, input.accountId));
+    await this.staffRepo.revoke(input.accountId, input.reason, new Date().toISOString());
     await this.invalidate(input.accountId);
     await this.audit.add({
       action: 'staff.role_revoked',
@@ -117,53 +118,22 @@ export class PlatformStaffAdminService implements OnModuleInit {
     });
   }
 
-  async list(): Promise<
-    Array<{ accountId: string; email: string | null; displayName: string | null; role: string; grantedAt: string; expiresAt: string | null; revokedAt: string | null }>
-  > {
-    return this.db.root
-      .select({
-        accountId: platformStaff.accountId,
-        email: accounts.email,
-        displayName: accounts.displayName,
-        role: platformStaff.role,
-        grantedAt: platformStaff.grantedAt,
-        expiresAt: platformStaff.expiresAt,
-        revokedAt: platformStaff.revokedAt,
-      })
-      .from(platformStaff)
-      .leftJoin(accounts, eq(accounts.id, platformStaff.accountId));
+  async list(): Promise<PlatformStaffListRow[]> {
+    return this.staffRepo.list();
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private async upsert(accountId: string, role: PlatformStaffRole, expiresAt: string | null, grantedBy: string | null): Promise<PlatformStaffRow[]> {
-    return this.db.root
-      .insert(platformStaff)
-      .values({ accountId, role, grantedBy, expiresAt })
-      .onConflictDoUpdate({
-        target: platformStaff.accountId,
-        set: { role, grantedBy, grantedAt: new Date().toISOString(), expiresAt, revokedAt: null, revokeReason: null },
-      })
-      .returning();
+  private async upsert(accountId: string, role: PlatformStaffRole, expiresAt: string | null, grantedBy: string | null): Promise<PlatformStaff[]> {
+    return this.staffRepo.upsert({ accountId, role, expiresAt, grantedBy, nowIso: new Date().toISOString() });
   }
 
-  private async findByPk(accountId: string): Promise<PlatformStaffRow | null> {
-    const rows = await this.db.root.select().from(platformStaff).where(eq(platformStaff.accountId, accountId)).limit(1);
-    return rows[0] ?? null;
+  private async findByPk(accountId: string): Promise<PlatformStaff | null> {
+    return this.staffRepo.findByAccountId(accountId);
   }
 
   private async countActiveSuperAdmins(): Promise<number> {
-    const rows = await this.db.root
-      .select({ n: sql<number>`count(*)::int` })
-      .from(platformStaff)
-      .where(
-        and(
-          eq(platformStaff.role, 'super_admin'),
-          isNull(platformStaff.revokedAt),
-          sql`(${platformStaff.expiresAt} IS NULL OR ${platformStaff.expiresAt} > now())`,
-        ),
-      );
-    return Number(rows[0]?.n ?? 0);
+    return this.staffRepo.countActiveSuperAdmins(new Date().toISOString());
   }
 
   private async invalidate(accountId: string): Promise<void> {

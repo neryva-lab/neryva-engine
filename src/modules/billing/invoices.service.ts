@@ -1,11 +1,11 @@
-import { and, eq } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { ManifestRegistryService } from '../console/manifest-registry.service';
-import { billingInvoices, INVOICE_TRANSITIONS, InvoiceRow, InvoiceStatus } from './schema';
+import { INVOICE_TRANSITIONS, InvoiceRow, InvoiceStatus } from './schema';
 import { UsageQueryService } from './usage-query.service';
+import { INVOICE_REPOSITORY } from './repositories/repository-tokens';
+import type { IInvoiceRepository } from './repositories/invoice.repository';
 
 /**
  * Invoice records (B-2/M-3): per (org × product) — independent partitions,
@@ -22,33 +22,22 @@ import { UsageQueryService } from './usage-query.service';
 @Injectable()
 export class InvoicesService {
   constructor(
-    private readonly db: DbService,
+    @Inject(INVOICE_REPOSITORY) private readonly invoices: IInvoiceRepository,
     private readonly audit: AuditService,
     private readonly manifests: ManifestRegistryService,
     private readonly usage: UsageQueryService,
   ) {}
 
   async list(orgId: string, product?: string): Promise<InvoiceRow[]> {
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(billingInvoices)
-        .where(product ? and(eq(billingInvoices.orgId, orgId), eq(billingInvoices.product, product)) : eq(billingInvoices.orgId, orgId)),
-    );
+    return this.invoices.listInvoices(orgId, product);
   }
 
   async get(orgId: string, invoiceId: string): Promise<InvoiceRow> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(billingInvoices)
-        .where(and(eq(billingInvoices.id, invoiceId), eq(billingInvoices.orgId, orgId)))
-        .limit(1),
-    );
-    if (!rows[0]) {
+    const row = await this.invoices.getInvoice(orgId, invoiceId);
+    if (!row) {
       throw ApiError.notFound('invoice');
     }
-    return rows[0];
+    return row;
   }
 
   /**
@@ -71,43 +60,13 @@ export class InvoicesService {
       throw ApiError.validation({ period: 'period_start must precede period_end (ISO-8601)' });
     }
 
-    const existing = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select()
-        .from(billingInvoices)
-        .where(
-          and(
-            eq(billingInvoices.orgId, input.orgId),
-            eq(billingInvoices.product, input.product),
-            eq(billingInvoices.periodStart, start.toISOString()),
-          ),
-        )
-        .limit(1),
-    );
-    if (existing[0] && existing[0].status !== 'void') {
-      return existing[0];
+    const existing = await this.invoices.findDraftForPeriod(input.orgId, input.product, start.toISOString());
+    if (existing && existing.status !== 'void') {
+      return existing;
     }
 
     const total = await this.usage.periodTotal(input.orgId, input.product, start.toISOString(), end.toISOString());
-    const upsert = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(billingInvoices)
-        .values({
-          orgId: input.orgId,
-          product: input.product,
-          periodStart: start.toISOString(),
-          periodEnd: end.toISOString(),
-          status: 'draft',
-          totalUsd: total,
-        })
-        .onConflictDoUpdate({
-          target: [billingInvoices.orgId, billingInvoices.product, billingInvoices.periodStart],
-          // Only a voided row can reach the conflict — safe to reset to draft.
-          set: { status: 'draft', totalUsd: total, voidedAt: null, updatedAt: new Date().toISOString() },
-        })
-        .returning(),
-    );
-    const invoice = upsert[0];
+    const invoice = await this.invoices.upsertDraft(input.orgId, input.product, start.toISOString(), end.toISOString(), total);
     await this.audit.add({
       action: 'billing.invoice_drafted',
       resourceType: 'billing_invoice',
@@ -135,24 +94,9 @@ export class InvoicesService {
     if (!allowed || !allowed.includes(input.target)) {
       throw ApiError.conflict(`invalid invoice transition ${invoice.status} -> ${input.target}`);
     }
-    const now = new Date().toISOString();
-    const patch: Partial<typeof billingInvoices.$inferInsert> = { status: input.target, updatedAt: now };
-    if (input.target === 'issued') {
-      patch.issuedAt = now;
-    } else if (input.target === 'paid') {
-      patch.paidAt = now;
-    } else if (input.target === 'void') {
-      patch.voidedAt = now;
-    }
 
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(billingInvoices)
-        .set(patch)
-        .where(and(eq(billingInvoices.id, input.invoiceId), eq(billingInvoices.orgId, input.orgId)))
-        .returning(),
-    );
-    if (!updated[0]) {
+    const updated = await this.invoices.transitionInvoice(input.orgId, input.invoiceId, input.target);
+    if (!updated) {
       throw ApiError.notFound('invoice');
     }
     await this.audit.add({
@@ -165,6 +109,6 @@ export class InvoicesService {
       productTag: invoice.product,
       details: { from: invoice.status, to: input.target, total_usd: invoice.totalUsd },
     });
-    return updated[0];
+    return updated;
   }
 }

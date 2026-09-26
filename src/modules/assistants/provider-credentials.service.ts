@@ -1,20 +1,16 @@
-import { and, eq, ne } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { pgViolation } from '../../common/infra/db/pg-types';
+import { Injectable, Inject } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ApiError } from '../../common/http/api-error';
 import { envelopeEncrypt, sha256Hex } from '../../common/infra/crypto/envelope';
-import { uuidv7 } from '../../common/ids/uuidv7';
 import {
-  providerCredentials,
-  providerEnablements,
   isModelProvider,
   ProviderCredential,
   ProviderEnablement,
   MODEL_PROVIDERS,
 } from './provider-credentials.schema';
+import { PROVIDER_CREDENTIAL_REPOSITORY } from './repositories/repository-tokens';
+import type { IProviderCredentialRepository } from './repositories/provider-credential.repository';
 
 /**
  * Provider credential store + org provider enablements — REL-1.2/REL-1.3
@@ -63,16 +59,6 @@ function assertSecret(secret: string): void {
   }
 }
 
-/** The DB never returns raw 23505s — an (org, provider, external_ref) collision is a client conflict. */
-function mapCredentialUniqueViolation(err: unknown): never {
-  const { code } = pgViolation(err);
-  if (code === '23505') {
-    throw ApiError.conflict(
-      'a credential with this external ref already exists for this org and provider',
-    );
-  }
-  throw err as Error;
-}
 
 export interface ProviderCredentialView {
   id: string;
@@ -112,7 +98,7 @@ export class ProviderCredentialsService {
   private static readonly LIST_CAP = 200;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(PROVIDER_CREDENTIAL_REPOSITORY) private readonly credentials: IProviderCredentialRepository,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -134,26 +120,16 @@ export class ProviderCredentialsService {
     if (externalRef.length === 0 || externalRef.length > 256) {
       throw ApiError.validation({ external_ref: 'must be 1..256 chars' });
     }
-    const rows = await this.db
-      .withOrg(input.orgId, (tx) =>
-        tx
-          .insert(providerCredentials)
-          .values({
-            id: uuidv7(),
-            organizationId: input.orgId,
-            provider: input.provider,
-            label: input.label.trim(),
-            externalRef,
-            source: input.source,
-            status: 'active',
-            secretSealed: envelopeEncrypt(input.secret),
-            secretFingerprint: fingerprintSecret(input.secret),
-            createdBy: input.actorId.slice(0, 128),
-          })
-          .returning(),
-      )
-      .catch(mapCredentialUniqueViolation);
-    const row = rows[0];
+    const row = await this.credentials.provisionCredential({
+      orgId: input.orgId,
+      provider: input.provider,
+      label: input.label.trim(),
+      sealedSecret: envelopeEncrypt(input.secret),
+      secretFingerprint: fingerprintSecret(input.secret),
+      externalRef,
+      source: input.source,
+      createdBy: input.actorId.slice(0, 128),
+    });
     await this.audit.add({
       action: 'provider_credential.created',
       resourceType: 'provider_credential',
@@ -184,46 +160,16 @@ export class ProviderCredentialsService {
       throw ApiError.validation({ credential_id: 'must be a uuid' });
     }
     // A concurrent revoke between the pre-check and the update is caught by
-    // the `ne(status, 'revoked')` predicate inside the UPDATE itself — the
-    // guarded update is the authority, the pre-check is only for the error
-    // message.
-    const rows = await this.db
-      .withOrg(input.orgId, (tx) =>
-        tx
-          .update(providerCredentials)
-          .set({
-            secretSealed: envelopeEncrypt(input.secret),
-            secretFingerprint: fingerprintSecret(input.secret),
-            externalRef: deriveExternalRef(input.secret),
-            rotatedBy: input.actorId.slice(0, 128),
-            rotatedAt: new Date().toISOString(),
-          })
-          .where(
-            and(
-              eq(providerCredentials.id, input.credentialId),
-              eq(providerCredentials.organizationId, input.orgId),
-              ne(providerCredentials.status, 'revoked'),
-            ),
-          )
-          .returning(),
-      )
-      .catch(mapCredentialUniqueViolation);
-    if (rows.length === 0) {
-      const existing = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .select({ id: providerCredentials.id })
-          .from(providerCredentials)
-          .where(eq(providerCredentials.id, input.credentialId))
-          .limit(1),
-      );
-      if (existing.length === 0) {
-        throw ApiError.notFound('provider credential');
-      }
-      throw ApiError.conflict(
-        'credential is revoked — create a new credential instead of rotating it',
-      );
-    }
-    const row = rows[0];
+    // the guarded update inside the repository — the guarded update is the
+    // authority, the pre-check is only for the error message.
+    const row = await this.credentials.rotateCredential({
+      orgId: input.orgId,
+      credentialId: input.credentialId,
+      sealedSecret: envelopeEncrypt(input.secret),
+      secretFingerprint: fingerprintSecret(input.secret),
+      externalRef: deriveExternalRef(input.secret),
+      rotatedBy: input.actorId.slice(0, 128),
+    });
     await this.audit.add({
       action: 'provider_credential.rotated',
       resourceType: 'provider_credential',
@@ -260,42 +206,12 @@ export class ProviderCredentialsService {
         ? input.reason.trim().slice(0, 512)
         : null;
     const compromised = input.compromised === true;
-    const existing = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select()
-        .from(providerCredentials)
-        .where(
-          and(
-            eq(providerCredentials.id, input.credentialId),
-            eq(providerCredentials.organizationId, input.orgId),
-          ),
-        )
-        .limit(1),
-    );
-    if (existing.length === 0) {
-      throw ApiError.notFound('provider credential');
-    }
-    if (existing[0].status === 'revoked') {
-      throw ApiError.conflict('credential is already revoked');
-    }
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(providerCredentials)
-        .set({
-          status: 'revoked',
-          revokedAt: new Date().toISOString(),
-          revocationReason: reason,
-          compromised,
-        })
-        .where(
-          and(
-            eq(providerCredentials.id, input.credentialId),
-            eq(providerCredentials.organizationId, input.orgId),
-          ),
-        )
-        .returning(),
-    );
-    const row = rows[0];
+    const row = await this.credentials.revokeCredential({
+      orgId: input.orgId,
+      credentialId: input.credentialId,
+      revocationReason: reason,
+      compromised,
+    });
     await this.audit.add({
       action: compromised ? 'provider_credential.compromised' : 'provider_credential.revoked',
       resourceType: 'provider_credential',
@@ -321,13 +237,7 @@ export class ProviderCredentialsService {
 
   async list(orgId: string): Promise<ProviderCredentialView[]> {
     assertOrgId(orgId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(providerCredentials)
-        .where(eq(providerCredentials.organizationId, orgId))
-        .limit(ProviderCredentialsService.LIST_CAP),
-    );
+    const rows = await this.credentials.listCredentials(orgId);
     return rows.map(toView);
   }
 
@@ -335,9 +245,7 @@ export class ProviderCredentialsService {
 
   async listEnablements(orgId: string): Promise<ProviderEnablement[]> {
     assertOrgId(orgId);
-    return this.db.withOrg(orgId, (tx) =>
-      tx.select().from(providerEnablements).where(eq(providerEnablements.organizationId, orgId)),
-    );
+    return this.credentials.listEnablements(orgId);
   }
 
   async setEnablement(input: {
@@ -348,26 +256,12 @@ export class ProviderCredentialsService {
   }): Promise<ProviderEnablement> {
     assertOrgId(input.orgId);
     assertProvider(input.provider);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(providerEnablements)
-        .values({
-          organizationId: input.orgId,
-          provider: input.provider,
-          enabled: input.enabled,
-          updatedBy: input.actorId.slice(0, 128),
-        })
-        .onConflictDoUpdate({
-          target: [providerEnablements.organizationId, providerEnablements.provider],
-          set: {
-            enabled: input.enabled,
-            updatedBy: input.actorId.slice(0, 128),
-            updatedAt: new Date().toISOString(),
-          },
-        })
-        .returning(),
-    );
-    const row = rows[0];
+    const row = await this.credentials.upsertEnablement({
+      orgId: input.orgId,
+      provider: input.provider,
+      enabled: input.enabled,
+      updatedBy: input.actorId.slice(0, 128),
+    });
     await this.audit.add({
       action: 'provider.enablement_set',
       resourceType: 'provider_enablement',
@@ -390,19 +284,9 @@ export class ProviderCredentialsService {
     orgId: string,
   ): Promise<Map<string, { hasActiveCredential: boolean; enabled: boolean; usable: boolean }>> {
     assertOrgId(orgId);
-    const creds = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ provider: providerCredentials.provider })
-        .from(providerCredentials)
-        .where(
-          and(
-            eq(providerCredentials.organizationId, orgId),
-            eq(providerCredentials.status, 'active'),
-          ),
-        ),
-    );
+    const creds = await this.credentials.providersWithActiveCredentials(orgId);
     const enablements = await this.listEnablements(orgId);
-    const withCred = new Set(creds.map((c) => c.provider));
+    const withCred = new Set(creds);
     const enabledMap = new Map(enablements.map((e) => [e.provider, e.enabled]));
     const providers = new Set<string>([...MODEL_PROVIDERS, ...withCred, ...enabledMap.keys()]);
     const facts = new Map<

@@ -1,39 +1,40 @@
-import { and, asc, desc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm';
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { DbService } from '../../common/infra/db/db.service';
-import { pgViolation } from '../../common/infra/db/pg-types';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
-import {
-  claimIdempotency,
-  completeIdempotency,
-  IdempotencyScope,
-} from '../../common/http/idempotency-records';
+import type { IdempotencyScope } from '../../common/http/idempotency-records';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { uuidv7 } from '../../common/ids/uuidv7';
 import { newTraceId, withSpan } from '../../common/observability/spans';
 import {
-  conversations,
-  conversationParticipants,
-  conversationShares,
-  messages,
-  runEvents,
-  runs,
-  messageFeedback,
-  Conversation,
-  ConversationShare,
-  MessageFeedback,
-  Message,
-  Run,
-  RunEvent,
   MAX_MESSAGE_TEXT_LENGTH,
+  type Conversation,
+  type ConversationShare,
+  type Message,
+  type MessageFeedback,
+  type Run,
+  type RunEvent,
 } from './schema';
-import { approvals } from './mcp.schema';
-import { providerCredentials } from '../assistants/provider-credentials.schema';
+import { EscalationsService } from './escalations.service';
+import { isRunState, isTerminalRun } from './state-machine';
+import { QuotaService, type QuotaReservation as QuotaHold } from '../billing/quota.service';
+import { env } from '../../common/config/env';
+import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
+import {
+  APPROVAL_REPOSITORY,
+  CONVERSATION_REPOSITORY,
+  FEEDBACK_REPOSITORY,
+  RUN_EVENTS_REPOSITORY,
+  RUN_REPOSITORY,
+  SHARE_REPOSITORY,
+} from './repositories/repository-tokens';
+import type { IConversationRepository } from './repositories/conversation.repository';
+import type { IRunRepository } from './repositories/run.repository';
+import type { IShareRepository } from './repositories/share.repository';
+import type { IFeedbackRepository } from './repositories/feedback.repository';
+import type { IApprovalRepository } from './repositories/approval.repository';
+import type { IRunEventsRepository } from './repositories/run-events.repository';
+import type { QuotaGate } from './repositories/repository-types';
 
 /** Wire enum (numeric string) → semantic SSE event names. */
 const SSE_EVENT_NAMES: Record<string, string> = {
@@ -63,24 +64,6 @@ export interface ReleasePointer {
   channel?: string;
 }
 
-import { assertRunTransition, isRunState, isTerminalRun } from './state-machine';
-import { EscalationsService } from './escalations.service';
-import { assistants, policySnapshots, runManifests } from '../assistants/schema';
-import { ControlBlocksService } from '../assistants/control-blocks.service';
-import { ModelCostService } from '../assistants/model-cost.service';
-import {
-  estimateCostMicros,
-  microsToLedgerString,
-  normalizeUsageCacheSplit,
-} from '../assistants/model-cost.schema';
-import { productEntitlements } from '../organizations/schema';
-import { quotaReservations } from '../billing/usage-ledger.schema';
-import { QuotaService, type QuotaReservation as QuotaHold } from '../billing/quota.service';
-import { env } from '../../common/config/env';
-import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
-import { usageLedgerEntries } from '../billing/usage-ledger.schema';
-import { artifacts } from '../knowledge/schema';
-
 /** FL-1.6 — attachment media allowlist + per-attachment byte cap. */
 const ATTACHMENT_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -106,12 +89,35 @@ export class ConversationsService {
   private static readonly logger = new Logger(ConversationsService.name);
 
   constructor(
-    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly purge: RetentionPurgeService,
     private readonly escalations: EscalationsService,
     private readonly quota: QuotaService,
+    @Inject(CONVERSATION_REPOSITORY)
+    private readonly conversations: IConversationRepository,
+    @Inject(RUN_REPOSITORY)
+    private readonly runs: IRunRepository,
+    @Inject(SHARE_REPOSITORY)
+    private readonly shares: IShareRepository,
+    @Inject(FEEDBACK_REPOSITORY)
+    private readonly feedbackRepo: IFeedbackRepository,
+    @Inject(APPROVAL_REPOSITORY)
+    private readonly approvals: IApprovalRepository,
+    @Inject(RUN_EVENTS_REPOSITORY)
+    private readonly runEvents: IRunEventsRepository,
   ) {}
+
+  /**
+   * Build the Redis advisory quota gate for a run-creation transaction.
+   * The gate is invoked by the repository inside its transaction; the
+   * service owns the QuotaService interaction.
+   */
+  private quotaGate(orgId: string): QuotaGate {
+    return {
+      hold: () => this.holdRunQuota(orgId).then(() => undefined),
+      release: () => this.releaseRunQuotaHold(orgId),
+    };
+  }
 
   // ── Conversation lifecycle ───────────────────────────────────────────────
 
@@ -124,33 +130,12 @@ export class ConversationsService {
   }): Promise<Conversation> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.assistantId, 'assistantId');
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const exists = await tx.execute(
-        sql`select 1 from assistants where id = ${input.assistantId}::uuid limit 1`,
-      );
-      if (exists.rows.length === 0) {
-        throw ApiError.notFound('assistant');
-      }
-      const inserted = await tx
-        .insert(conversations)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          assistantId: input.assistantId,
-          channelBinding: input.channelBinding ?? {},
-          participantScope: input.participantScope ?? 'org',
-        })
-        .returning();
-      const conversation = inserted[0];
-      await tx.insert(conversationParticipants).values({
-        id: uuidv7(),
-        conversationId: conversation.id,
-        organizationId: input.orgId,
-        participantType: 'account',
-        accountId: null,
-        externalRef: input.createdBy,
-      });
-      return conversation;
+    const row = await this.conversations.createConversation({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      createdBy: input.createdBy,
+      channelBinding: input.channelBinding,
+      participantScope: input.participantScope,
     });
     await this.audit.add({
       action: 'conversation.created',
@@ -168,10 +153,7 @@ export class ConversationsService {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
     await this.purge.assertNotTombstoned('conversation', conversationId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1),
-    );
-    const row = rows[0] ?? null;
+    const row = await this.conversations.getConversation(orgId, conversationId);
     // Soft-delete: a deleted conversation reads as gone everywhere.
     return row && row.status === 'deleted' ? null : row;
   }
@@ -181,21 +163,14 @@ export class ConversationsService {
     opts?: { limit?: number; assistantId?: string },
   ): Promise<Conversation[]> {
     assertUuid(orgId, 'orgId');
-    const limit = clampLimit(opts?.limit);
-    // Soft-deleted conversations never appear in lists (see setConversationStatus).
-    const conditions = [eq(conversations.organizationId, orgId), ne(conversations.status, 'deleted')];
     if (opts?.assistantId) {
       assertUuid(opts.assistantId, 'assistantId');
-      conditions.push(eq(conversations.assistantId, opts.assistantId));
     }
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(conversations)
-        .where(and(...conditions))
-        .orderBy(desc(conversations.updatedAt))
-        .limit(limit),
-    );
+    // Soft-deleted conversations never appear in lists (see setConversationStatus).
+    return this.conversations.listConversations(orgId, {
+      limit: clampLimit(opts?.limit),
+      assistantId: opts?.assistantId,
+    });
   }
 
   async setConversationStatus(
@@ -206,29 +181,7 @@ export class ConversationsService {
   ): Promise<Conversation> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
-    return this.db.withOrg(orgId, async (tx) => {
-      const current = await tx
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, conversationId))
-        .for('update')
-        .limit(1);
-      if (current.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-      if (expectedVersion !== undefined && current[0].version !== expectedVersion) {
-        throw ApiError.conflict('stale conversation version', {
-          expected: expectedVersion,
-          actual: current[0].version,
-        });
-      }
-      const updated = await tx
-        .update(conversations)
-        .set({ status, version: current[0].version + 1, updatedAt: new Date().toISOString() })
-        .where(eq(conversations.id, conversationId))
-        .returning();
-      return updated[0];
-    });
+    return this.conversations.transitionStatus(orgId, conversationId, status, expectedVersion);
   }
 
   // ── Start-message transaction (4.7) ─────────────────────────────────────
@@ -305,391 +258,14 @@ export class ConversationsService {
         run_kind: input.runKind ?? 'standard',
       },
       async () =>
-        this.db.withOrg(input.orgId, async (tx) => {
-          if (scope) {
-            const claim = await claimIdempotency(tx, scope);
-            if (claim.kind === 'replay') {
-              return {
-                ...(claim.response as {
-                  message_id: string;
-                  run_id: string | null;
-                  sequence: number;
-                  conversation_version: number;
-                }),
-                replay: true,
-              };
-            }
-          }
-
-          const result = await this.executeStartMessage(tx, traced);
-          if (scope) {
-            await completeIdempotency(tx, scope, result);
-          }
-          return result;
-        }),
+        this.runs.acceptMessage(
+          { ...traced, idempotencyScope: scope },
+          this.quotaGate(input.orgId),
+        ),
     );
   }
 
   /** The atomic core — everything here commits or rolls back together. */
-  private async executeStartMessage(
-    tx: NodePgDatabase,
-    input: {
-      orgId: string;
-      conversationId: string;
-      principalId: string;
-      content: Record<string, unknown>;
-      expectedConversationVersion?: number;
-      traceId?: string;
-      attachments?: string[];
-      runKind?: 'standard' | 'test' | 'eval';
-      pinVersionId?: string;
-      /**
-       * W2.4 (drizzle/0070) — pin THIS snapshot row instead of resolving the
-       * version's current snapshot. Threaded from acceptMessage; see its
-       * docblock.
-       */
-      pinSnapshotId?: string;
-    },
-  ): Promise<{
-    message_id: string;
-    run_id: string | null;
-    sequence: number;
-    conversation_version: number;
-    auto_responder?: 'paused';
-  }> {
-    // Row lock serializes sequence allocation + the one-active-turn policy.
-    const conv = await tx
-      .select()
-      .from(conversations)
-      .where(eq(conversations.id, input.conversationId))
-      .for('update')
-      .limit(1);
-    if (conv.length === 0) {
-      throw ApiError.notFound('conversation');
-    }
-    const conversation = conv[0];
-    if (conversation.status !== 'active' && conversation.status !== 'escalated') {
-      throw ApiError.conflict('conversation is not active', { status: conversation.status });
-    }
-    if (
-      input.expectedConversationVersion !== undefined &&
-      conversation.version !== input.expectedConversationVersion
-    ) {
-      throw ApiError.conflict('stale conversation version', {
-        expected: input.expectedConversationVersion,
-        actual: conversation.version,
-      });
-    }
-
-    // FL-1.7d — pause semantics: while 'escalated' the user message is
-    // accepted into the durable transcript (the human agent reads it) but
-    // NO run is created — the auto-responder is paused. Resolve resumes it.
-    const escalated = conversation.status === 'escalated';
-
-    // TPL-6.3 kill level 1 — a disabled assistant, or one under an active
-    // assistant block, accepts NO new runs. In-flight runs are untouched
-    // here (they fail closed at their next tool authorization instead —
-    // pinning stays immutable even for killed assistants).
-    if (!escalated) {
-      await this.assertAssistantRunnable(tx, input.orgId, conversation.assistantId);
-    }
-
-    // Pin the assistant's active published version + policy snapshot at acceptance.
-    // REL-2.2/REL-2.4 + R-2 (team_setup_ledger.md §3): an explicit
-    // pinVersionId overrides the release-pointer selection — the eval harness
-    // pins ITS version (production pointers may disagree), and test AND eval
-    // runs pin drafts (snapshot materialized by the caller). Serving traffic
-    // (standard) never takes a draft pin. Explicit pins still resolve a
-    // snapshot: no run without one.
-    let pin: { version_id: string; snapshot_id: string; release: ReleasePointer } | null = null;
-    if (!escalated) {
-      pin =
-        input.pinVersionId !== undefined
-          ? await this.pinExplicitVersion(
-              tx,
-              input.pinVersionId,
-              input.runKind === 'test' || input.runKind === 'eval',
-              input.pinSnapshotId,
-            )
-          : await this.pickVersionPin(
-              tx,
-              conversation.assistantId,
-              conversation.id,
-              conversationReleaseChannel(conversation.channelBinding),
-            );
-      if (!pin) {
-        throw ApiError.conflict('assistant has no published version with a policy snapshot');
-      }
-    }
-
-    const sequence = await nextMessageSequence(tx, input.conversationId);
-    const messageId = uuidv7();
-    const runId = uuidv7();
-
-    // FL-1.6 — re-validate every attachment against the org's artifacts table
-    // (tenant scope is the org predicate itself; purpose/media/size gates
-    // follow the knowledge plane's claim-check policy). The pinned ref keeps
-    // only digests and types — never object keys or credentials.
-    const attachmentRefs =
-      input.attachments && input.attachments.length > 0
-        ? await this.validateAttachments(tx, input.orgId, input.attachments)
-        : null;
-
-    await tx.insert(messages).values({
-      id: messageId,
-      conversationId: input.conversationId,
-      organizationId: input.orgId,
-      sequence,
-      role: 'user',
-      content: input.content,
-      // Message attribution — user-scope memory resolution (FL-1.5) keys off
-      // this column; channel/widget senders carry their synthetic identity.
-      createdBy: input.principalId,
-      ...(attachmentRefs !== null ? { artifactRefs: attachmentRefs } : {}),
-    });
-
-    if (!escalated) {
-      const activePin = pin as { version_id: string; snapshot_id: string; release: ReleasePointer };
-      try {
-        await tx.insert(runs).values({
-          id: runId,
-          organizationId: input.orgId,
-          conversationId: input.conversationId,
-          inputMessageId: messageId,
-          assistantVersionId: activePin.version_id,
-          policySnapshotId: activePin.snapshot_id,
-          state: 'ACCEPTED',
-          runKind: input.runKind ?? 'standard',
-        });
-      } catch (err) {
-        if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-          throw ApiError.conflict('conversation already has an active run', {
-            conversation_id: input.conversationId,
-          });
-        }
-        throw err;
-      }
-
-      // REL-4.3 — the durable quota wall lives in THIS transaction: the
-      // reservation row commits with the run or not at all (invariant 4/7).
-      // test/eval runs never reserve (they are not billable traffic). The
-      // Redis counter plane stays the satellites' advisory layer.
-      if ((input.runKind ?? 'standard') === 'standard') {
-        // W2.3 — the Redis quota plane refuses first (fail-fast, before any
-        // model spend); the durable wall then commits atomically with the
-        // run. If the durable wall refuses after the hold was taken, the
-        // hold is dropped so the refusal leaves no trace of its own.
-        await this.holdRunQuota(input.orgId);
-        try {
-          await this.reserveQuota(tx, input.orgId, runId);
-        } catch (err) {
-          await this.releaseRunQuotaHold(input.orgId);
-          throw err;
-        }
-      }
-
-      // TPL-5.6 — manifest commits atomically with the run: no run without it.
-      const manifestHash = await this.insertRunManifest(tx, {
-        orgId: input.orgId,
-        runId,
-        versionId: activePin.version_id,
-        snapshotId: activePin.snapshot_id,
-        conversationId: input.conversationId,
-        messageId,
-        channel: (conversation.channelBinding ?? null) as unknown,
-        release: activePin.release,
-        traceId: input.traceId,
-      });
-
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: runId,
-        organizationId: input.orgId,
-        eventType: 'run.created',
-        partitionKey: input.conversationId,
-        payload: {
-          run_id: runId,
-          conversation_id: input.conversationId,
-          message_id: messageId,
-          assistant_version_id: activePin.version_id,
-          policy_snapshot_id: activePin.snapshot_id,
-          manifest_hash: manifestHash,
-        },
-        traceId: input.traceId,
-      });
-    }
-
-    const nextVersion = conversation.version + 1;
-    await tx
-      .update(conversations)
-      .set({ version: nextVersion, updatedAt: new Date().toISOString() })
-      .where(eq(conversations.id, input.conversationId));
-
-    if (escalated) {
-      return {
-        message_id: messageId,
-        run_id: null,
-        sequence,
-        conversation_version: nextVersion,
-        auto_responder: 'paused',
-      };
-    }
-    return { message_id: messageId, run_id: runId, sequence, conversation_version: nextVersion };
-  }
-
-  /**
-   * FL-3.12 — version pinning with A/B canary rollout support. An ACTIVE
-   * rollout splits traffic across PUBLISHED versions by weight; assignment is
-   * sticky per conversation (consistent hash of the conversation id), so a
-   * conversation never flips variants mid-flight. A rollout variant without a
-   * policy snapshot (or not PUBLISHED) is never selected — fail-closed to the
-   * assistant's default active version.
-   *
-   * TPL-5.6/6.2 — the returned release pointer records WHICH pointer chose
-   * the version (rollout id + environment + channel, or the active pointer)
-   * and is persisted into run_manifests at every run-creation site.
-   * Selection is channel-aware: for a conversation arriving on a channel, a
-   * pointer addressed to that channel (production + channel label) wins over
-   * the (production, default) pointer — "a dedicated channel holds v18 while
-   * prod moves on" (plan §7.4). Fallback order: (production, channel) →
-   * (production, default) → newest active row of any address.
-   */
-  /**
-   * REL-2.2/REL-2.4 + R-2 (team_setup_ledger.md §3) — explicit version pin
-   * (bypasses release pointers). allowDraft=true (test runs AND eval runs)
-   * accepts DRAFT + PUBLISHED; anything else (e.g. RETIRED) refuses. The
-   * snapshot must already exist — drafts get one materialized by the
-   * test-run / evaluate entry points before this runs (no snapshot → no run).
-   */
-  private async pinExplicitVersion(
-    tx: NodePgDatabase,
-    versionId: string,
-    allowDraft: boolean,
-    snapshotId?: string,
-  ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(versionId)) {
-      throw ApiError.validation({ pin_version_id: 'must be a uuid' });
-    }
-    if (
-      snapshotId !== undefined &&
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(snapshotId)
-    ) {
-      throw ApiError.validation({ pin_snapshot_id: 'must be a uuid' });
-    }
-    // W2.4 — a snapshot pin resolves the EXACT row (immutable content the
-    // eval started against); without it, the version's current snapshot
-    // (ps.hash = av.hash at accept time — the in-flight edit race).
-    // Either way the snapshot must belong to the pinned version.
-    const rows = await tx.execute(sql`
-      select av.id as version_id, ps.id as snapshot_id
-      from assistant_versions av
-      join policy_snapshots ps on ps.assistant_version_id = av.id
-        ${snapshotId !== undefined ? sql`and ps.id = ${snapshotId}::uuid` : sql`and ps.hash = av.hash`}
-      where av.id = ${versionId}::uuid
-        ${allowDraft ? sql`` : sql`and av.status = 'PUBLISHED'`}
-      limit 1
-    `);
-    const row = rows.rows[0] as { version_id: string; snapshot_id: string } | undefined;
-    return row
-      ? {
-          version_id: row.version_id,
-          snapshot_id: row.snapshot_id,
-          release: { type: 'active_pointer' },
-        }
-      : null;
-  }
-
-  /**
-   * REL-4.3 — durable quota wall, evaluated in the caller's transaction.
-   * Reads the plan limits from the org's `agents` entitlement row (absent
-   * row = no plan limits, matching quota.limitsFor semantics), counts this
-   * month's committed usage plus open reservations, and either inserts a
-   * RESERVED row that commits with the run or throws the typed wall
-   * (402 spend / 429 events). Redis stays the satellites' advisory plane.
-   */
-  private async reserveQuota(tx: NodePgDatabase, orgId: string, runId: string): Promise<void> {
-    const ent = await tx
-      .select({ limits: productEntitlements.limits })
-      .from(productEntitlements)
-      .where(and(eq(productEntitlements.orgId, orgId), eq(productEntitlements.product, 'agents')))
-      .limit(1);
-    if (ent.length === 0) {
-      return; // no plan row → no plan limits (the entitlement guard owns unentitled access)
-    }
-    const limits = (ent[0].limits ?? {}) as {
-      monthly_spend_usd?: unknown;
-      monthly_events?: unknown;
-    };
-    const spendLimit =
-      typeof limits.monthly_spend_usd === 'number' ? limits.monthly_spend_usd : null;
-    const eventsLimit = typeof limits.monthly_events === 'number' ? limits.monthly_events : null;
-    if (spendLimit === null && eventsLimit === null) {
-      return;
-    }
-    const usage = await tx.execute<{ events: number; open_reservations: number }>(sql`
-      select
-        (select count(*)::int from usage_ledger_entries
-          where organization_id = ${orgId}::uuid and created_at >= date_trunc('month', now())) as events,
-        (select count(*)::int from quota_reservations
-          where organization_id = ${orgId}::uuid and state = 'RESERVED' and expires_at > now()) as open_reservations
-    `);
-    const row = usage.rows[0] as { events: number; open_reservations: number };
-    const eventsUsed = Number(row?.events ?? 0) + Number(row?.open_reservations ?? 0);
-    if (eventsLimit !== null && eventsUsed >= eventsLimit) {
-      throw ApiError.quotaExceeded('monthly_events', { limit: eventsLimit, used: eventsUsed });
-    }
-    if (spendLimit !== null) {
-      const spend = await tx.execute<{ spend: string | null }>(sql`
-        select coalesce(sum(coalesce(settled_cost, estimated_cost, 0)), 0)::text as spend
-        from usage_ledger_entries
-        where organization_id = ${orgId}::uuid and created_at >= date_trunc('month', now())
-      `);
-      const spendUsed = Number((spend.rows[0] as { spend: string | null } | undefined)?.spend ?? 0);
-      if (spendUsed >= spendLimit) {
-        throw ApiError.quotaExceeded('monthly_spend', {
-          limit_usd: spendLimit,
-          used_usd: spendUsed,
-        });
-      }
-    }
-    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
-    await tx.insert(quotaReservations).values({
-      id: uuidv7(),
-      organizationId: orgId,
-      // W2.3 — 'requests': the row must satisfy chk_quota_dimension
-      // ('runs' was never a legal dimension and crashed the insert for any
-      // org with plan limits set). One run = one billable request event.
-      dimension: 'requests',
-      quantity: '1',
-      state: 'RESERVED',
-      runId,
-      reference: `run:${runId}`,
-      expiresAt,
-    });
-  }
-
-  /** REL-4.4 — terminal reservation transition (COMMITTED on success, RELEASED on failure). */
-  private async settleRunQuota(
-    tx: NodePgDatabase,
-    runId: string,
-    committed: boolean,
-  ): Promise<void> {
-    await tx.execute(sql`
-      update quota_reservations
-      set state = ${committed ? 'COMMITTED' : 'RELEASED'},
-          ${committed ? sql`committed_at` : sql`released_at`} = now()
-      where run_id = ${runId}::uuid and state = 'RESERVED'
-    `);
-  }
-
-  /**
-   * W2.3 — the Redis quota-plane product bucket runs reserve against. It
-   * matches the durable wall's entitlement product (`agents`) so both planes
-   * read the same plan row; the engine enforces the product level during the
-   * strangler window (see the QuotaService docblock).
-   */
-  private static readonly RUN_QUOTA_PRODUCT = 'agents';
-
   /**
    * W2.3 — take the advisory Redis hold for one run BEFORE the durable wall
    * (and before any model spend). Refusal throws the typed quota wall —
@@ -703,6 +279,8 @@ export class ConversationsService {
    * Runs are not project-scoped in the current schema, so only the product
    * bucket is checked.
    */
+  private static readonly RUN_QUOTA_PRODUCT = 'agents';
+
   private async holdRunQuota(orgId: string): Promise<QuotaHold> {
     const hold: QuotaHold = {
       orgId,
@@ -742,186 +320,6 @@ export class ConversationsService {
     });
   }
 
-  private async pickVersionPin(
-    tx: NodePgDatabase,
-    assistantId: string,
-    conversationId: string,
-    channelLabel?: string,
-  ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> {
-    const byVersionId = (
-      versionId: string,
-      release: ReleasePointer,
-    ): Promise<{ version_id: string; snapshot_id: string; release: ReleasePointer } | null> =>
-      tx
-        .execute(
-          sql`
-          select av.id as version_id, ps.id as snapshot_id
-          from assistant_versions av
-          join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
-          where av.id = ${versionId}::uuid and av.status = 'PUBLISHED'
-          limit 1
-        `,
-        )
-        .then((r) => {
-          const row = r.rows[0] as { version_id: string; snapshot_id: string } | undefined;
-          return row ? { ...row, release } : null;
-        });
-
-    const rolloutRows = await tx.execute(sql`
-      select id, versions, environment, channel from assistant_rollouts
-      where assistant_id = ${assistantId}::uuid and state = 'active'
-      order by created_at desc
-      limit 20
-    `);
-    const rollouts = rolloutRows.rows as Array<{
-      id: string;
-      versions: unknown;
-      environment: string;
-      channel: string;
-    }>;
-    const preferred =
-      // 1. the conversation's own channel (operator-addressed release)
-      (channelLabel
-        ? rollouts.find((r) => r.environment === 'production' && r.channel === channelLabel)
-        : undefined) ??
-      // 2. the default production address
-      rollouts.find((r) => r.environment === 'production' && r.channel === 'default') ??
-      // 3. back-compat: the newest active row of any address
-      rollouts[0];
-    if (preferred) {
-      const rollout = preferred;
-      const raw = rollout.versions;
-      if (Array.isArray(raw)) {
-        const variants: Array<{ version_id: string; weight: number }> = [];
-        for (const v of raw) {
-          const rec = v as { version_id?: unknown; weight?: unknown };
-          if (
-            typeof rec?.version_id === 'string' &&
-            typeof rec?.weight === 'number' &&
-            Number.isFinite(rec.weight) &&
-            rec.weight > 0
-          ) {
-            variants.push({ version_id: rec.version_id, weight: Math.floor(rec.weight) });
-          }
-        }
-        if (variants.length > 0) {
-          const chosen = pickStickyVariant(conversationId, variants);
-          const pin = await byVersionId(chosen, {
-            type: 'rollout',
-            rollout_id: rollout.id,
-            environment: rollout.environment,
-            channel: rollout.channel,
-          });
-          if (pin) {
-            return pin;
-          }
-        }
-      }
-    }
-    const active = await tx.execute(sql`
-      select av.id as version_id, ps.id as snapshot_id
-      from assistants a
-      join assistant_versions av on av.id = a.active_version_id
-      join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
-      where a.id = ${assistantId}::uuid
-      limit 1
-    `);
-    const row = active.rows[0] as { version_id: string; snapshot_id: string } | undefined;
-    return row ? { ...row, release: { type: 'active_pointer' } } : null;
-  }
-
-  /**
-   * TPL-6.3 — run-acceptance kill gate, shared by accept/regenerate/edit.
-   * Disabled flag or active assistant block refuses NEW runs with a typed
-   * conflict; in-flight runs are never touched here.
-   */
-  private async assertAssistantRunnable(
-    tx: NodePgDatabase,
-    orgId: string,
-    assistantId: string,
-  ): Promise<void> {
-    const assistantRows = await tx
-      .select({ id: assistants.id, disabledAt: assistants.disabledAt })
-      .from(assistants)
-      .where(eq(assistants.id, assistantId))
-      .limit(1);
-    if (assistantRows.length === 0) {
-      throw ApiError.notFound('assistant');
-    }
-    if (assistantRows[0].disabledAt) {
-      throw ApiError.conflict('assistant is disabled — enable it before accepting runs', {
-        assistant_id: assistantId,
-      });
-    }
-    const blocked = await ControlBlocksService.findActiveBlock(tx, orgId, 'assistant', assistantId);
-    if (blocked) {
-      throw ApiError.conflict(
-        `assistant is blocked (${blocked.reason}) — clear the block before accepting runs`,
-        {
-          assistant_id: assistantId,
-        },
-      );
-    }
-  }
-
-  /**
-   * TPL-5.6 — RunManifest writer. Called in the SAME transaction as the runs
-   * insert at every run-creation site (accept, regenerate, edit): no run
-   * exists without its manifest. Returns the manifest hash for the outbox
-   * payload. The manifest references the snapshot (which owns the heavy
-   * resolved set) and records the run-scoped refs + release pointer.
-   */
-  private async insertRunManifest(
-    tx: NodePgDatabase,
-    input: {
-      orgId: string;
-      runId: string;
-      versionId: string;
-      snapshotId: string;
-      conversationId: string;
-      messageId: string;
-      channel: unknown;
-      release: ReleasePointer;
-      /** P1: the run's trace id. Minted when the caller has none (regenerate/edit paths); accept passes its own. */
-      traceId?: string | null;
-    },
-  ): Promise<string> {
-    const snapRows = await tx
-      .select({ manifestHash: policySnapshots.manifestHash })
-      .from(policySnapshots)
-      .where(eq(policySnapshots.id, input.snapshotId))
-      .limit(1);
-    const manifest = {
-      assistant_version_id: input.versionId,
-      policy_snapshot_id: input.snapshotId,
-      snapshot_manifest_hash: snapRows[0]?.manifestHash ?? null,
-      conversation_id: input.conversationId,
-      input_message_id: input.messageId,
-      channel: input.channel ?? null,
-      release: input.release,
-      // P1: execution identity answers "exactly what produced this outcome"
-      // — the trace id joins it so a run maps to its spans without joins.
-      trace_id: input.traceId ?? newTraceId(),
-    };
-    const manifestHash = canonicalHash(manifest);
-    await tx.insert(runManifests).values({
-      runId: input.runId,
-      organizationId: input.orgId,
-      assistantVersionId: input.versionId,
-      policySnapshotId: input.snapshotId,
-      manifest,
-      manifestHash,
-    });
-    return manifestHash;
-  }
-
-  /**
-   * FL-3.3 — regenerate an assistant reply. The target (default: the latest
-   * non-superseded assistant message) keeps its durable row; the replacement
-   * run records `regenerated_message_id` so CommitRunResult marks the
-   * original superseded in the SAME transaction that appends the new reply
-   * (invariant 5 — messages are immutable, branching is a pointer).
-   */
   async regenerateMessage(input: {
     orgId: string;
     conversationId: string;
@@ -945,179 +343,10 @@ export class ConversationsService {
         }
       : undefined;
 
-    const result = await this.db.withOrg(input.orgId, async (tx) => {
-      if (scope) {
-        const claim = await claimIdempotency(tx, scope);
-        if (claim.kind === 'replay') {
-          return claim.response as {
-            run_id: string;
-            regenerated_message_id: string;
-            conversation_version: number;
-          };
-        }
-      }
-      const conv = await tx
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, input.conversationId))
-        .for('update')
-        .limit(1);
-      if (conv.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-      if (conv[0].status !== 'active') {
-        throw ApiError.conflict('conversation is not active', { status: conv[0].status });
-      }
-      if (
-        input.expectedConversationVersion !== undefined &&
-        conv[0].version !== input.expectedConversationVersion
-      ) {
-        throw ApiError.conflict('stale conversation version', {
-          expected: input.expectedConversationVersion,
-          actual: conv[0].version,
-        });
-      }
-
-      let target: Message | undefined;
-      if (input.messageId !== undefined) {
-        assertUuid(input.messageId, 'messageId');
-        const rows = await tx
-          .select()
-          .from(messages)
-          .where(
-            and(
-              eq(messages.id, input.messageId),
-              eq(messages.conversationId, input.conversationId),
-            ),
-          )
-          .limit(1);
-        if (rows.length === 0 || rows[0].role !== 'assistant') {
-          throw ApiError.notFound('assistant message');
-        }
-        target = rows[0];
-      } else {
-        const rows = await tx
-          .select()
-          .from(messages)
-          .where(
-            and(
-              eq(messages.conversationId, input.conversationId),
-              eq(messages.role, 'assistant'),
-              isNull(messages.supersededBy),
-            ),
-          )
-          .orderBy(desc(messages.sequence))
-          .limit(1);
-        target = rows[0];
-      }
-      if (!target) {
-        throw ApiError.notFound('assistant message');
-      }
-      if (target.supersededBy) {
-        throw ApiError.conflict('message was already regenerated', {
-          superseded_by: target.supersededBy,
-        });
-      }
-      // The regeneration replays the ORIGINAL input user message.
-      const userRows = await tx
-        .select()
-        .from(messages)
-        .where(
-          and(
-            eq(messages.conversationId, input.conversationId),
-            eq(messages.role, 'user'),
-            sql`${messages.sequence} < ${target.sequence}`,
-            isNull(messages.supersededBy),
-          ),
-        )
-        .orderBy(desc(messages.sequence))
-        .limit(1);
-      const userMessage = userRows[0];
-      if (!userMessage) {
-        throw ApiError.conflict('no user message precedes the assistant reply');
-      }
-
-      const pin = await this.pickVersionPin(
-        tx,
-        conv[0].assistantId,
-        conv[0].id,
-        conversationReleaseChannel(conv[0].channelBinding),
-      );
-      if (!pin) {
-        throw ApiError.conflict('assistant has no published version with a policy snapshot');
-      }
-      await this.assertAssistantRunnable(tx, input.orgId, conv[0].assistantId);
-      const runId = uuidv7();
-      try {
-        await tx.insert(runs).values({
-          id: runId,
-          organizationId: input.orgId,
-          conversationId: input.conversationId,
-          inputMessageId: userMessage.id,
-          assistantVersionId: pin.version_id,
-          policySnapshotId: pin.snapshot_id,
-          state: 'ACCEPTED',
-          regeneratedMessageId: target.id,
-        });
-      } catch (err) {
-        if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-          throw ApiError.conflict('conversation already has an active run', {
-            conversation_id: input.conversationId,
-          });
-        }
-        throw err;
-      }
-      // W2.3 — regeneration is billable model traffic: the same two-plane
-      // quota gate as the start-message path (Redis hold, then the durable
-      // wall in this transaction).
-      await this.holdRunQuota(input.orgId);
-      try {
-        await this.reserveQuota(tx, input.orgId, runId);
-      } catch (err) {
-        await this.releaseRunQuotaHold(input.orgId);
-        throw err;
-      }
-      const manifestHash = await this.insertRunManifest(tx, {
-        orgId: input.orgId,
-        runId,
-        versionId: pin.version_id,
-        snapshotId: pin.snapshot_id,
-        conversationId: input.conversationId,
-        messageId: userMessage.id,
-        channel: (conv[0].channelBinding ?? null) as unknown,
-        release: pin.release,
-      });
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: runId,
-        organizationId: input.orgId,
-        eventType: 'run.created',
-        partitionKey: input.conversationId,
-        payload: {
-          run_id: runId,
-          conversation_id: input.conversationId,
-          message_id: userMessage.id,
-          assistant_version_id: pin.version_id,
-          policy_snapshot_id: pin.snapshot_id,
-          manifest_hash: manifestHash,
-          regenerated_message_id: target.id,
-        },
-      });
-      const nextVersion = conv[0].version + 1;
-      await tx
-        .update(conversations)
-        .set({ version: nextVersion, updatedAt: new Date().toISOString() })
-        .where(eq(conversations.id, input.conversationId));
-      const result = {
-        run_id: runId,
-        regenerated_message_id: target.id,
-        conversation_version: nextVersion,
-      };
-      if (scope) {
-        await completeIdempotency(tx, scope, result);
-      }
-      return result;
-    });
+    const result = await this.runs.regenerateMessage(
+      { ...input, idempotencyScope: scope },
+      this.quotaGate(input.orgId),
+    );
     await this.audit.add({
       action: 'message.regenerated',
       resourceType: 'message',
@@ -1172,193 +401,10 @@ export class ConversationsService {
         }
       : undefined;
 
-    const result = await this.db.withOrg(input.orgId, async (tx) => {
-      if (scope) {
-        const claim = await claimIdempotency(tx, scope);
-        if (claim.kind === 'replay') {
-          return claim.response as {
-            message_id: string;
-            run_id: string;
-            sequence: number;
-            conversation_version: number;
-            branched_from: string;
-          };
-        }
-      }
-      const conv = await tx
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, input.conversationId))
-        .for('update')
-        .limit(1);
-      if (conv.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-      if (conv[0].status !== 'active') {
-        throw ApiError.conflict('conversation is not active', { status: conv[0].status });
-      }
-      if (
-        input.expectedConversationVersion !== undefined &&
-        conv[0].version !== input.expectedConversationVersion
-      ) {
-        throw ApiError.conflict('stale conversation version', {
-          expected: input.expectedConversationVersion,
-          actual: conv[0].version,
-        });
-      }
-      const targetRows = await tx
-        .select()
-        .from(messages)
-        .where(
-          and(
-            eq(messages.id, input.messageId),
-            eq(messages.conversationId, input.conversationId),
-            eq(messages.role, 'user'),
-          ),
-        )
-        .limit(1);
-      const target = targetRows[0];
-      if (!target) {
-        throw ApiError.notFound('user message');
-      }
-      if (target.supersededBy) {
-        throw ApiError.conflict('message was already edited', {
-          superseded_by: target.supersededBy,
-        });
-      }
-      // Only the LATEST user message is editable — editing an older one would
-      // silently fork the transcript's meaning.
-      const latest = await tx
-        .select({ id: messages.id })
-        .from(messages)
-        .where(
-          and(
-            eq(messages.conversationId, input.conversationId),
-            eq(messages.role, 'user'),
-            isNull(messages.supersededBy),
-          ),
-        )
-        .orderBy(desc(messages.sequence))
-        .limit(1);
-      if (latest[0]?.id !== target.id) {
-        throw ApiError.conflict('only the latest user message can be edited');
-      }
-
-      const pin = await this.pickVersionPin(
-        tx,
-        conv[0].assistantId,
-        conv[0].id,
-        conversationReleaseChannel(conv[0].channelBinding),
-      );
-      if (!pin) {
-        throw ApiError.conflict('assistant has no published version with a policy snapshot');
-      }
-      await this.assertAssistantRunnable(tx, input.orgId, conv[0].assistantId);
-      const sequence = await nextMessageSequence(tx, input.conversationId);
-      const messageId = uuidv7();
-      const runId = uuidv7();
-
-      // FL-1.6 attachment gate — shared validator (same bounds as start-message).
-      const attachmentRefs =
-        input.attachments && input.attachments.length > 0
-          ? await this.validateAttachments(tx, input.orgId, input.attachments)
-          : null;
-
-      await tx.insert(messages).values({
-        id: messageId,
-        conversationId: input.conversationId,
-        organizationId: input.orgId,
-        sequence,
-        role: 'user',
-        content: input.content,
-        createdBy: input.principalId,
-        branchedFrom: target.id,
-        ...(attachmentRefs !== null ? { artifactRefs: attachmentRefs } : {}),
-      });
-      // Set-once supersede — a concurrent editor loses here (conflict).
-      const superseded = await tx
-        .update(messages)
-        .set({ supersededBy: messageId })
-        .where(and(eq(messages.id, target.id), isNull(messages.supersededBy)))
-        .returning({ id: messages.id });
-      if (superseded.length === 0) {
-        throw ApiError.conflict('message was already edited');
-      }
-
-      try {
-        await tx.insert(runs).values({
-          id: runId,
-          organizationId: input.orgId,
-          conversationId: input.conversationId,
-          inputMessageId: messageId,
-          assistantVersionId: pin.version_id,
-          policySnapshotId: pin.snapshot_id,
-          state: 'ACCEPTED',
-        });
-      } catch (err) {
-        if (isUniqueViolation(err, 'uq_runs_one_active_per_conversation')) {
-          throw ApiError.conflict('conversation already has an active run', {
-            conversation_id: input.conversationId,
-          });
-        }
-        throw err;
-      }
-      // W2.3 — edit-and-resend is billable model traffic: the same two-plane
-      // quota gate as the start-message path (Redis hold, then the durable
-      // wall in this transaction).
-      await this.holdRunQuota(input.orgId);
-      try {
-        await this.reserveQuota(tx, input.orgId, runId);
-      } catch (err) {
-        await this.releaseRunQuotaHold(input.orgId);
-        throw err;
-      }
-      const manifestHash = await this.insertRunManifest(tx, {
-        orgId: input.orgId,
-        runId,
-        versionId: pin.version_id,
-        snapshotId: pin.snapshot_id,
-        conversationId: input.conversationId,
-        messageId,
-        channel: (conv[0].channelBinding ?? null) as unknown,
-        release: pin.release,
-      });
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: runId,
-        organizationId: input.orgId,
-        eventType: 'run.created',
-        partitionKey: input.conversationId,
-        payload: {
-          run_id: runId,
-          conversation_id: input.conversationId,
-          message_id: messageId,
-          assistant_version_id: pin.version_id,
-          policy_snapshot_id: pin.snapshot_id,
-          manifest_hash: manifestHash,
-        },
-      });
-      const nextVersion = conv[0].version + 1;
-      await tx
-        .update(conversations)
-        .set({
-          version: nextVersion,
-          branchedFromMessageId: target.id,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(conversations.id, input.conversationId));
-      const result = {
-        message_id: messageId,
-        run_id: runId,
-        sequence,
-        conversation_version: nextVersion,
-        branched_from: target.id,
-      };
-      if (scope) {
-        await completeIdempotency(tx, scope, result);
-      }
-      return result;
-    });
+    const result = await this.runs.editMessage(
+      { ...input, idempotencyScope: scope },
+      this.quotaGate(input.orgId),
+    );
     await this.audit.add({
       action: 'message.edited',
       resourceType: 'message',
@@ -1372,64 +418,6 @@ export class ConversationsService {
   }
 
   /** FL-1.6 attachment gate shared by the start-message and edit paths. */
-  private async validateAttachments(
-    tx: NodePgDatabase,
-    orgId: string,
-    attachments: string[],
-  ): Promise<
-    Array<{
-      artifact_id: string;
-      media_type: string;
-      byte_length: number;
-      sha256: string;
-      purpose: string;
-    }>
-  > {
-    const ids = [...new Set(attachments)];
-    if (ids.length > 4) {
-      throw ApiError.validation({ attachments: 'at most 4 attachments per message' });
-    }
-    const rows = await tx
-      .select()
-      .from(artifacts)
-      .where(and(eq(artifacts.organizationId, orgId), inArray(artifacts.id, ids)));
-    if (rows.length !== ids.length) {
-      throw ApiError.validation({
-        attachments: 'one or more artifact ids not found in this organization',
-      });
-    }
-    for (const a of rows) {
-      if (a.purpose !== 'MESSAGE_ATTACHMENT') {
-        throw ApiError.validation({
-          attachments: `artifact ${a.id} purpose ${a.purpose} is not an attachment`,
-        });
-      }
-      if (a.state !== 'active') {
-        throw ApiError.validation({ attachments: `artifact ${a.id} is not active` });
-      }
-      const mediaType = a.contentTypeDetected ?? a.contentTypeDeclared;
-      if (!ATTACHMENT_MEDIA_TYPES.has(mediaType)) {
-        throw ApiError.validation({
-          attachments: `artifact ${a.id} media type ${mediaType} is not supported`,
-        });
-      }
-      if (a.byteLength > MAX_ATTACHMENT_BYTES) {
-        throw ApiError.validation({
-          attachments: `artifact ${a.id} exceeds ${MAX_ATTACHMENT_BYTES} bytes`,
-        });
-      }
-    }
-    return rows.map((a) => ({
-      artifact_id: a.id,
-      media_type: a.contentTypeDetected ?? a.contentTypeDeclared,
-      byte_length: a.byteLength,
-      sha256: Buffer.from(a.sha256).toString('hex'),
-      purpose: a.purpose,
-    }));
-  }
-
-  // ── Messages (read path) ─────────────────────────────────────────────────
-
   async listMessages(
     orgId: string,
     conversationId: string,
@@ -1437,24 +425,13 @@ export class ConversationsService {
   ): Promise<{ messages: Message[]; next_cursor: number | null }> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
-    const limit = clampLimit(opts?.limit);
-    const after = opts?.afterSequence ?? 0;
-    const conditions = [eq(messages.conversationId, conversationId), gt(messages.sequence, after)];
     // FL-3.3 — the active branch hides superseded rows; `include_superseded`
     // serves the branch history (the replacement pointer is on each row).
-    if (!opts?.includeSuperseded) {
-      conditions.push(isNull(messages.supersededBy));
-    }
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(messages)
-        .where(and(...conditions))
-        .orderBy(asc(messages.sequence))
-        .limit(limit),
-    );
-    const nextCursor = rows.length === limit ? rows[rows.length - 1].sequence : null;
-    return { messages: rows, next_cursor: nextCursor };
+    return this.conversations.listMessages(orgId, conversationId, {
+      afterSequence: opts?.afterSequence,
+      limit: clampLimit(opts?.limit),
+      includeSuperseded: opts?.includeSuperseded,
+    });
   }
 
   // ── Runs ─────────────────────────────────────────────────────────────────
@@ -1463,10 +440,7 @@ export class ConversationsService {
     assertUuid(orgId, 'orgId');
     assertUuid(runId, 'runId');
     await this.purge.assertNotTombstoned('run', runId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(runs).where(eq(runs.id, runId)).limit(1),
-    );
-    const run = rows[0] ?? null;
+    const run = await this.runs.getRun(orgId, runId);
     if (run) {
       // A purged conversation rejects every reference to its runs (typed 410).
       await this.purge.assertNotTombstoned('conversation', run.conversationId);
@@ -1477,14 +451,7 @@ export class ConversationsService {
   async listRuns(orgId: string, conversationId: string, opts?: { limit?: number }): Promise<Run[]> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(runs)
-        .where(and(eq(runs.organizationId, orgId), eq(runs.conversationId, conversationId)))
-        .orderBy(desc(runs.acceptedAt))
-        .limit(clampLimit(opts?.limit)),
-    );
+    return this.runs.listRuns(orgId, conversationId, { limit: clampLimit(opts?.limit) });
   }
 
   /**
@@ -1524,296 +491,11 @@ export class ConversationsService {
     assertUuid(input.runId, 'runId');
     validateMessageContent(input.content);
 
-    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (run.state === 'COMPLETED') {
-        if (!run.resultMessageId) {
-          throw ApiError.internal();
-        }
-        return { message_id: run.resultMessageId, run_id: run.id, replay: true, releaseHold: false };
-      }
-      if (input.leaseEpoch !== undefined && input.leaseEpoch !== run.leaseEpoch) {
-        throw ApiError.conflict('stale lease epoch: run was re-leased or the lease expired', {
-          token_epoch: input.leaseEpoch,
-          run_epoch: run.leaseEpoch,
-        });
-      }
-      if (input.expectedVersion !== undefined && input.expectedVersion !== run.version) {
-        throw ApiError.conflict('stale run version', {
-          expected: input.expectedVersion,
-          actual: run.version,
-        });
-      }
-      if (!isRunState(run.state)) {
-        throw ApiError.internal();
-      }
-      assertRunTransition(run.state, 'COMPLETED');
-
-      // The conversation row lock makes the MAX(sequence)+1 allocation
-      // airtight against ANY second writer (the one-active-turn index keeps
-      // this contention near zero; the lock makes it correct, not lucky).
-      const conv = await tx
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, run.conversationId))
-        .for('update')
-        .limit(1);
-      if (conv.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-
-      const sequence = await nextMessageSequence(tx, run.conversationId);
-      const messageId = uuidv7();
-
-      // FL-2.9 - citations plumbing: retrieval events emitted for THIS run
-      // (wire EVENT_TYPE_RETRIEVAL → stored '5', payload {case:'retrieval'})
-      // carry the manifest's document/chunk ranges; the committed assistant
-      // message carries a bounded `citations` part so consumers can render
-      // sources without a second round trip.
-      const retrievalRows = await tx.execute(sql`
-        select payload->'value'->'citations' as citations from run_events
-        where run_id = ${run.id}::uuid and event_type = '5' and payload->>'case' = 'retrieval'
-        order by engine_sequence desc
-        limit 5
-      `);
-      const citations = (
-        retrievalRows.rows as Array<{ citations?: Array<Record<string, unknown>> } | null>
-      )
-        .flatMap((r) => (r?.citations ?? []).slice(0, 5))
-        .slice(0, 10)
-        .map((c) => ({
-          document_id: String(c['document_id'] ?? ''),
-          chunk_id: String(c['chunk_id'] ?? ''),
-          source_range: {
-            start: Number(c['source_range_start'] ?? 0),
-            end: Number(c['source_range_end'] ?? 0),
-          },
-        }));
-
-      // FL-3.2 — generated media plumbing (same pattern as citations): the
-      // runtime uploads each image via PutRunArtifact (GENERATED_MEDIA) and
-      // emits a MediaGenerated run event (stored '13', payload case 'media');
-      // the committed assistant message pins bounded refs so consumers render
-      // attachments and the channel plane can deliver them. Artifact
-      // ownership is re-verified here.
-      const mediaRows = await tx.execute(sql`
-        select payload->'value' as value from run_events
-        where run_id = ${run.id}::uuid and event_type = '13' and payload->>'case' = 'media'
-        order by engine_sequence asc
-        limit 8
-      `);
-      const mediaRefs: Array<{ artifact_id: string; media_type: string }> = [];
-      for (const row of mediaRows.rows as Array<{
-        value: { artifact_id?: unknown; media_type?: unknown } | null;
-      }>) {
-        const artifactId = row.value?.artifact_id;
-        const mediaType = row.value?.media_type;
-        if (
-          typeof artifactId !== 'string' ||
-          typeof mediaType !== 'string' ||
-          mediaRefs.length >= 4
-        ) {
-          continue;
-        }
-        const owned = await tx
-          .select({ id: artifacts.id, purpose: artifacts.purpose, state: artifacts.state })
-          .from(artifacts)
-          .where(and(eq(artifacts.id, artifactId), eq(artifacts.organizationId, input.orgId)))
-          .limit(1);
-        if (
-          owned[0]?.purpose === 'GENERATED_MEDIA' &&
-          owned[0].state === 'active' &&
-          !mediaRefs.some((m) => m.artifact_id === artifactId)
-        ) {
-          mediaRefs.push({ artifact_id: artifactId, media_type: mediaType.slice(0, 100) });
-        }
-      }
-
-      // FL-3.4 — suggested follow-ups ride the SAME commit (bounded, typed).
-      const followups = normalizeFollowups(input.suggestedFollowups);
-      const contentOut = {
-        ...input.content,
-        ...(citations.length > 0 ? { citations } : {}),
-        ...(mediaRefs.length > 0 ? { generated_media: mediaRefs } : {}),
-        ...(followups.length > 0 ? { suggested_followups: followups } : {}),
-      };
-
-      await tx.insert(messages).values({
-        id: messageId,
-        conversationId: run.conversationId,
-        organizationId: input.orgId,
-        sequence,
-        role: 'assistant',
-        content: contentOut,
-        ...(mediaRefs.length > 0 ? { artifactRefs: mediaRefs } : {}),
-      });
-
-      // FL-3.3 — a regeneration supersedes the original reply in the SAME
-      // transaction that appends its replacement (set-once pointer).
-      if (run.regeneratedMessageId) {
-        await tx
-          .update(messages)
-          .set({ supersededBy: messageId })
-          .where(and(eq(messages.id, run.regeneratedMessageId), isNull(messages.supersededBy)));
-      }
-
-      const insertedEvent = await tx
-        .insert(runEvents)
-        .values(
-          (() => {
-            const rowId = uuidv7();
-            return {
-              id: rowId,
-              eventId: rowId,
-              runId: run.id,
-              organizationId: input.orgId,
-              eventType: 'run.completed',
-              payload: { message_id: messageId, terminal_reason: 'completed' },
-              producerIdentity: 'engine:conversations',
-            };
-          })(),
-        )
-        .returning({ engineSequence: runEvents.engineSequence });
-
-      await tx
-        .update(runs)
-        .set({
-          state: 'COMPLETED',
-          finishedAt: new Date().toISOString(),
-          resultMessageId: messageId,
-          lastEventSequence: insertedEvent[0].engineSequence,
-          version: run.version + 1,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(runs.id, run.id));
-
-      // The final assistant message is a conversation mutation — bump the
-      // optimistic-concurrency version alongside it.
-      await tx
-        .update(conversations)
-        .set({ version: conv[0].version + 1, updatedAt: new Date().toISOString() })
-        .where(eq(conversations.id, run.conversationId));
-
-      // Contract v1.1: usage rides the terminal commit — append-only ledger
-      // entry in the SAME transaction. A replayed commit short-circuits above
-      // (COMPLETED) so the entry can never be written twice. REL-2.2/2.4:
-      // test/eval runs are not billable traffic — no entry at all.
-      // REL-4.5: the entry carries the estimated cost from the model cost
-      // catalog (GAP-06 — cost was priced at zero before this). Lookup is
-      // exact (provider, model); an unpriced model stays null and is filled
-      // by reconciliation, never invented.
-      // REL-11.1 (BYOK): the credential source (platform vs byok) is recorded
-      // in metadata so billing can apply D3 passthrough vs platform-fee
-      // accounting without a schema break — the ledger row itself stays the
-      // same shape, only the metadata gains `credential_source`.
-      await this.settleRunQuota(tx, run.id, true);
-      let estimatedCost: string | null = null;
-      if (run.runKind === 'standard' && input.usage && input.usage.totalTokens > 0) {
-        // P2: normalize the cache split BEFORE pricing. Integers ≥ 0; a lone
-        // half derives from promptTokens; a full pair must sum exactly.
-        // Helper throws plain Errors — mapped to 422 (caller-fixable).
-        let split: { reported: boolean; hitTokens: number; missTokens: number };
-        try {
-          split = normalizeUsageCacheSplit(input.usage);
-        } catch (err) {
-          throw ApiError.validation({ usage: (err as Error).message });
-        }
-        const point = await ModelCostService.latestForRunPricing(
-          tx,
-          input.usage.provider,
-          input.usage.model,
-        );
-        if (point) {
-          estimatedCost = microsToLedgerString(
-            estimateCostMicros(
-              {
-                costMicrosPer1kInput: point.inputMicros,
-                costMicrosPer1kOutput: point.outputMicros,
-                costMicrosPer1kCachedInput: point.cachedMicros,
-              },
-              input.usage.promptTokens,
-              input.usage.completionTokens,
-              split.hitTokens,
-            ),
-          );
-        }
-        // REL-11.1: resolve the active credential's source for BYOK accounting.
-        // No extra RLS — same tx, same org. Missing row -> 'unknown' (e.g. a
-        // run pinned to a model whose credential was revoked between accept
-        // and commit — the cost still lands, just without a source).
-        const credSourceRows = await tx
-          .select({ source: providerCredentials.source })
-          .from(providerCredentials)
-          .where(
-            and(
-              eq(providerCredentials.organizationId, input.orgId),
-              eq(providerCredentials.provider, input.usage.provider),
-              eq(providerCredentials.status, 'active'),
-            ),
-          )
-          .limit(1);
-        const credentialSource = credSourceRows[0]?.source ?? 'unknown';
-        await tx.insert(usageLedgerEntries).values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          usageEventId: `commit:${run.id}`,
-          sourceType: 'run',
-          sourceId: run.id,
-          runId: run.id,
-          messageId,
-          usageKind: 'model_tokens',
-          unit: 'tokens',
-          quantity: String(input.usage.totalTokens),
-          provider: input.usage.provider.slice(0, 64),
-          model: input.usage.model.slice(0, 128),
-          estimatedCost,
-          idempotencyKey: `commit-usage:${run.id}`,
-          metadata: {
-            prompt_tokens: input.usage.promptTokens,
-            completion_tokens: input.usage.completionTokens,
-            // P2: present only when the runtime reported a split (legacy
-            // commits keep the two-key shape — invoice readers must not
-            // require the split).
-            ...(split.reported
-              ? {
-                  prompt_cache_hit_tokens: split.hitTokens,
-                  prompt_cache_miss_tokens: split.missTokens,
-                }
-              : {}),
-            credential_source: credentialSource,
-          },
-        });
-      }
-
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: run.id,
-        organizationId: input.orgId,
-        eventType: 'run.completed',
-        partitionKey: run.conversationId,
-        payload: {
-          run_id: run.id,
-          conversation_id: run.conversationId,
-          message_id: messageId,
-          run_kind: run.runKind,
-        },
-      });
-
-      return { message_id: messageId, run_id: run.id, replay: false, releaseHold: run.runKind === 'standard' };
-    });
+    const outcome = await this.runs.completeRun(input);
     // W2.3 — the terminal commit drops the advisory hold; the actuals are in
     // the ledger now (the hourly reconcile resyncs the Redis counters from
     // billing.spend_events). Best-effort: release never throws.
-    if (outcome.releaseHold) {
+    if (outcome.releaseQuotaHold) {
       await this.releaseRunQuotaHold(input.orgId);
     }
     return { message_id: outcome.message_id, run_id: outcome.run_id, replay: outcome.replay };
@@ -1836,31 +518,9 @@ export class ConversationsService {
     if (stateFilter && !['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'].includes(state)) {
       throw ApiError.validation({ state: 'must be one of PENDING|APPROVED|DENIED|EXPIRED' });
     }
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const base = tx
-        .select({
-          id: approvals.id,
-          runId: approvals.runId,
-          approvalRef: approvals.approvalRef,
-          summary: approvals.summary,
-          actionType: approvals.actionType,
-          policyVersion: approvals.policyVersion,
-          state: approvals.state,
-          expiresAt: approvals.expiresAt,
-          decidedAt: approvals.decidedAt,
-          decisionActorId: approvals.decisionActorId,
-          createdAt: approvals.createdAt,
-        })
-        .from(approvals);
-      const rows = stateFilter
-        ? await base.where(eq(approvals.state, state)).orderBy(desc(approvals.createdAt)).limit(200)
-        : await base.orderBy(desc(approvals.createdAt)).limit(200);
-      const nowMs = Date.now();
-      return rows.map((r) => ({
-        ...r,
-        expired:
-          r.state === 'PENDING' && r.expiresAt !== null && new Date(r.expiresAt).getTime() < nowMs,
-      }));
+    return this.approvals.listApprovals({
+      orgId: input.orgId,
+      state: stateFilter ? state : undefined,
     });
   }
 
@@ -1882,34 +542,22 @@ export class ConversationsService {
     if (Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) {
       throw ApiError.validation({ expires_at: 'must be an ISO timestamp in the future' });
     }
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(approvals)
-        .set({ expiresAt: parsed.toISOString() })
-        .where(
-          and(
-            eq(approvals.id, input.approvalId),
-            eq(approvals.organizationId, input.orgId),
-            eq(approvals.state, 'PENDING'),
-          ),
-        )
-        .returning(),
-    );
-    if (rows.length === 0) {
-      throw ApiError.conflict(
-        'approval is not pending (or does not exist) — expired/decided approvals cannot be extended',
-      );
-    }
+    const row = await this.approvals.extendApproval({
+      orgId: input.orgId,
+      approvalId: input.approvalId,
+      expiresAt: parsed.toISOString(),
+      actor: input.actor,
+    });
     await this.audit.add({
       action: 'approval.extended',
       resourceType: 'approval',
-      resourceId: rows[0].id,
+      resourceId: String(row.id),
       actorType: 'account',
       actorId: input.actor,
       tenantId: input.orgId,
-      details: { approval_ref: rows[0].approvalRef, new_expires_at: parsed.toISOString() },
+      details: { approval_ref: String(row.approvalRef), new_expires_at: parsed.toISOString() },
     });
-    return { ...rows[0], expired: false };
+    return { ...row, expired: false };
   }
 
   /**
@@ -1926,25 +574,12 @@ export class ConversationsService {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.conversationId, 'conversationId');
     assertUuid(input.messageId, 'messageId');
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .update(messages)
-        .set({
-          pinnedAt: input.pinned ? new Date().toISOString() : null,
-          pinnedBy: input.pinned ? input.actor.slice(0, 128) : null,
-        })
-        .where(
-          and(
-            eq(messages.id, input.messageId),
-            eq(messages.conversationId, input.conversationId),
-            isNull(messages.supersededBy),
-          ),
-        )
-        .returning();
-      if (rows.length === 0) {
-        throw ApiError.notFound('message');
-      }
-      return rows[0];
+    const row = await this.conversations.setPinned({
+      orgId: input.orgId,
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      pinned: input.pinned,
+      actor: input.actor,
     });
     await this.audit.add({
       action: input.pinned ? 'message.pinned' : 'message.unpinned',
@@ -1981,27 +616,12 @@ export class ConversationsService {
             Date.now() + Math.min(Math.max(60, input.ttlSeconds), 90 * 86_400) * 1000,
           ).toISOString()
         : null;
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const conv = await tx
-        .select({ id: conversations.id })
-        .from(conversations)
-        .where(eq(conversations.id, input.conversationId))
-        .limit(1);
-      if (conv.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-      const rows = await tx
-        .insert(conversationShares)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          conversationId: input.conversationId,
-          tokenHash,
-          createdBy: input.actor.slice(0, 128),
-          expiresAt,
-        })
-        .returning();
-      return rows[0];
+    const row = await this.shares.createShare({
+      orgId: input.orgId,
+      conversationId: input.conversationId,
+      tokenHash,
+      expiresAt,
+      actor: input.actor,
     });
     await this.audit.add({
       action: 'conversation.shared',
@@ -2018,19 +638,7 @@ export class ConversationsService {
   async listShares(orgId: string, conversationId: string): Promise<ConversationShare[]> {
     assertUuid(orgId, 'orgId');
     assertUuid(conversationId, 'conversationId');
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(conversationShares)
-        .where(
-          and(
-            eq(conversationShares.organizationId, orgId),
-            eq(conversationShares.conversationId, conversationId),
-          ),
-        )
-        .orderBy(desc(conversationShares.createdAt))
-        .limit(100),
-    );
+    return this.shares.listShares(orgId, conversationId);
   }
 
   async revokeShare(input: {
@@ -2040,22 +648,10 @@ export class ConversationsService {
   }): Promise<ConversationShare> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.shareId, 'shareId');
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .update(conversationShares)
-        .set({ revokedAt: new Date().toISOString() })
-        .where(
-          and(
-            eq(conversationShares.id, input.shareId),
-            eq(conversationShares.organizationId, input.orgId),
-            isNull(conversationShares.revokedAt),
-          ),
-        )
-        .returning();
-      if (rows.length === 0) {
-        throw ApiError.notFound('share');
-      }
-      return rows[0];
+    const row = await this.shares.revokeShare({
+      orgId: input.orgId,
+      shareId: input.shareId,
+      actor: input.actor,
     });
     await this.audit.add({
       action: 'conversation_share.revoked',
@@ -2093,56 +689,7 @@ export class ConversationsService {
       return null;
     }
     const tokenHash = createHash('sha256').update(token).digest('hex');
-    return this.db.withBypass(async (tx) => {
-      const shareRows = await tx
-        .select()
-        .from(conversationShares)
-        .where(
-          and(eq(conversationShares.tokenHash, tokenHash), isNull(conversationShares.revokedAt)),
-        )
-        .limit(1);
-      const share = shareRows[0];
-      if (!share || (share.expiresAt !== null && Date.parse(share.expiresAt) <= Date.now())) {
-        return null;
-      }
-      const convRows = await tx
-        .select()
-        .from(conversations)
-        .where(eq(conversations.id, share.conversationId))
-        .limit(1);
-      const conversation = convRows[0];
-      if (!conversation || conversation.status === 'deleted') {
-        return null;
-      }
-      const msgRows = await tx
-        .select()
-        .from(messages)
-        .where(and(eq(messages.conversationId, conversation.id), isNull(messages.supersededBy)))
-        .orderBy(asc(messages.sequence))
-        .limit(200);
-      return {
-        title: conversation.title,
-        created_at: conversation.createdAt,
-        messages: msgRows.map((m) => {
-          const content = (m.content ?? {}) as {
-            text?: unknown;
-            citations?: unknown;
-            suggested_followups?: unknown;
-          };
-          return {
-            sequence: m.sequence,
-            role: m.role,
-            text: typeof content.text === 'string' ? content.text.slice(0, 16_000) : '',
-            ...(content.citations !== undefined ? { citations: content.citations } : {}),
-            ...(Array.isArray(content.suggested_followups)
-              ? { suggested_followups: content.suggested_followups.map(String).slice(0, 4) }
-              : {}),
-            pinned: m.pinnedAt !== null,
-            created_at: m.createdAt,
-          };
-        }),
-      };
-    });
+    return this.shares.resolvePublicShare(tokenHash);
   }
 
   /** Set/update the human-facing conversation title (drizzle/0033). */
@@ -2158,21 +705,11 @@ export class ConversationsService {
     if (!title) {
       throw ApiError.validation({ title: 'must not be empty' });
     }
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .update(conversations)
-        .set({ title, updatedAt: new Date().toISOString() })
-        .where(
-          and(
-            eq(conversations.id, input.conversationId),
-            eq(conversations.organizationId, input.orgId),
-          ),
-        )
-        .returning();
-      if (rows.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-      return rows[0];
+    return this.conversations.setTitle({
+      orgId: input.orgId,
+      conversationId: input.conversationId,
+      title,
+      actor: input.actor,
     });
   }
 
@@ -2200,54 +737,11 @@ export class ConversationsService {
     if (input.reason && input.reason.length > 64) {
       throw ApiError.validation({ reason: 'max 64 chars' });
     }
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const msg = await tx
-        .select({ id: messages.id, conversationId: messages.conversationId })
-        .from(messages)
-        .where(and(eq(messages.id, input.messageId), eq(messages.organizationId, input.orgId)))
-        .limit(1);
-      if (msg.length === 0 || msg[0].conversationId !== input.conversationId) {
-        throw ApiError.notFound('message');
-      }
-      const rows = await tx
-        .insert(messageFeedback)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          conversationId: input.conversationId,
-          messageId: input.messageId,
-          accountId: input.accountId,
-          rating: input.rating,
-          reason: input.reason ?? null,
-          comment: input.comment ?? null,
-        })
-        .onConflictDoUpdate({
-          target: [messageFeedback.messageId, messageFeedback.accountId],
-          set: {
-            rating: input.rating,
-            reason: input.reason ?? null,
-            comment: input.comment ?? null,
-            updatedAt: new Date().toISOString(),
-          },
-        })
-        .returning();
-      await recordOutboxEvent(tx, {
-        aggregateType: 'message',
-        aggregateId: input.messageId,
-        organizationId: input.orgId,
-        eventType: 'message.feedback.recorded',
-        partitionKey: input.conversationId,
-        payload: {
-          message_id: input.messageId,
-          conversation_id: input.conversationId,
-          account_id: input.accountId,
-          rating: input.rating,
-        },
-      });
-      const result = rows[0];
-      await this.maybeAutoEscalate({ orgId: input.orgId, conversationId: input.conversationId });
-      return result;
-    });
+    const result = await this.feedbackRepo.recordFeedback(input);
+    // FL-1.7c — the auto-escalation hook runs AFTER the feedback TX commits;
+    // a hook failure must never fail the feedback write.
+    await this.maybeAutoEscalate({ orgId: input.orgId, conversationId: input.conversationId });
+    return result;
   }
 
   /**
@@ -2279,22 +773,7 @@ export class ConversationsService {
 
   /** Newest-first walk over rated messages until the first positive. */
   private async consecutiveNegativeStreak(orgId: string, conversationId: string): Promise<number> {
-    return this.db.withOrg(orgId, async (tx) => {
-      const rows = await tx.execute(sql`
-        select f.rating
-        from message_feedback f
-        join messages m on m.id = f.message_id
-        where m.conversation_id = ${conversationId}::uuid and m.organization_id = ${orgId}::uuid
-        order by m.sequence desc
-        limit 20
-      `);
-      let streak = 0;
-      for (const row of rows.rows as Array<{ rating: string }>) {
-        if (row.rating !== 'down') break;
-        streak += 1;
-      }
-      return streak;
-    });
+    return this.feedbackRepo.consecutiveNegativeStreak(orgId, conversationId);
   }
 
   async cancelRun(input: {
@@ -2305,90 +784,7 @@ export class ConversationsService {
   }): Promise<Run> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.runId, 'runId');
-    const canceled = await this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (isTerminalRun(run.state)) {
-        throw ApiError.conflict('run is already terminal', { state: run.state });
-      }
-      if (!isRunState(run.state)) {
-        throw ApiError.internal();
-      }
-      assertRunTransition(run.state, 'CANCELED');
-
-      const insertedEvent = await tx
-        .insert(runEvents)
-        .values(
-          (() => {
-            const rowId = uuidv7();
-            return {
-              id: rowId,
-              eventId: rowId,
-              runId: run.id,
-              organizationId: input.orgId,
-              eventType: 'run.canceled',
-              payload: { reason: input.reason ?? 'canceled_by_principal' },
-              producerIdentity: 'engine:conversations',
-            };
-          })(),
-        )
-        .returning({ engineSequence: runEvents.engineSequence });
-
-      const updated = await tx
-        .update(runs)
-        .set({
-          state: 'CANCELED',
-          terminalReason: input.reason ?? 'canceled_by_principal',
-          finishedAt: new Date().toISOString(),
-          lastEventSequence: insertedEvent[0].engineSequence,
-          version: run.version + 1,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(runs.id, run.id))
-        .returning();
-
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: run.id,
-        organizationId: input.orgId,
-        eventType: 'run.canceled',
-        partitionKey: run.conversationId,
-        payload: {
-          run_id: run.id,
-          conversation_id: run.conversationId,
-          reason: input.reason ?? 'canceled_by_principal',
-        },
-      });
-      // W2.3 — a canceled run must not strand its reservation: the durable
-      // row releases in the SAME transaction as the state flip (previously
-      // missing — cancelRun leaked RESERVED rows until the 15-minute TTL),
-      // and the advisory Redis hold drops after the commit (best-effort).
-      await this.settleRunQuota(tx, run.id, false);
-
-      // A2-64 — a canceled run's pending approvals must not linger in the
-      // queue: mark them EXPIRED (terminal, undecidable — the same bucket
-      // the approval-expiry sweep uses) in the SAME transaction as the
-      // cancel, so the queue never shows decidable work for a dead run.
-      const orphaned = await tx
-        .update(approvals)
-        .set({
-          state: 'EXPIRED',
-          decidedAt: new Date().toISOString(),
-          decisionActorId: `system:run-canceled:${input.actor}`,
-        })
-        .where(and(eq(approvals.runId, run.id), eq(approvals.state, 'PENDING')))
-        .returning({ id: approvals.id });
-
-      return { canceledRow: updated[0], orphanedApprovalIds: orphaned.map((r) => r.id) };
-    });
+    const canceled = await this.runs.cancelRun(input);
     await this.audit.add({
       action: 'run.canceled',
       resourceType: 'run',
@@ -2401,10 +797,10 @@ export class ConversationsService {
         expired_approval_ids: canceled.orphanedApprovalIds,
       },
     });
-    if (canceled.canceledRow.runKind === 'standard') {
+    if (canceled.releaseQuotaHold) {
       await this.releaseRunQuotaHold(input.orgId);
     }
-    return canceled.canceledRow;
+    return canceled.run;
   }
 
   /**
@@ -2424,93 +820,10 @@ export class ConversationsService {
   }): Promise<{ run_id: string; terminal: boolean }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.runId, 'runId');
-    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (isTerminalRun(run.state)) {
-        return { run_id: run.id, terminal: true, releaseHold: false };
-      }
-      if (run.state !== 'RUNNING' && run.state !== 'DISPATCHED') {
-        throw ApiError.conflict(
-          'run is not executing — the budget watchdog only fails RUNNING/DISPATCHED runs',
-          {
-            state: run.state,
-          },
-        );
-      }
-      if (!isRunState(run.state)) {
-        throw ApiError.internal();
-      }
-      assertRunTransition(run.state, 'FAILED');
-
-      const insertedEvent = await tx
-        .insert(runEvents)
-        .values(
-          (() => {
-            const rowId = uuidv7();
-            return {
-              id: rowId,
-              eventId: rowId,
-              runId: run.id,
-              organizationId: input.orgId,
-              eventType: 'run.failed',
-              payload: { reason: input.reason, terminal_reason: 'budget_exceeded' },
-              producerIdentity: 'engine:run-watchdog',
-            };
-          })(),
-        )
-        .returning({ engineSequence: runEvents.engineSequence });
-
-      await tx
-        .update(runs)
-        .set({
-          state: 'FAILED',
-          terminalReason: input.reason,
-          finishedAt: new Date().toISOString(),
-          lastEventSequence: insertedEvent[0].engineSequence,
-          version: run.version + 1,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(runs.id, run.id));
-
-      // Release the quota reservation (never commit spend for a killed run —
-      // partial usage already ledgered stays; the reservation must not).
-      await this.settleRunQuota(tx, run.id, false);
-
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: run.id,
-        organizationId: input.orgId,
-        eventType: 'run.failed',
-        partitionKey: run.conversationId,
-        payload: {
-          run_id: run.id,
-          conversation_id: run.conversationId,
-          reason: input.reason,
-        },
-      });
-      await this.audit.add({
-        action: 'run.failed',
-        resourceType: 'run',
-        resourceId: run.id,
-        actorType: 'service',
-        actorId: input.actor,
-        tenantId: input.orgId,
-        details: { reason: input.reason },
-      });
-      return { run_id: run.id, terminal: true, releaseHold: run.runKind === 'standard' };
-    });
+    const outcome = await this.runs.failRunForBudget(input);
     // W2.3 — the watchdog kill drops the advisory hold (the durable row
     // released inside the transaction above). Best-effort: never throws.
-    if (outcome.releaseHold) {
+    if (outcome.releaseQuotaHold) {
       await this.releaseRunQuotaHold(input.orgId);
     }
     return { run_id: outcome.run_id, terminal: outcome.terminal };
@@ -2523,18 +836,10 @@ export class ConversationsService {
   ): Promise<{ events: RunEvent[]; next_cursor: number | null }> {
     assertUuid(orgId, 'orgId');
     assertUuid(runId, 'runId');
-    const limit = clampLimit(opts?.limit);
-    const after = opts?.afterSequence ?? 0;
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(runEvents)
-        .where(and(eq(runEvents.runId, runId), gt(runEvents.engineSequence, after)))
-        .orderBy(asc(runEvents.engineSequence))
-        .limit(limit),
-    );
-    const nextCursor = rows.length === limit ? rows[rows.length - 1].engineSequence : null;
-    return { events: rows, next_cursor: nextCursor };
+    return this.runs.listRunEvents(orgId, runId, {
+      afterSequence: opts?.afterSequence,
+      limit: clampLimit(opts?.limit),
+    });
   }
 
   /**
@@ -2573,21 +878,19 @@ export class ConversationsService {
           finish();
           return;
         }
-        void this.db
-          .withOrg(orgId, async (tx) => {
-            const runRows = await tx.select().from(runs).where(eq(runs.id, runId)).limit(1);
-            if (runRows.length === 0) {
+        void (async () => {
+          try {
+            const { run, events: rows } = await this.runs.pollRunEvents(
+              orgId,
+              runId,
+              cursor,
+              batchLimit,
+            );
+            if (!run) {
               subscriber.next({ type: 'error', data: 'not_found' });
               finish();
               return;
             }
-            const run = runRows[0];
-            const rows = await tx
-              .select()
-              .from(runEvents)
-              .where(and(eq(runEvents.runId, runId), gt(runEvents.engineSequence, cursor)))
-              .orderBy(asc(runEvents.engineSequence))
-              .limit(batchLimit);
             for (const e of rows) {
               cursor = e.engineSequence;
               // Numeric wire enum (wireEventTypeToStore) → stable stream names;
@@ -2607,10 +910,10 @@ export class ConversationsService {
               // Terminal state observed and the tail has been flushed.
               finish();
             }
-          })
-          .catch(() => {
+          } catch {
             // Transient DB error: keep the stream open — the next tick retries.
-          });
+          }
+        })();
       }, pollMs);
 
       return () => {
@@ -2627,16 +930,6 @@ export interface SseMessage {
   type?: string;
   data: unknown;
   retry?: number;
-}
-
-export async function nextMessageSequence(
-  tx: NodePgDatabase,
-  conversationId: string,
-): Promise<number> {
-  const res = await tx.execute(
-    sql`select coalesce(max(sequence), 0) + 1 as next from messages where conversation_id = ${conversationId}::uuid`,
-  );
-  return Number((res.rows[0] as { next: string | number }).next);
 }
 
 /**
@@ -2700,11 +993,6 @@ function normalizeFollowups(input?: string[]): string[] {
     if (out.length >= 4) break;
   }
   return out;
-}
-
-function isUniqueViolation(err: unknown, constraint: string): boolean {
-  const pg = pgViolation(err);
-  return pg.code === '23505' && pg.constraint === constraint;
 }
 
 function validateMessageContent(content: unknown): void {

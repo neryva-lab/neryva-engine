@@ -1,20 +1,26 @@
-import { eq, or } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { RedisService } from '../../common/infra/redis.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
-import { accounts, oauthClients, oauthSessions } from './schema';
+import { ACCOUNT_REPOSITORY, SESSION_REPOSITORY, OAUTH_CLIENT_REPOSITORY } from './repositories/repository-tokens';
+import type { IAccountRepository } from './repositories/account.repository';
+import type { ISessionRepository } from './repositories/session.repository';
+import type { IOauthClientRepository } from './repositories/client.repository';
 
 /**
  * Identity's implementations of the kernel ports (the dependency-inversion
  * seam: kernel defines, identity binds). These are the ONLY places the
  * kernel's guards touch identity tables.
+ *
+ * Persistence goes through the provider-blind repository ports
+ * (`ISessionRepository`, `IAccountRepository`, `IOauthClientRepository`).
  */
 @Injectable()
 export class IdentityPublicService implements SessionRegistryLike, ServiceClientLike {
   constructor(
-    private readonly db: DbService,
+    @Inject(SESSION_REPOSITORY) private readonly sessions: ISessionRepository,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accountsRepo: IAccountRepository,
+    @Inject(OAUTH_CLIENT_REPOSITORY) private readonly clients: IOauthClientRepository,
     private readonly redis: RedisService,
     private readonly events: EventBus,
   ) {}
@@ -25,12 +31,7 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
       // P7 D-2: the JWT `sid` claim carries the OIDC session.uid (see the
       // provider's formats.customizers.jwt). Match session_uid first; fall
       // back to the legacy storage-id column for rows that predate it.
-      const rows = await this.db.root
-        .select()
-        .from(oauthSessions)
-        .where(or(eq(oauthSessions.sessionUid, input.sid), eq(oauthSessions.sid, input.sid)))
-        .limit(1);
-      const row = rows[0];
+      const row = await this.sessions.findBySidOrUid(input.sid);
       if (!row || row.revokedAt || row.accountId !== input.accountId) {
         return false;
       }
@@ -40,16 +41,11 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
     // on the same row so an abuse lock takes effect on the next request
     // (bounded by the access-token TTL only for the deny-list-miss path,
     // never beyond it: this registry check runs on every L1 request).
-    const rows = await this.db.root
-      .select({ status: accounts.status, sessionsRevokedAt: accounts.sessionsRevokedAt })
-      .from(accounts)
-      .where(eq(accounts.id, input.accountId))
-      .limit(1);
-    const row = rows[0];
-    if (!row || row.status !== 'active') {
+    const guard = await this.accountsRepo.sessionGuardState(input.accountId);
+    if (!guard || guard.status !== 'active') {
       return false;
     }
-    const revokedAt = row.sessionsRevokedAt;
+    const revokedAt = guard.sessionsRevokedAt;
     if (!revokedAt) {
       return true;
     }
@@ -59,9 +55,7 @@ export class IdentityPublicService implements SessionRegistryLike, ServiceClient
 
   /** SERVICE_CLIENT_PORT — DB-backed confirmation for L3 tokens. */
   async isActiveServiceClient(clientId: string): Promise<boolean> {
-    const rows = await this.db.root.select({ disabled: oauthClients.disabled, kind: oauthClients.kind }).from(oauthClients).where(eq(oauthClients.clientId, clientId)).limit(1);
-    const row = rows[0];
-    return !!row && !row.disabled && row.kind === 'service';
+    return this.clients.isServiceClientActive(clientId);
   }
 
   /**

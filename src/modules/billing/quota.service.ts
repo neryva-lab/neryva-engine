@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RedisService } from '../../common/infra/redis.service';
-import { DbService } from '../../common/infra/db/db.service';
 import { EntitlementsService } from '../organizations/entitlements.service';
+import { SPEND_EVENT_REPOSITORY } from './repositories/repository-tokens';
+import type { ISpendEventRepository } from './repositories/spend-event.repository';
 
 /**
  * The engine quota plane with the product + project levels (B-1, partitioning
@@ -94,7 +94,7 @@ export class QuotaService {
 
   constructor(
     private readonly redis: RedisService,
-    private readonly db: DbService,
+    @Inject(SPEND_EVENT_REPOSITORY) private readonly spend: ISpendEventRepository,
     private readonly entitlements: EntitlementsService,
   ) {}
 
@@ -216,19 +216,9 @@ export class QuotaService {
    */
   async reconcileMonth(): Promise<{ ledgers: number; counters: number }> {
     const month = monthKey();
-    let rows: Array<{ org_id: string; product: string; project_id: string | null; usd: string; events: number }>;
+    let rows: Array<{ orgId: string; product: string; projectId: string | null; usd: string; events: number }>;
     try {
-      const result = await this.db.withBypass((tx) =>
-        tx.execute<{ org_id: string; product: string; project_id: string | null; usd: string; events: number }>(sql`
-          select org_id, product, project_id,
-                 sum(cost_usd)::text as usd,
-                 count(*)::int as events
-          from billing.spend_events
-          where occurred_at >= date_trunc('month', now())
-          group by 1, 2, 3
-        `),
-      );
-      rows = result.rows;
+      rows = await this.spend.reconcileMonthRows();
     } catch (err) {
       QuotaService.logger.error(`quota reconciliation could not read spend ledger: ${(err as Error).message}`);
       return { ledgers: 0, counters: 0 };
@@ -236,13 +226,13 @@ export class QuotaService {
 
     let counters = 0;
     for (const row of rows) {
-      const base = `quota:${row.org_id}:${row.product}`;
+      const base = `quota:${row.orgId}:${row.product}`;
       const pairs: Array<[string, string]> = [
         [`${base}:${month}:usd`, row.usd],
         [`${base}:${month}:events`, String(row.events)],
       ];
-      if (row.project_id) {
-        pairs.push([`${base}:${row.project_id}:${month}:usd`, row.usd], [`${base}:${row.project_id}:${month}:events`, String(row.events)]);
+      if (row.projectId) {
+        pairs.push([`${base}:${row.projectId}:${month}:usd`, row.usd], [`${base}:${row.projectId}:${month}:events`, String(row.events)]);
       }
       try {
         const pipeline = this.redis.raw.pipeline();
@@ -253,7 +243,7 @@ export class QuotaService {
         await pipeline.exec();
         counters += pairs.length;
       } catch (err) {
-        QuotaService.logger.error(`quota counter resync failed for ${row.org_id}/${row.product}: ${(err as Error).message}`);
+        QuotaService.logger.error(`quota counter resync failed for ${row.orgId}/${row.product}: ${(err as Error).message}`);
       }
     }
     return { ledgers: rows.length, counters };

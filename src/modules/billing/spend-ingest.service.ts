@@ -1,16 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { inArray } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { z } from 'zod';
-import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
-import { legacyTenants } from '../../common/infra/db/legacy-schema';
 import { ManifestRegistryService } from '../console/manifest-registry.service';
-import { projects } from '../organizations/schema';
-import { NewSpendEvent, spendEvents } from './schema';
 import { PriceCatalogService } from './price-catalog.service';
 import { meteringIngestRows } from '../../common/observability/metrics';
+import { BILLING_REFERENCE_REPOSITORY, SPEND_EVENT_REPOSITORY } from './repositories/repository-tokens';
+import type { IBillingReferenceRepository } from './repositories/billing-reference.repository';
+import type { ISpendEventRepository } from './repositories/spend-event.repository';
+import type { NewSpendEventRow } from './repositories/repository-types';
 
 /**
  * The engine metering ingest plane (B-1): satellites push spend events in
@@ -62,7 +61,8 @@ export class SpendIngestService {
   private static readonly logger = new Logger(SpendIngestService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(SPEND_EVENT_REPOSITORY) private readonly spend: ISpendEventRepository,
+    @Inject(BILLING_REFERENCE_REPOSITORY) private readonly refs: IBillingReferenceRepository,
     private readonly audit: AuditService,
     private readonly manifests: ManifestRegistryService,
     private readonly prices: PriceCatalogService,
@@ -126,7 +126,7 @@ export class SpendIngestService {
     for (const [orgId, events] of perOrg) {
       // Deduplicate within the batch itself (same event_id twice in one push).
       const seen = new Set<string>();
-      const rows: NewSpendEvent[] = [];
+      const rows: NewSpendEventRow[] = [];
       for (const { index, event } of events) {
         if (seen.has(event.event_id)) {
           rejected.push({ index, reason: `duplicate event_id "${event.event_id}" within the batch` });
@@ -194,17 +194,11 @@ export class SpendIngestService {
       if (rows.length === 0) {
         continue;
       }
-      const inserted = await this.db.withOrg(orgId, (tx) =>
-        tx
-          .insert(spendEvents)
-          .values(rows)
-          .onConflictDoNothing({ target: [spendEvents.source, spendEvents.eventId] })
-          .returning({ id: spendEvents.id }),
-      );
-      accepted += inserted.length;
-      duplicates += rows.length - inserted.length;
-      meteringIngestRows.inc({ outcome: 'accepted' }, inserted.length);
-      meteringIngestRows.inc({ outcome: 'duplicate' }, rows.length - inserted.length);
+      const inserted = await this.spend.ingestBatch(orgId, rows);
+      accepted += inserted.accepted;
+      duplicates += inserted.duplicates;
+      meteringIngestRows.inc({ outcome: 'accepted' }, inserted.accepted);
+      meteringIngestRows.inc({ outcome: 'duplicate' }, inserted.duplicates);
     }
     meteringIngestRows.inc({ outcome: 'rejected' }, rejected.length);
 
@@ -232,20 +226,13 @@ export class SpendIngestService {
     orgIds: string[],
     projectIds: string[],
   ): Promise<{ existingOrgs: Set<string>; projectsByOrg: Map<string, Set<string>> }> {
-    // tenants/projects are Python-owned/engine-shared tables without RLS —
-    // explicit id filters, parameterized via inArray (never interpolation).
-    const orgRows = await this.db.root
-      .select({ id: legacyTenants.id })
-      .from(legacyTenants)
-      .where(inArray(legacyTenants.id, orgIds));
-    const existingOrgs = new Set(orgRows.map((r) => r.id));
+    // tenants/projects are organizations-owned tables — read through the
+    // explicit cross-domain reference port, never direct queries.
+    const existingOrgs = new Set(await this.refs.findTenantIds(orgIds));
 
     const projectsByOrg = new Map<string, Set<string>>();
     if (projectIds.length > 0) {
-      const projectRows = await this.db.root
-        .select({ orgId: projects.orgId, id: projects.id })
-        .from(projects)
-        .where(inArray(projects.id, projectIds));
+      const projectRows = await this.refs.findProjectsByIds(projectIds);
       for (const row of projectRows) {
         const set = projectsByOrg.get(row.orgId) ?? new Set<string>();
         set.add(row.id);

@@ -1,12 +1,11 @@
-import { eq } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
 import { EmailService } from '../corporate/email/email.service';
-import { accounts } from './schema';
+import { ACCOUNT_REPOSITORY } from './repositories/repository-tokens';
+import type { IAccountRepository } from './repositories/account.repository';
 import { AccountsService, normalizeEmail } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { EmailCodeService } from './email-code.service';
@@ -27,11 +26,15 @@ import { MfaService } from './mfa.service';
  *
  * Known trade-off (documented): codes are keyed per account, so a pending
  * email-change code voids any outstanding login code for that account.
+ *
+ * Persistence goes through `IAccountRepository` (provider-blind); the
+ * re-auth policy, code flow (via `EmailCodeService`), audit writes,
+ * events, and notifications stay here.
  */
 @Injectable()
 export class EmailChangeService {
   constructor(
-    private readonly db: DbService,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accountsRepo: IAccountRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly email: EmailService,
@@ -131,16 +134,7 @@ export class EmailChangeService {
     // The swap: atomic on the citext unique index even under a race — the
     // loser surfaces as a conflict, never as a duplicate identity.
     try {
-      await this.db.root.transaction(async (tx) => {
-        const updated = await tx
-          .update(accounts)
-          .set({ email: newEmail, emailVerifiedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-          .where(eq(accounts.id, account.id))
-          .returning({ id: accounts.id });
-        if (!updated[0]) {
-          throw new Error('email swap produced no row');
-        }
-      });
+      await this.accountsRepo.swapEmail(account.id, newEmail);
     } catch {
       throw ApiError.conflict('that email address is already in use');
     }

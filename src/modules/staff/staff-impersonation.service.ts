@@ -1,15 +1,15 @@
 import { createSign } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
 import { JwksCustody } from '../identity/oidc/jwks-custody';
-import { oauthSessions } from '../identity/schema';
-import { staffImpersonations } from './schema';
+import { SESSION_REPOSITORY } from '../identity/repositories/repository-tokens';
+import type { ISessionRepository } from '../identity/repositories/session.repository';
+import { IMPERSONATION_REPOSITORY } from './repositories/repository-tokens';
+import type { IImpersonationRepository, Impersonation } from './repositories/impersonation.repository';
 
 /**
  * Support impersonation (the staff overlay's sharpest tool — therefore the
@@ -31,7 +31,8 @@ const DEFAULT_TTL_MINUTES = 30;
 @Injectable()
 export class StaffImpersonationService {
   constructor(
-    private readonly db: DbService,
+    @Inject(IMPERSONATION_REPOSITORY) private readonly impersonations: IImpersonationRepository,
+    @Inject(SESSION_REPOSITORY) private readonly sessions: ISessionRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly custody: JwksCustody,
@@ -54,12 +55,16 @@ export class StaffImpersonationService {
 
     // The session row: registry-verifiable, revocable, device-tagged so the
     // target's own session list shows the support access transparently.
-    await this.db.root.insert(oauthSessions).values({
+    // Written through the identity module's session port (the staff module
+    // never owns the oauth_sessions table).
+    await this.sessions.upsertSessionRow({
       sid,
       accountId: input.targetAccountId,
       clientId: 'neryva-console',
       familyId: randomBytes(16).toString('hex') as `${string}-${string}-${string}-${string}-${string}`,
+      sessionUid: null,
       device: { impersonated: true, impersonated_by: input.staffAccountId, reason: reason.slice(0, 120) },
+      nowIso: new Date().toISOString(),
     });
 
     const header = { alg: 'RS256', typ: 'JWT', kid: keys.currentKid };
@@ -84,17 +89,14 @@ export class StaffImpersonationService {
     const signature = signer.sign(privateKey).toString('base64url');
     const token = `${signingInput}.${signature}`;
 
-    const inserted = await this.db.root
-      .insert(staffImpersonations)
-      .values({
-        staffAccountId: input.staffAccountId,
-        targetAccountId: input.targetAccountId,
-        orgId: input.orgId ?? null,
-        reason,
-        sessionSid: sid,
-        expiresAt,
-      })
-      .returning({ id: staffImpersonations.id });
+    const inserted = await this.impersonations.create({
+      staffAccountId: input.staffAccountId,
+      targetAccountId: input.targetAccountId,
+      orgId: input.orgId ?? null,
+      reason,
+      sessionSid: sid,
+      expiresAt,
+    });
 
     await this.audit.add({
       action: 'staff.impersonation_started',
@@ -104,18 +106,17 @@ export class StaffImpersonationService {
       actorId: input.staffAccountId,
       details: { ttl_minutes: String(ttl), org_id: input.orgId ?? '', reason: reason.slice(0, 200) },
     });
-    return { token, expires_at: expiresAt, impersonation_id: inserted[0].id };
+    return { token, expires_at: expiresAt, impersonation_id: inserted.id };
   }
 
   async revoke(input: { staffAccountId: string; impersonationId: string }): Promise<void> {
-    const rows = await this.db.root.select().from(staffImpersonations).where(eq(staffImpersonations.id, input.impersonationId)).limit(1);
-    const row = rows[0];
+    const row = await this.impersonations.findById(input.impersonationId);
     if (!row) {
       throw ApiError.notFound('impersonation');
     }
     const now = new Date().toISOString();
-    await this.db.root.update(oauthSessions).set({ revokedAt: now }).where(eq(oauthSessions.sid, row.sessionSid));
-    await this.db.root.update(staffImpersonations).set({ revokedAt: now }).where(eq(staffImpersonations.id, row.id));
+    await this.sessions.revokeBySid(row.sessionSid, now);
+    await this.impersonations.revoke(row.id, now);
     await this.events.emit(EngineEvents.SessionRevoked, { sid: row.sessionSid, accountId: row.targetAccountId });
     await this.audit.add({
       action: 'staff.impersonation_revoked',
@@ -129,27 +130,16 @@ export class StaffImpersonationService {
 
   /** Expired rows whose session survived (crash between exp and cleanup). */
   async sweepExpiredSessions(): Promise<number> {
-    const result = await this.db.root.execute<{ sid: string }>(sql`
-      select i.session_sid as sid
-      from staff_impersonations i
-      join oauth_sessions s on s.sid = i.session_sid
-      where i.revoked_at is null and i.expires_at < now() and s.revoked_at is null
-      limit 100
-    `);
-    for (const row of result.rows) {
-      await this.db.root.update(oauthSessions).set({ revokedAt: new Date().toISOString() }).where(eq(oauthSessions.sid, row.sid));
-      await this.events.emit(EngineEvents.SessionRevoked, { sid: row.sid, accountId: '' });
+    const sids = await this.impersonations.findExpiredUnrevokedSessionSids(100);
+    for (const sid of sids) {
+      const revoked = await this.sessions.revokeBySid(sid, new Date().toISOString());
+      await this.events.emit(EngineEvents.SessionRevoked, { sid, accountId: revoked?.accountId ?? '' });
     }
-    return result.rows.length;
+    return sids.length;
   }
 
-  async listActive(): Promise<Array<typeof staffImpersonations.$inferSelect>> {
-    return this.db.root
-      .select()
-      .from(staffImpersonations)
-      .where(and(isNull(staffImpersonations.revokedAt), sql`${staffImpersonations.expiresAt} > now()`))
-      .orderBy(desc(staffImpersonations.createdAt))
-      .limit(100);
+  async listActive(): Promise<Impersonation[]> {
+    return this.impersonations.listActive(100);
   }
 }
 

@@ -1,29 +1,23 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { pgViolation } from '../../common/infra/db/pg-types';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { ToolCatalogService, BUILT_IN_TOOLS } from './tool-catalog.service';
-import { templatePlatformBlocks } from './template-blocks.schema';
-import { documents } from '../knowledge/schema';
-import {
-  assistants,
-  assistantVersions,
-  assistantTemplates,
-  assistantInstalls,
+import { ASSISTANT_SCHEMA_VERSION } from './schema';
+import type {
   Assistant,
   AssistantVersion,
   AssistantTemplate,
   AssistantInstall,
-  ASSISTANT_SCHEMA_VERSION,
 } from './schema';
-import { ControlBlocksService } from './control-blocks.service';
 import { ModelCatalogService, partitionModelGaps } from './model-catalog.service';
 import { validateAssistantPayload, rejectUnknownPayloadKeys } from './validation';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
+import { TEMPLATE_REPOSITORY } from './repositories/repository-tokens';
+import type {
+  InstallTemplateCopyInput,
+  ITemplateRepository,
+} from './repositories/template.repository';
 
 /**
  * Template registry — TPL-1.3 / TPL-2.2 / TPL-2.4.
@@ -76,7 +70,7 @@ export class TemplatesService {
   private static readonly LIST_CAP = 200;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(TEMPLATE_REPOSITORY) private readonly templates: ITemplateRepository,
     private readonly audit: AuditService,
     private readonly configPublish: ConfigPublishService,
     private readonly toolCatalog: ToolCatalogService,
@@ -87,7 +81,10 @@ export class TemplatesService {
 
   async list(orgId: string): Promise<TemplateListEntry[]> {
     assertOrgId(orgId);
-    const [templates, installs] = await Promise.all([this.listTemplates(), this.listInstalls(orgId)]);
+    const [templates, installs] = await Promise.all([
+      this.listRegistryTemplates(),
+      this.templates.listInstalls(orgId, TemplatesService.LIST_CAP),
+    ]);
     const installsBySlug = new Map<string, AssistantInstall[]>();
     for (const install of installs) {
       const bucket = installsBySlug.get(install.slug) ?? [];
@@ -115,18 +112,13 @@ export class TemplatesService {
   async get(slug: string, version?: string): Promise<AssistantTemplate> {
     assertSlug(slug);
     if (version !== undefined) {
-      // Global table (no RLS): platform-plane read via db.root, no tenant context.
-      const rows = await this.db.root
-        .select()
-        .from(assistantTemplates)
-        .where(and(eq(assistantTemplates.slug, slug), eq(assistantTemplates.version, version)))
-        .limit(1);
-      if (rows.length === 0) {
+      const row = await this.templates.getTemplateBySlugAndVersion(slug, version);
+      if (!row) {
         throw ApiError.notFound('assistant template version');
       }
-      return rows[0];
+      return row;
     }
-    const rows = await this.db.root.select().from(assistantTemplates).where(eq(assistantTemplates.slug, slug)).limit(TemplatesService.LIST_CAP);
+    const rows = await this.templates.listTemplateRowsBySlug(slug, TemplatesService.LIST_CAP);
     const latest = pickLatest(rows);
     if (!latest) {
       throw ApiError.notFound('assistant template');
@@ -145,17 +137,12 @@ export class TemplatesService {
     orgId: string,
     assistantId: string,
   ): Promise<{ slug: string; version: string; definition_hash: string | null } | null> {
-    const installs = await this.db.withOrg(orgId, (tx) => tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1));
-    const install = installs[0];
+    const install = await this.templates.getInstallByAssistantId(orgId, assistantId);
     if (!install || install.organizationId !== orgId) {
       return null;
     }
-    const templates = await this.db.root
-      .select({ hash: assistantTemplates.hash })
-      .from(assistantTemplates)
-      .where(and(eq(assistantTemplates.slug, install.slug), eq(assistantTemplates.version, install.templateVersion)))
-      .limit(1);
-    return { slug: install.slug, version: install.templateVersion, definition_hash: templates[0]?.hash ?? null };
+    const template = await this.templates.getTemplateBySlugAndVersion(install.slug, install.templateVersion);
+    return { slug: install.slug, version: install.templateVersion, definition_hash: template?.hash ?? null };
   }
 
   /**
@@ -168,17 +155,12 @@ export class TemplatesService {
     orgId: string,
     assistantId: string,
   ): Promise<{ channels: string[]; caps: Record<string, unknown> } | null> {
-    const installs = await this.db.withOrg(orgId, (tx) => tx.select().from(assistantInstalls).where(eq(assistantInstalls.assistantId, assistantId)).limit(1));
-    const install = installs[0];
+    const install = await this.templates.getInstallByAssistantId(orgId, assistantId);
     if (!install || install.organizationId !== orgId) {
       return null;
     }
-    const templates = await this.db.root
-      .select({ bindings: assistantTemplates.bindings })
-      .from(assistantTemplates)
-      .where(and(eq(assistantTemplates.slug, install.slug), eq(assistantTemplates.version, install.templateVersion)))
-      .limit(1);
-    const bindings = (templates[0]?.bindings ?? {}) as { channels?: { channels?: unknown; caps?: unknown } };
+    const template = await this.templates.getTemplateBySlugAndVersion(install.slug, install.templateVersion);
+    const bindings = (template?.bindings ?? {}) as { channels?: { channels?: unknown; caps?: unknown } };
     const declared = bindings.channels;
     if (!declared || !Array.isArray(declared.channels) || declared.channels.length === 0) {
       return null;
@@ -210,13 +192,9 @@ export class TemplatesService {
     // REL-6.1 — platform kill: a staff-written platform block stops new
     // installs of the slug platform-wide (existing assistants keep running;
     // their release pointers also refuse re-assignment — rollouts.service).
-    const block = await this.db.root
-      .select({ id: templatePlatformBlocks.id, reason: templatePlatformBlocks.reason })
-      .from(templatePlatformBlocks)
-      .where(and(eq(templatePlatformBlocks.slug, input.slug), isNull(templatePlatformBlocks.liftedAt)))
-      .limit(1);
-    if (block.length > 0) {
-      throw ApiError.forbidden(`template ${input.slug} is platform-blocked (${block[0].reason})`, { slug: input.slug });
+    const block = await this.templates.findActivePlatformBlock(input.slug);
+    if (block) {
+      throw ApiError.forbidden(`template ${input.slug} is platform-blocked (${block.reason})`, { slug: input.slug });
     }
     // Deep unknown-key diff before validation: a registry row carrying
     // template-only extensions (nested inside policy objects) must fail 422
@@ -251,74 +229,35 @@ export class TemplatesService {
     let assistant: Assistant;
     let version: AssistantVersion;
     let install: AssistantInstall;
-    try {
-      const out = await this.db.withOrg(input.orgId, async (tx) => {
-        // TPL-6.3 — a blocked template (slug or slug@version) cannot be
-        // installed. Checked inside the install TX with everything else.
-        const templateBlock = await ControlBlocksService.findActiveTemplateBlock(tx, input.orgId, template.slug, template.version);
-        if (templateBlock) {
-          throw ApiError.conflict(`template ${template.slug}@${template.version} is blocked (${templateBlock.reason}) — clear the block to install it`, {
-            template_slug: template.slug,
-          });
-        }
-        const assistantRows = await tx
-          .insert(assistants)
-          .values({ organizationId: input.orgId, name, description: `Installed from template ${template.slug}@${template.version}` })
-          .returning();
-        const versionRows = await tx
-          .insert(assistantVersions)
-          .values({
-            assistantId: assistantRows[0].id,
-            organizationId: input.orgId,
-            version: 0, // sentinel for DRAFT — publish assigns the monotonic version
-            status: 'DRAFT',
-            modelPolicy: validated.normalized.model_policy,
-            contextPolicy: validated.normalized.context_policy,
-            toolPolicy: validated.normalized.tool_policy,
-            knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-            guardrailPolicy: validated.normalized.guardrail_policy,
-            instructions: validated.normalized.instructions ?? null,
-            modelParams: validated.normalized.model_params ?? null,
-            budgetPolicy: validated.normalized.budget_policy ?? null,
-            hash,
-          })
-          .returning();
-        const installRows = await tx
-          .insert(assistantInstalls)
-          .values({
-            organizationId: input.orgId,
-            slug: template.slug,
-            templateVersion: template.version,
-            assistantId: assistantRows[0].id,
-            installedBy: input.actorId,
-          })
-          .returning();
-        await recordOutboxEvent(tx, {
-          aggregateType: 'template_install',
-          aggregateId: installRows[0].id,
-          organizationId: input.orgId,
-          eventType: 'template.install_provisioning',
-          partitionKey: assistantRows[0].id,
-          payload: {
-            install_id: installRows[0].id,
-            assistant_id: assistantRows[0].id,
-            template_slug: template.slug,
-            template_version: template.version,
-            definition_hash: hash,
-          },
-        });
-        return { assistant: assistantRows[0], version: versionRows[0], install: installRows[0] };
-      });
-      assistant = out.assistant;
-      version = out.version;
-      install = out.install;
-    } catch (err) {
-      if (err instanceof ApiError) throw err;
-      if (isUniqueViolation(err)) {
-        throw ApiError.conflict('assistant name already taken in this organization — supply a distinct name', { name });
-      }
-      throw err;
-    }
+    // The repository owns the one-TX install (org template-block verdict +
+    // assistants insert + DRAFT version insert + assistant_installs insert +
+    // `template.install_provisioning` outbox event in the SAME transaction).
+    // Domain errors carry `code` in details: 'duplicate_assistant_name'
+    // (409, name conflict) and 'template_blocked' (409, TPL-6.3 verdict).
+    const repoInput: InstallTemplateCopyInput = {
+      orgId: input.orgId,
+      name,
+      description: `Installed from template ${template.slug}@${template.version}`,
+      templateSlug: template.slug,
+      templateVersion: template.version,
+      template,
+      definition: {
+        modelPolicy: validated.normalized.model_policy,
+        contextPolicy: validated.normalized.context_policy,
+        toolPolicy: validated.normalized.tool_policy,
+        knowledgePolicy: validated.normalized.knowledge_policy ?? null,
+        guardrailPolicy: validated.normalized.guardrail_policy,
+        instructions: validated.normalized.instructions ?? null,
+        modelParams: validated.normalized.model_params ?? null,
+        budgetPolicy: validated.normalized.budget_policy ?? null,
+      },
+      definitionHash: hash,
+      actorId: input.actorId,
+    };
+    const out = await this.templates.installTemplateCopy(repoInput);
+    assistant = out.assistant;
+    version = out.version;
+    install = out.install;
     await this.audit.add({
       action: 'template.installed',
       resourceType: 'assistant',
@@ -335,7 +274,10 @@ export class TemplatesService {
 
   async checkUpdates(orgId: string): Promise<Array<{ slug: string; installed_version: string; latest_version: string; update_available: UpdateAvailable }>> {
     assertOrgId(orgId);
-    const [templates, installs] = await Promise.all([this.listTemplates(), this.listInstalls(orgId)]);
+    const [templates, installs] = await Promise.all([
+      this.listRegistryTemplates(),
+      this.templates.listInstalls(orgId, TemplatesService.LIST_CAP),
+    ]);
     const latestBySlug = latestPerSlug(templates);
     return installs.map((install) => {
       const latest = latestBySlug.get(install.slug);
@@ -350,23 +292,18 @@ export class TemplatesService {
 
   // ── Internals ─────────────────────────────────────────────────────────
 
-  private async listTemplates(): Promise<AssistantTemplate[]> {
-    // Global table (no RLS): platform-plane read via db.root — no tenant
-    // context is set, and the predicate-free select is the documented posture.
-    const templates = await this.db.root.select().from(assistantTemplates).orderBy(assistantTemplates.slug, desc(assistantTemplates.version)).limit(TemplatesService.LIST_CAP);
-    // Customer-visible templates only. The registry mirror is seeded by the
-    // release job; rows with family='test' are internal test fixtures that
-    // leaked in via direct inserts (bypassing the release job) and must
-    // never be shown to customers. The family column is the authoritative
-    // discriminator — not slug heuristics, which could hide legitimate
-    // templates that happen to contain "test" or similar substrings.
+  /**
+   * Registry rows visible to customers. The repository returns the global
+   * mirror verbatim; the `family='test'` filter lives HERE in code: those
+   * rows are internal test fixtures that leaked in via direct inserts
+   * (bypassing the release job) and must never be shown to customers. The
+   * family column is the authoritative discriminator — not slug heuristics,
+   * which could hide legitimate templates that happen to contain "test" or
+   * similar substrings.
+   */
+  private async listRegistryTemplates(): Promise<AssistantTemplate[]> {
+    const templates = await this.templates.listRegistryTemplates();
     return templates.filter((t) => t.family !== 'test');
-  }
-
-  private async listInstalls(orgId: string): Promise<AssistantInstall[]> {
-    return this.db.withOrg(orgId, (tx) =>
-      tx.select().from(assistantInstalls).where(eq(assistantInstalls.organizationId, orgId)).limit(TemplatesService.LIST_CAP),
-    );
   }
 
   /**
@@ -471,12 +408,7 @@ export class TemplatesService {
       // here a count probe against the indexed org+state key).
       if (item.requiredSources.length > 0) {
         if (hasReadyDocuments === undefined) {
-          // documents.state is lowercase 'ready' (chk_documents_state) — the
-          // UPPER literals belong to upload_sessions, a different state machine.
-          const ready = await this.db.withOrg(orgId, (tx) =>
-            tx.select({ id: documents.id }).from(documents).where(and(eq(documents.organizationId, orgId), eq(documents.state, 'ready'))).limit(1),
-          );
-          hasReadyDocuments = ready.length > 0;
+          hasReadyDocuments = await this.templates.orgHasReadyDocuments(orgId);
         }
         if (!hasReadyDocuments) {
           reasons.push({ code: 'knowledge_source_missing', detail: `template requires knowledge (${item.requiredSources.join(', ')}) but this org has no READY documents` });
@@ -548,10 +480,6 @@ function assertSlug(slug: string): void {
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug) || slug.length > 64) {
     throw ApiError.validation({ slug: 'must be kebab-case, max 64 chars' });
   }
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && pgViolation(err).code === '23505';
 }
 
 // ── Semver release comparison (never ORDER BY version in SQL) ───────────

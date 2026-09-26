@@ -1,6 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
-import { sql } from 'drizzle-orm';
 import { AuthLayer, CurrentPrincipal } from '../../common/auth/decorators';
 import { L1Principal } from '../../common/auth/principal';
 import { ApiError } from '../../common/http/api-error';
@@ -8,12 +7,12 @@ import { RateLimit } from '../../common/http/rate-limit';
 import { Idempotent } from '../../common/http/idempotency';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { RequireStepUp, StepUpGuard } from '../../common/policy/step-up.guard';
-import { DbService } from '../../common/infra/db/db.service';
 import { ManifestRegistryService } from '../console/manifest-registry.service';
-import { billingAdjustments } from './billing-extension.schema';
 import { BillingCreditsService } from './billing-credits.service';
-import { billingInvoiceLines } from './billing-extension.schema';
-import { eq } from 'drizzle-orm';
+import { ADJUSTMENT_REPOSITORY, INVOICE_LINE_REPOSITORY, SPEND_EVENT_REPOSITORY } from './repositories/repository-tokens';
+import type { IAdjustmentRepository } from './repositories/adjustment.repository';
+import type { IInvoiceLineRepository } from './repositories/invoice-line.repository';
+import type { ISpendEventRepository } from './repositories/spend-event.repository';
 
 /**
  * The billing extensions surface (gaps B-2/B-3/B-5/B-6/B-7): credits &
@@ -29,7 +28,9 @@ export class BillingExtensionController {
   constructor(
     private readonly credits: BillingCreditsService,
     private readonly manifests: ManifestRegistryService,
-    private readonly db: DbService,
+    @Inject(ADJUSTMENT_REPOSITORY) private readonly adjustments: IAdjustmentRepository,
+    @Inject(INVOICE_LINE_REPOSITORY) private readonly invoiceLinesRepo: IInvoiceLineRepository,
+    @Inject(SPEND_EVENT_REPOSITORY) private readonly spend: ISpendEventRepository,
   ) {}
 
   private orgId(header: string | string[] | undefined): string {
@@ -103,9 +104,7 @@ export class BillingExtensionController {
   @Get('org/:orgId/adjustments')
   @Roles('owner', 'admin', 'billing')
   async listAdjustments(@Param('orgId') orgId: string, @Query('product') product?: string): Promise<{ adjustments: Array<Record<string, unknown>> }> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(billingAdjustments).where(product ? sql`${billingAdjustments.orgId} = ${orgId} and ${billingAdjustments.product} = ${product}` : sql`${billingAdjustments.orgId} = ${orgId}`),
-    );
+    const rows = await this.adjustments.listAdjustments(orgId, product);
     return {
       adjustments: rows.map((r) => ({
         id: r.id,
@@ -141,7 +140,7 @@ export class BillingExtensionController {
   @Get('org/:orgId/invoices/:invoiceId/lines')
   @Roles('owner', 'admin', 'billing')
   async invoiceLines(@Param('orgId') orgId: string, @Param('invoiceId') invoiceId: string): Promise<{ lines: Array<Record<string, unknown>> }> {
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(billingInvoiceLines).where(eq(billingInvoiceLines.invoiceId, invoiceId)));
+    const rows = await this.invoiceLinesRepo.listLinesByInvoice(orgId, invoiceId);
     return {
       lines: rows.map((r) => ({
         kind: r.kind,
@@ -166,23 +165,9 @@ export class BillingExtensionController {
     @Query('to') to?: string,
     @Query('product') product?: string,
   ): Promise<string> {
-    const toMs = to && Number.isFinite(Date.parse(to)) ? Date.parse(to) : Date.now();
-    const fromMs = from && Number.isFinite(Date.parse(from)) ? Date.parse(from) : toMs - 30 * 86_400_000;
-    const cappedFrom = Math.max(fromMs, toMs - 366 * 86_400_000);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.execute<Record<string, unknown>>(sql`
-        select occurred_at, product, project_id, surface, end_user_id, kind, model, tokens_in, tokens_out, cost_usd
-        from billing.spend_events
-        where org_id = ${orgId}
-          and occurred_at >= ${new Date(cappedFrom).toISOString()}::timestamptz
-          and occurred_at <= ${new Date(toMs).toISOString()}::timestamptz
-          ${product ? sql`and product = ${product}` : sql``}
-        order by occurred_at
-        limit 10000
-      `),
-    );
+    const rows = await this.spend.exportUsage(orgId, { from: from ?? '', to: to ?? '', product });
     reply.header('content-type', 'application/x-ndjson');
     reply.header('content-disposition', `attachment; filename="neryva-usage-${orgId}.ndjson"`);
-    return rows.rows.map((r) => JSON.stringify(r)).join('\n');
+    return rows.map((r) => JSON.stringify(r)).join('\n');
   }
 }

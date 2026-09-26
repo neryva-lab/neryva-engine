@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { HealthRegistry } from '../../common/health/health.controller';
 import { DbService } from '../../common/infra/db/db.service';
 import { PlatformStaffGuard } from '../../common/policy/staff.guard';
+import { SatellitesRepositoriesModule } from './repositories/satellites-repositories.module';
 import { RevocationLogService } from './revocation-log.service';
 import { RevocationsController } from './revocations.controller';
 import { SatelliteActivityService } from './satellite-activity.service';
@@ -20,10 +21,16 @@ import { SatellitesController } from './satellites.controller';
  * through — agent-runtime live today, inference pre-registered as a
  * placeholder.
  *
+ * Persistence is provider-selected (P3): `SatellitesRepositoriesModule`
+ * binds the repository ports to PostgreSQL or MongoDB based on
+ * `DB_PROVIDER`. Services inject only the port tokens and stay
+ * provider-blind.
+ *
  * Flag: MODULES__SATELLITES_ENABLED (requires identity: heartbeats
  * authenticate on L3 service tokens).
  */
 @Module({
+  imports: [SatellitesRepositoriesModule],
   controllers: [SatellitesController, RevocationsController],
   providers: [SatelliteRegistryService, SatelliteIncidentsService, SatelliteActivityService, SatelliteSweeperWorker, RevocationLogService, PlatformStaffGuard],
   exports: [SatelliteRegistryService, SatelliteIncidentsService, SatelliteActivityService, RevocationLogService],

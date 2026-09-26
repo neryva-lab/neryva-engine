@@ -1,7 +1,6 @@
-import { Injectable } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
-import { DbService } from '../../common/infra/db/db.service';
-import { contentPosts } from './public.schema';
+import { Inject, Injectable } from '@nestjs/common';
+import { CONTENT_REPOSITORY } from './repositories/repository-tokens';
+import type { IContentRepository } from './repositories/content.repository';
 import { siteBaseUrl } from './content.service';
 
 /**
@@ -12,28 +11,18 @@ import { siteBaseUrl } from './content.service';
  *
  * Feeds carry the 25 most recent published posts (summary, not full body —
  * feeds are discovery surfaces; the site owns the reading experience).
+ *
+ * Persistence-blind (P3): post reads go through `IContentRepository`.
+ * Corporate tables are global (non-tenant).
  */
 const FEED_LIMIT = 25;
 
 @Injectable()
 export class FeedsService {
-  constructor(private readonly db: DbService) {}
+  constructor(@Inject(CONTENT_REPOSITORY) private readonly content: IContentRepository) {}
 
-  private async recentPosts() {
-    return this.db.root
-      .select({
-        slug: contentPosts.slug,
-        title: contentPosts.title,
-        summary: contentPosts.summary,
-        category: contentPosts.category,
-        authorName: contentPosts.authorName,
-        publishedAt: contentPosts.publishedAt,
-        updatedAt: contentPosts.updatedAt,
-      })
-      .from(contentPosts)
-      .where(eq(contentPosts.status, 'published'))
-      .orderBy(desc(contentPosts.publishedAt))
-      .limit(FEED_LIMIT);
+  private recentPosts() {
+    return this.content.recentPublishedPosts(FEED_LIMIT);
   }
 
   async rss(): Promise<string> {
@@ -121,12 +110,7 @@ ${entries}
   /** The posts fragment of the site sitemap (the site merges it with static routes). */
   async sitemap(): Promise<string> {
     const base = siteBaseUrl();
-    const posts = await this.db.root
-      .select({ slug: contentPosts.slug, updatedAt: contentPosts.updatedAt })
-      .from(contentPosts)
-      .where(eq(contentPosts.status, 'published'))
-      .orderBy(desc(contentPosts.publishedAt))
-      .limit(1000);
+    const posts = await this.content.sitemapPosts(1000);
     const urls = posts
       .map((post) => `  <url>
     <loc>${xml(`${base}/blog/${post.slug}`)}</loc>

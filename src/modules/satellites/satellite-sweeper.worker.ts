@@ -1,13 +1,13 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
-import { eq, lt, sql } from 'drizzle-orm';
 import { env } from '../../common/config/env';
 import { QueueService, bullQueueName } from '../../common/infra/queue.service';
-import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
+import { SATELLITE_REGISTRY_REPOSITORY, REVOCATION_LOG_REPOSITORY } from './repositories/repository-tokens';
+import type { ISatelliteRegistryRepository } from './repositories/satellite-registry.repository';
+import type { IRevocationLogRepository } from './repositories/revocation-log.repository';
 import { SatelliteIncidentsService } from './satellite-incidents.service';
-import { revocationEvents, satellites, satelliteHeartbeats } from './satellite.schema';
 
 /**
  * The satellites sweeper (`satellites:` namespace — partitioning Tier-1):
@@ -28,8 +28,9 @@ import { revocationEvents, satellites, satelliteHeartbeats } from './satellite.s
  *  4. CONFIG DRIFT: unacked config notifications older than
  *     SATELLITE_CONFIG_ACK_DRIFT_SECONDS for an active satellite open a
  *     `config_drift` incident (deduped) and clear when the backlog drains.
- *     Reads config_notifications by raw SQL — engine-owned platform table,
- *     read-only, avoiding the config-publish import cycle (documented seam).
+ *     Reads config_notifications read-only via the registry repository —
+ *     engine-owned platform table, avoiding the config-publish import cycle
+ *     (documented seam).
  */
 @Injectable()
 export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
@@ -38,7 +39,10 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly queues: QueueService,
-    private readonly db: DbService,
+    @Inject(SATELLITE_REGISTRY_REPOSITORY)
+    private readonly registry: ISatelliteRegistryRepository,
+    @Inject(REVOCATION_LOG_REPOSITORY)
+    private readonly revocations: IRevocationLogRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly incidents: SatelliteIncidentsService,
@@ -112,7 +116,7 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
    * never an outage (the client half of the contract may not exist yet).
    */
   private async transitionLiveness(): Promise<{ changes: Array<{ key: string; from: string; to: string }>; massLossSuspected: boolean }> {
-    const connected = await this.db.root.select().from(satellites).where(sql`${satellites.status} <> 'retired' and ${satellites.status} <> 'placeholder'`);
+    const connected = await this.registry.listConnectedSatellites();
     const nowMs = Date.now();
     const timeoutMs = env.SATELLITE_HEARTBEAT_TIMEOUT_SECONDS * 1000;
     const changes: Array<{ key: string; from: string; to: string }> = [];
@@ -130,7 +134,7 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
       if (target === satellite.liveness) {
         continue;
       }
-      await this.db.root.update(satellites).set({ liveness: target, updatedAt: new Date().toISOString() }).where(eq(satellites.key, satellite.key));
+      await this.registry.setLiveness(satellite.key, target, new Date().toISOString());
       changes.push({ key: satellite.key, from: satellite.liveness, to: target });
 
       if (target === 'stale' || target === 'offline') {
@@ -173,55 +177,39 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
   /**
    * Config drift: unacked notifications older than the drift threshold for
    * ACTIVE satellites. config_notifications is config-publish's table —
-   * read by raw SQL here to avoid the import cycle (config-publish imports
-   * this module for fanout); read-only, engine-owned, documented seam.
+   * read read-only via the registry repository to avoid the import cycle
+   * (config-publish imports this module for fanout); documented seam.
    */
   private async detectConfigDrift(): Promise<string[]> {
     const threshold = new Date(Date.now() - env.SATELLITE_CONFIG_ACK_DRIFT_SECONDS * 1000).toISOString();
-    const rows = await this.db.root.execute<{ satellite_key: string; oldest: string; n: string }>(sql`
-      select cn.satellite_key, min(cn.notified_at)::text as oldest, count(*) as n
-      from config_notifications cn
-      join satellites s on s.key = cn.satellite_key
-      where cn.acked_at is null
-        and cn.notified_at < ${threshold}::timestamptz
-        and s.status = 'active'
-      group by cn.satellite_key
-    `);
+    const candidates = await this.registry.driftCandidates(threshold);
     const drifted: string[] = [];
-    for (const row of rows.rows) {
-      const open = await this.incidents.unresolved(row.satellite_key, 'config_drift');
+    for (const candidate of candidates) {
+      const open = await this.incidents.unresolved(candidate.satelliteKey, 'config_drift');
       if (open) {
         continue; // already flagged — the dedup window covers the backlog
       }
       await this.incidents.open({
-        satelliteKey: row.satellite_key,
+        satelliteKey: candidate.satelliteKey,
         kind: 'config_drift',
-        detail: { unacked: Number(row.n), oldest: row.oldest, threshold_seconds: env.SATELLITE_CONFIG_ACK_DRIFT_SECONDS },
+        detail: { unacked: candidate.count, oldest: candidate.oldest, threshold_seconds: env.SATELLITE_CONFIG_ACK_DRIFT_SECONDS },
       });
-      await this.events.emit(EngineEvents.SatelliteConfigDrift, { key: row.satellite_key, unacked: Number(row.n) });
+      await this.events.emit(EngineEvents.SatelliteConfigDrift, { key: candidate.satelliteKey, unacked: candidate.count });
       await this.audit.add({
         action: 'satellite.config_drift_detected',
         resourceType: 'satellite',
-        resourceId: row.satellite_key,
+        resourceId: candidate.satelliteKey,
         actorType: 'system',
-        details: { unacked: Number(row.n), oldest: row.oldest },
+        details: { unacked: candidate.count, oldest: candidate.oldest },
       });
-      drifted.push(row.satellite_key);
+      drifted.push(candidate.satelliteKey);
     }
     // Clear drift for satellites whose backlog drained under the threshold.
-    const flagged = await this.db.root.execute<{ satellite_key: string }>(sql`
-      select distinct cn.satellite_key
-      from config_notifications cn
-      join satellites s on s.key = cn.satellite_key
-      where cn.acked_at is null and s.status = 'active'
-    `);
-    const stillBacklogged = new Set(flagged.rows.map((r) => r.satellite_key));
-    const openDrifts = await this.db.root.execute<{ satellite_key: string }>(sql`
-      select distinct satellite_key from satellite_incidents where kind = 'config_drift' and resolved_at is null
-    `);
-    for (const row of openDrifts.rows) {
-      if (!stillBacklogged.has(row.satellite_key)) {
-        await this.incidents.resolve({ satelliteKey: row.satellite_key, kind: 'config_drift' });
+    const stillBacklogged = new Set(await this.registry.backloggedSatelliteKeys());
+    const openDrifts = await this.registry.openDriftIncidentKeys();
+    for (const satelliteKey of openDrifts) {
+      if (!stillBacklogged.has(satelliteKey)) {
+        await this.incidents.resolve({ satelliteKey, kind: 'config_drift' });
       }
     }
     return drifted;
@@ -229,19 +217,11 @@ export class SatelliteSweeperWorker implements OnModuleInit, OnModuleDestroy {
 
   private async pruneSamples(): Promise<number> {
     const cutoff = new Date(Date.now() - env.SATELLITE_SAMPLE_RETENTION_HOURS * 3_600_000).toISOString();
-    const pruned = await this.db.root
-      .delete(satelliteHeartbeats)
-      .where(lt(satelliteHeartbeats.receivedAt, cutoff))
-      .returning({ id: satelliteHeartbeats.id });
-    return pruned.length;
+    return this.registry.pruneHeartbeatSamples(cutoff);
   }
 
   private async pruneRevocations(): Promise<number> {
     const cutoff = new Date(Date.now() - env.SATELLITE_REVOCATION_RETENTION_DAYS * 86_400_000).toISOString();
-    const pruned = await this.db.root
-      .delete(revocationEvents)
-      .where(lt(revocationEvents.occurredAt, cutoff))
-      .returning({ id: revocationEvents.id });
-    return pruned.length;
+    return this.revocations.pruneOlderThan(cutoff);
   }
 }

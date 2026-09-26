@@ -11,6 +11,7 @@ import fastifyCookie from '@fastify/cookie';
 import pino from 'pino';
 import { AppModule } from './app.module';
 import { env } from './common/config/env';
+import { assertProviderEnvReady, assertProviderReady } from './common/config/provider-readiness';
 import { ModuleFlags } from './common/config/feature-flags';
 import { collectedRoutes, rememberRoute } from './common/http/route-collector';
 import { createPinoOptions, genReqId, PinoNestLogger } from './common/observability/logger';
@@ -25,6 +26,11 @@ import { RouteBijectionService } from './modules/console/route-bijection.service
  */
 async function bootstrap(): Promise<void> {
   initSentry();
+  // Fail fast on provider misconfiguration before Nest does any work
+  // (pure checks: DB_PROVIDER value, DATABASE_URL / MONGODB_URI presence
+  // and scheme, lease-TTL range). Live checks (topology, migrations,
+  // search backend) run after app.init() below.
+  assertProviderEnvReady();
   const rootLogger = pino(createPinoOptions());
   const logger = new PinoNestLogger(rootLogger);
 
@@ -170,6 +176,12 @@ async function bootstrap(): Promise<void> {
   process.once('SIGINT', () => {
     void shutdownTracing();
   });
+
+  await app.init();
+  // Live provider readiness: replica-set topology, migration ledger
+  // completeness, and search-backend resolvability — all fail closed here,
+  // before the process serves its first request.
+  await assertProviderReady(app);
 
   await app.listen(env.PORT, env.HOST);
   logger.log(

@@ -1,10 +1,11 @@
 import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { controlBlocks, ControlBlock, CONTROL_BLOCK_TARGETS, ControlBlockTarget } from './schema';
+import { CONTROL_BLOCK_REPOSITORY } from './repositories/repository-tokens';
+import type { IControlBlockRepository } from './repositories/control-block.repository';
 
 /**
  * Operator control blocks — TPL-6.4 (CRUD) + the shared check helper every
@@ -16,21 +17,21 @@ import { controlBlocks, ControlBlock, CONTROL_BLOCK_TARGETS, ControlBlockTarget 
  *
  * Matching: exact `target_name` match, plus `slug@version` prefix match for
  * template targets (a bare `slug` blocks every version of that template).
+ *
+ * Persistence lives in `IControlBlockRepository` (P3): this service keeps
+ * input validation, audit replay, and policy — every `db.*` call moved into
+ * the pg/mongo repository implementations.
  */
 @Injectable()
 export class ControlBlocksService {
-  private static readonly LIST_CAP = 200;
-
   constructor(
-    private readonly db: DbService,
+    @Inject(CONTROL_BLOCK_REPOSITORY) private readonly blocks: IControlBlockRepository,
     private readonly audit: AuditService,
   ) {}
 
   async list(orgId: string): Promise<ControlBlock[]> {
     assertOrgId(orgId);
-    return this.db.withOrg(orgId, (tx) =>
-      tx.select().from(controlBlocks).where(eq(controlBlocks.organizationId, orgId)).orderBy(controlBlocks.createdAt).limit(ControlBlocksService.LIST_CAP),
-    );
+    return this.blocks.listBlocks(orgId);
   }
 
   async set(input: {
@@ -68,27 +69,14 @@ export class ControlBlocksService {
       }
       expiresAt = parsed.toISOString();
     }
-    const rows = await this.db.withOrg(input.orgId, async (tx) => {
-      // Dedupe: an identical ACTIVE block makes a second row a silent twin —
-      // clearing one leaves the other enforcing, so the UI would lie about
-      // the clear. Expired rows are history and may repeat.
-      const twin = await ControlBlocksService.findActiveBlock(tx, input.orgId, input.targetType as ControlBlockTarget, targetName);
-      if (twin) {
-        throw ApiError.conflict('an active block already exists for this target — clear it before setting a new one');
-      }
-      return tx
-        .insert(controlBlocks)
-        .values({
-          organizationId: input.orgId,
-          targetType: input.targetType,
-          targetName,
-          reason: input.reason.trim(),
-          expiresAt,
-          createdBy: input.actor.slice(0, 128),
-        })
-        .returning();
+    const row = await this.blocks.setBlock({
+      orgId: input.orgId,
+      targetType: input.targetType as ControlBlockTarget,
+      targetName,
+      reason: input.reason.trim(),
+      expiresAt,
+      createdBy: input.actor.slice(0, 128),
     });
-    const row = rows[0];
     await this.audit.add({
       action: 'control.block_set',
       resourceType: 'control_block',
@@ -104,20 +92,19 @@ export class ControlBlocksService {
   async clear(input: { orgId: string; blockId: string; actor: string }): Promise<{ ok: true }> {
     assertOrgId(input.orgId);
     assertUuid(input.blockId);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.delete(controlBlocks).where(and(eq(controlBlocks.id, input.blockId), eq(controlBlocks.organizationId, input.orgId))).returning(),
-    );
-    if (rows.length === 0) {
-      throw ApiError.notFound('control block');
-    }
+    // The repository port returns only `{ ok: true }`; the pre-read supplies
+    // the target details the clear audit replays. When the block is missing
+    // (or foreign), clearBlock throws notFound before any audit is written.
+    const existing = (await this.blocks.listBlocks(input.orgId)).find((b) => b.id === input.blockId);
+    await this.blocks.clearBlock({ orgId: input.orgId, blockId: input.blockId });
     await this.audit.add({
       action: 'control.block_cleared',
       resourceType: 'control_block',
-      resourceId: rows[0].id,
+      resourceId: input.blockId,
       actorType: 'account',
       actorId: input.actor,
       tenantId: input.orgId,
-      details: { target_type: rows[0].targetType, target_name: rows[0].targetName },
+      details: { target_type: existing?.targetType ?? 'unknown', target_name: existing?.targetName ?? 'unknown' },
     });
     return { ok: true };
   }

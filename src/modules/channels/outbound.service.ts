@@ -1,8 +1,5 @@
-import { and, eq } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { metrics } from '../../common/observability/metrics';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { PermanentConsumerError, type OutboxConsumer } from '../../common/infra/outbox/consumer';
@@ -11,12 +8,13 @@ import type { OutboxEvent } from '../../common/infra/outbox/schema';
 // design:paramtypes metadata — a type-only import erases it and the
 // injected redis cannot resolve.
 import { RedisService } from '../../common/infra/redis.service';
-import { uuidv7 } from '../../common/ids/uuidv7';
-import { messages, conversations } from '../conversations/schema';
-import { artifacts } from '../knowledge/schema';
-import { channelAccounts, channelMessageLinks, channelIdentities, ChannelAccount, ChannelConfig } from './schema';
+import type { ChannelAccount, ChannelConfig } from './schema';
 import { ChannelSender, PermanentSendError, SendRequest, WhatsAppSender, MessengerSender, TelegramSender, WebSender, InstagramSender, XSender, EmailSender } from './senders';
 import { VoiceService } from './voice.service';
+import { CHANNEL_IDENTITY_REPOSITORY } from './repositories/repository-tokens';
+import { CHANNEL_MESSAGE_LINK_REPOSITORY } from './repositories/repository-tokens';
+import type { IChannelIdentityRepository } from './repositories/channel-identity.repository';
+import type { IChannelMessageLinkRepository, OutboundBinding } from './repositories/channel-message-link.repository';
 
 /**
  * Channel outbound — Phase C3. Consumes `run.completed` / `run.failed`
@@ -30,6 +28,10 @@ import { VoiceService } from './voice.service';
  * free-form; outside → WhatsApp template / Messenger note if configured,
  * else the reply is skipped with `channel_window_denied_total` (never a raw
  * API error storm).
+ *
+ * Persistence goes through the P3 channel repository ports
+ * (`IChannelMessageLinkRepository`, `IChannelIdentityRepository`). This
+ * service holds no provider, Drizzle, or SQL references.
  */
 
 const TELEGRAM_GLOBAL_RPS = 30;
@@ -64,7 +66,8 @@ export class ChannelOutboundService implements OutboxConsumer {
   private readonly senders: Record<string, ChannelSender>;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(CHANNEL_MESSAGE_LINK_REPOSITORY) private readonly links: IChannelMessageLinkRepository,
+    @Inject(CHANNEL_IDENTITY_REPOSITORY) private readonly identities: IChannelIdentityRepository,
     private readonly storage: StorageService,
     private readonly voice: VoiceService,
     whatsapp: WhatsAppSender,
@@ -74,7 +77,7 @@ export class ChannelOutboundService implements OutboxConsumer {
     instagram: InstagramSender,
     x: XSender,
     email: EmailSender,
-    private readonly redis?: RedisService,
+    @Optional() private readonly redis?: RedisService,
   ) {
     this.senders = {
       whatsapp,
@@ -109,25 +112,22 @@ export class ChannelOutboundService implements OutboxConsumer {
       throw new PermanentConsumerError('message.created payload incomplete for outbound');
     }
     const orgId = event.organizationId;
-    await this.db.withOrg(orgId, async (tx) => {
-      const messageRows = await tx.select().from(messages).where(eq(messages.id, payload.message_id!)).limit(1);
-      const message = messageRows[0];
-      if (!message) {
-        return; // message vanished (purge) - nothing to deliver
-      }
-      const author = (message.content as { author?: unknown } | null)?.author;
-      if (author !== 'human_agent') {
-        return;
-      }
-      const bound = await this.loadBinding(orgId, tx, payload.conversation_id!);
-      if (!bound) {
-        return;
-      }
-      const text = typeof (message.content as { text?: unknown } | null)?.text === 'string'
-        ? String((message.content as { text?: unknown }).text)
-        : '';
-      await this.deliverMessage(orgId, tx, bound, message, text);
-    });
+    const message = await this.links.loadOutboundMessage(orgId, payload.message_id);
+    if (!message) {
+      return; // message vanished (purge) - nothing to deliver
+    }
+    const author = (message.content as { author?: unknown } | null)?.author;
+    if (author !== 'human_agent') {
+      return;
+    }
+    const bound = await this.links.loadOutboundBinding(orgId, payload.conversation_id);
+    if (!bound) {
+      return;
+    }
+    const text = typeof (message.content as { text?: unknown } | null)?.text === 'string'
+      ? String((message.content as { text?: unknown }).text)
+      : '';
+    await this.deliverMessage(orgId, bound, message.id, text);
 }
 
   /**
@@ -144,44 +144,15 @@ export class ChannelOutboundService implements OutboxConsumer {
     }
     const orgId = event.organizationId;
     const resolved = event.eventType === 'conversation.escalation.resolved';
-    await this.db.withOrg(orgId, async (tx) => {
-      const bound = await this.loadBinding(orgId, tx, payload.conversation_id!);
-      if (!bound) {
-        return;
-      }
-      const config = (bound.account.config ?? {}) as ChannelConfig;
-      const body = resolved
-        ? (config.escalation_resolved_note ?? 'A human teammate helped with this conversation - the assistant is back.')
-        : (config.escalation_note ?? 'Connecting you with a human teammate. The assistant is paused until they reply.');
-      const anchorMessage = { id: payload.escalation_id! };
-      await this.deliverMessage(orgId, tx, bound, anchorMessage, body, true);
-    });
-}
-
-  private async loadBinding(
-    orgId: string,
-    tx: NodePgDatabase,
-    conversationId: string,
-  ): Promise<{
-    conversation: typeof conversations.$inferSelect;
-    account: ChannelAccount;
-    binding: { platform?: string; channel_account_id?: string; channel_identity_id?: string };
-  } | null> {
-    const convRows = await tx.select().from(conversations).where(eq(conversations.id, conversationId)).limit(1);
-    const conversation = convRows[0];
-    if (!conversation) {
-      return null;
+    const bound = await this.links.loadOutboundBinding(orgId, payload.conversation_id);
+    if (!bound) {
+      return;
     }
-    const binding = (conversation.channelBinding ?? {}) as { platform?: string; channel_account_id?: string; channel_identity_id?: string };
-    if (!binding.platform || !binding.channel_account_id) {
-      return null; // console-originated conversation - nothing to deliver
-    }
-    const accountRows = await tx.select().from(channelAccounts).where(eq(channelAccounts.id, binding.channel_account_id)).limit(1);
-    const account = accountRows[0];
-    if (!account || account.status === 'suspended') {
-      return null;
-    }
-    return { conversation, account, binding };
+    const config = (bound.account.config ?? {}) as ChannelConfig;
+    const body = resolved
+      ? (config.escalation_resolved_note ?? 'A human teammate helped with this conversation - the assistant is back.')
+      : (config.escalation_note ?? 'Connecting you with a human teammate. The assistant is paused until they reply.');
+    await this.deliverMessage(orgId, bound, payload.escalation_id, body, true);
 }
 
   /** Run-terminal path — body is the final assistant text or the failure line. */
@@ -191,64 +162,55 @@ export class ChannelOutboundService implements OutboxConsumer {
       throw new PermanentConsumerError('run terminal event payload incomplete for outbound');
     }
     const orgId = event.organizationId;
-    await this.db.withOrg(orgId, async (tx) => {
-      const messageRows = await tx.select().from(messages).where(eq(messages.id, payload.message_id!)).limit(1);
-      const message = messageRows[0];
-      if (!message) {
-        throw new PermanentConsumerError(`final message ${payload.message_id} not found for outbound`);
-      }
-      const bound = await this.loadBinding(orgId, tx, payload.conversation_id!);
-      if (!bound) {
+    const message = await this.links.loadOutboundMessage(orgId, payload.message_id);
+    if (!message) {
+      throw new PermanentConsumerError(`final message ${payload.message_id} not found for outbound`);
+    }
+    const bound = await this.links.loadOutboundBinding(orgId, payload.conversation_id);
+    if (!bound) {
+      return;
+    }
+    // The honest failure line for run.failed — never a fabricated reply.
+    const body =
+      event.eventType === 'run.failed'
+        ? RUN_FAILED_TEXT
+        : typeof (message.content as { text?: unknown } | null)?.text === 'string'
+          ? String((message.content as { text?: unknown }).text)
+          : '';
+    // FL-3.2 — generated media (image generation) replaces plain-text
+    // delivery when present: the artifact is claim-checked, presigned for
+    // the provider fetch, and sent through the platform media sender.
+    const mediaRefs = (message.content as { generated_media?: unknown } | null)?.generated_media;
+    const firstMedia =
+      Array.isArray(mediaRefs) && mediaRefs.length > 0
+        ? (mediaRefs[0] as { artifact_id?: unknown; media_type?: unknown })
+        : null;
+    if (event.eventType === 'run.completed' && typeof firstMedia?.artifact_id === 'string' && typeof firstMedia?.media_type === 'string') {
+      const media = await this.presignArtifact(orgId, firstMedia.artifact_id, firstMedia.media_type);
+      if (media) {
+        await this.deliverMedia(orgId, bound, message.id, media.url, media.mediaType, body.slice(0, 800) || undefined);
         return;
       }
-      // The honest failure line for run.failed — never a fabricated reply.
-      const body =
-        event.eventType === 'run.failed'
-          ? RUN_FAILED_TEXT
-          : typeof (message.content as { text?: unknown } | null)?.text === 'string'
-            ? String((message.content as { text?: unknown }).text)
-            : '';
-      // FL-3.2 — generated media (image generation) replaces plain-text
-      // delivery when present: the artifact is claim-checked, presigned for
-      // the provider fetch, and sent through the platform media sender.
-      const mediaRefs = (message.content as { generated_media?: unknown } | null)?.generated_media;
-      const firstMedia =
-        Array.isArray(mediaRefs) && mediaRefs.length > 0
-          ? (mediaRefs[0] as { artifact_id?: unknown; media_type?: unknown })
-          : null;
-      if (event.eventType === 'run.completed' && typeof firstMedia?.artifact_id === 'string' && typeof firstMedia?.media_type === 'string') {
-        const media = await this.presignArtifact(orgId, tx, firstMedia.artifact_id, firstMedia.media_type);
-        if (media) {
-          await this.deliverMedia(orgId, tx, bound, message, media.url, media.mediaType, body.slice(0, 800) || undefined);
-          return;
-        }
+    }
+    await this.deliverMessage(orgId, bound, message.id, body);
+    // FL-3.1 — voice-note rendering for WhatsApp when the org enables it
+    // and the TTS port is configured. Best-effort: TTS failure never fails
+    // the (already delivered) text delivery.
+    if (event.eventType === 'run.completed' && bound.account.platform === 'whatsapp' && body.trim()) {
+      const config = (bound.account.config ?? {}) as ChannelConfig;
+      if (config.voice_replies_enabled === true) {
+        await this.deliverVoiceNote(orgId, bound, message.id, body);
       }
-      await this.deliverMessage(orgId, tx, bound, message, body);
-      // FL-3.1 — voice-note rendering for WhatsApp when the org enables it
-      // and the TTS port is configured. Best-effort: TTS failure never fails
-      // the (already delivered) text delivery.
-      if (event.eventType === 'run.completed' && bound.account.platform === 'whatsapp' && body.trim()) {
-        const config = (bound.account.config ?? {}) as ChannelConfig;
-        if (config.voice_replies_enabled === true) {
-          await this.deliverVoiceNote(orgId, bound, message.id, body);
-        }
-      }
-    });
+    }
   }
 
   /** Load an org-owned GENERATED_MEDIA artifact and presign a short-TTL GET. */
   private async presignArtifact(
     orgId: string,
-    tx: NodePgDatabase,
     artifactId: string,
     mediaType: string,
   ): Promise<{ url: string; mediaType: string } | null> {
-    const rows = await tx
-      .select({ id: artifacts.id, objectKey: artifacts.objectKey, state: artifacts.state, purpose: artifacts.purpose })
-      .from(artifacts)
-      .where(and(eq(artifacts.id, artifactId), eq(artifacts.organizationId, orgId)))
-      .limit(1);
-    const artifact = rows[0];
+    const artifact = await this.links.loadOutboundArtifact(orgId, artifactId);
     if (!artifact || artifact.state !== 'active' || artifact.purpose !== 'GENERATED_MEDIA') {
       return null;
     }
@@ -262,47 +224,36 @@ export class ChannelOutboundService implements OutboxConsumer {
   /** Media delivery — same claim-before-send anchor discipline as text. */
   private async deliverMedia(
     orgId: string,
-    tx: NodePgDatabase,
-    bound: { conversation: { id: string }; account: ChannelAccount; binding: { platform?: string; channel_account_id?: string; channel_identity_id?: string } },
-    message: { id: string },
+    bound: OutboundBinding,
+    messageId: string,
     mediaUrl: string,
     mediaType: string,
     caption?: string,
   ): Promise<void> {
     const account = bound.account;
-    const claim = await tx
-      .insert(channelMessageLinks)
-      .values({
-        id: uuidv7(),
-        organizationId: orgId,
-        conversationId: bound.conversation.id,
-        messageId: message.id,
-        channelAccountId: account.id,
-        direction: 'outbound',
-        platform: account.platform,
-        deliveryState: 'pending',
-      })
-      .onConflictDoNothing()
-      .returning({ id: channelMessageLinks.id });
-    if (claim.length === 0) {
+    const claim = await this.links.claimOutboundLink({
+      orgId,
+      conversationId: bound.conversationId,
+      messageId,
+      accountId: account.id,
+      platform: account.platform,
+    });
+    if (!claim.claimed) {
       return; // already claimed by a prior delivery attempt
     }
     const sender = this.senders[account.platform];
-    const externalUserId = await this.externalUserIdFor(orgId, bound.binding.channel_identity_id);
+    const externalUserId = await this.identities.externalUserIdFor(orgId, bound.binding.channel_identity_id ?? '');
     if (!sender || !externalUserId) {
-      await this.markLink(orgId, message.id, 'skipped', { reason: 'no_media_sender' });
+      await this.links.markLinkState(orgId, messageId, 'skipped', { reason: 'no_media_sender' });
       return;
     }
     try {
-      const result = await sender.sendMedia({ account, externalUserId, mediaUrl, mediaType, caption, internalMessageId: message.id });
-      await tx
-        .update(channelMessageLinks)
-        .set({ deliveryState: 'sent', externalMessageId: result.externalMessageId, updatedAt: new Date().toISOString() })
-        .where(eq(channelMessageLinks.messageId, message.id));
+      const result = await sender.sendMedia({ account, externalUserId, mediaUrl, mediaType, caption, internalMessageId: messageId });
+      await this.links.markLinkSent(orgId, messageId, result.externalMessageId);
       CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'sent_media' });
     } catch (err) {
       if (err instanceof PermanentSendError) {
-        await this.markLink(orgId, message.id, 'failed', { message: err.message.slice(0, 250) });
+        await this.links.markLinkState(orgId, messageId, 'failed', { message: err.message.slice(0, 250) });
         throw new PermanentConsumerError(err.message);
       }
       throw err;
@@ -310,12 +261,12 @@ export class ChannelOutboundService implements OutboxConsumer {
   }
 
   /** FL-3.1 — synthesized voice note as an EXTRA message (deterministic anchor). */
-  private async deliverVoiceNote(orgId: string, bound: { account: ChannelAccount; binding: { channel_identity_id?: string } }, messageId: string, text: string): Promise<void> {
+  private async deliverVoiceNote(orgId: string, bound: OutboundBinding, messageId: string, text: string): Promise<void> {
     const synthesized = await this.voice.synthesize(text);
     if (!synthesized) {
       return;
     }
-    const externalUserId = await this.externalUserIdFor(orgId, bound.binding.channel_identity_id);
+    const externalUserId = await this.identities.externalUserIdFor(orgId, bound.binding.channel_identity_id ?? '');
     const sender = this.senders[bound.account.platform];
     if (!externalUserId || !sender) {
       return;
@@ -345,122 +296,87 @@ export class ChannelOutboundService implements OutboxConsumer {
    */
   private async deliverMessage(
     orgId: string,
-    tx: NodePgDatabase,
-    bound: { conversation: { id: string }; account: ChannelAccount; binding: { platform?: string; channel_account_id?: string; channel_identity_id?: string } },
-    message: { id: string },
+    bound: OutboundBinding,
+    messageId: string,
     body: string,
     isLifecycleNote = false,
   ): Promise<void> {
     const account = bound.account;
     const binding = bound.binding;
 
-      // Claim BEFORE any provider I/O: the unique (message_id) anchor makes
-      // outbox redelivery idempotent at the send boundary.
-      const inserted = await tx
-        .insert(channelMessageLinks)
-        .values({
-          id: uuidv7(),
-          organizationId: orgId,
-          conversationId: bound.conversation.id,
-          messageId: message.id,
-          channelAccountId: account.id,
-          direction: 'outbound',
-          platform: account.platform,
-          deliveryState: 'pending',
-        })
-        .onConflictDoNothing()
-        .returning({ id: channelMessageLinks.id });
-      if (inserted.length === 0) {
-        const existing = await tx
-          .select({ deliveryState: channelMessageLinks.deliveryState })
-          .from(channelMessageLinks)
-          .where(and(eq(channelMessageLinks.messageId, message.id), eq(channelMessageLinks.direction, 'outbound')))
-          .limit(1);
-        const state = existing[0]?.deliveryState;
-        if (state === 'sent' || state === 'delivered' || state === 'read') {
-          return; // already durably delivered
-        }
-        // 'pending' from a crashed twin - fall through and re-send (at-least-once).
-      }
-
-      if (!body.trim()) {
-        await this.markLink(orgId, message.id, 'skipped', null);
-        CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'skipped_empty' });
-        return;
-      }
-
-      // Messaging-window policy (Meta platforms only).
-      const config = (account.config ?? {}) as ChannelConfig;
-      let template: SendRequest['template'] | undefined;
-      if (account.platform === 'whatsapp' || account.platform === 'messenger') {
-        const identityRows = binding.channel_identity_id
-          ? await tx.select().from(channelIdentities).where(eq(channelIdentities.id, binding.channel_identity_id)).limit(1)
-          : [];
-        const windowOpen = identityRows[0]?.windowExpiresAt ? Date.parse(identityRows[0].windowExpiresAt) > Date.now() : false;
-        if (!windowOpen) {
-          if (account.platform === 'whatsapp' && config.out_of_window_template) {
-            template = config.out_of_window_template;
-          } else if (!isLifecycleNote && account.platform === 'messenger' && typeof config.out_of_window_note === 'string' && config.out_of_window_note.trim()) {
-            // The note IS the message sent outside the window.
-            body = config.out_of_window_note;
-            CHANNEL_OUTBOUND_METRICS.windowDenied.inc({ platform: account.platform });
-          } else {
-            CHANNEL_OUTBOUND_METRICS.windowDenied.inc({ platform: account.platform });
-            await this.markLink(orgId, message.id, 'skipped', { reason: 'messaging_window_closed' });
-            return;
-          }
-        }
-      }
-
-      // Per-account send-rate limiter (Redis; degrade open - the provider's
-      // own 429 + the outbox backoff are the hard safety nets).
-      if (await this.rateLimited(account)) {
-        throw new Error(`channel ${account.platform} send rate limit exceeded for account ${account.id} - retryable`);
-      }
-
-      const sender = this.senders[account.platform];
-      if (!sender) {
-        throw new PermanentSendError(`no sender registered for platform ${account.platform}`);
-      }
-      const externalUserId = await this.externalUserIdFor(orgId, binding.channel_identity_id);
-      if (!externalUserId) {
-        throw new PermanentSendError(`channel identity ${binding.channel_identity_id} missing external user id`);
-      }
-      try {
-        const result = await sender.send({ account, externalUserId, text: body, internalMessageId: message.id, template });
-        await tx
-          .update(channelMessageLinks)
-          .set({ deliveryState: 'sent', externalMessageId: result.externalMessageId, updatedAt: new Date().toISOString() })
-          .where(eq(channelMessageLinks.messageId, message.id));
-        CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'sent' });
-      } catch (err) {
-        if (err instanceof PermanentSendError) {
-          await this.markLink(orgId, message.id, 'failed', { message: err.message.slice(0, 250) });
-          CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'failed' });
-          throw new PermanentConsumerError(err.message);
-        }
-        CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'retryable_error' });
-        throw err;
-      }
-}
-
-  private async markLink(orgId: string, messageId: string, state: 'skipped' | 'failed', reason: Record<string, unknown> | null): Promise<void> {
-    await this.db.withOrg(orgId, async (tx) => {
-      await tx
-        .update(channelMessageLinks)
-        .set({ deliveryState: state, providerError: reason, updatedAt: new Date().toISOString() })
-        .where(eq(channelMessageLinks.messageId, messageId));
+    // Claim BEFORE any provider I/O: the unique (message_id) anchor makes
+    // outbox redelivery idempotent at the send boundary.
+    const claim = await this.links.claimOutboundLink({
+      orgId,
+      conversationId: bound.conversationId,
+      messageId,
+      accountId: account.id,
+      platform: account.platform,
     });
-  }
-
-  private async externalUserIdFor(orgId: string, identityId?: string): Promise<string | null> {
-    if (!identityId) {
-      return null;
+    if (!claim.claimed) {
+      const state = claim.existingState;
+      if (state === 'sent' || state === 'delivered' || state === 'read') {
+        return; // already durably delivered
+      }
+      // 'pending' from a crashed twin - fall through and re-send (at-least-once).
     }
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select({ externalUserId: channelIdentities.externalUserId }).from(channelIdentities).where(eq(channelIdentities.id, identityId)).limit(1),
-    );
-    return rows[0]?.externalUserId ?? null;
+
+    if (!body.trim()) {
+      await this.links.markLinkState(orgId, messageId, 'skipped', null);
+      CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'skipped_empty' });
+      return;
+    }
+
+    // Messaging-window policy (Meta platforms only).
+    const config = (account.config ?? {}) as ChannelConfig;
+    let template: SendRequest['template'] | undefined;
+    if (account.platform === 'whatsapp' || account.platform === 'messenger') {
+      const window = binding.channel_identity_id
+        ? await this.identities.getIdentityWindow(orgId, binding.channel_identity_id)
+        : null;
+      const windowOpen = window?.windowExpiresAt ? Date.parse(window.windowExpiresAt) > Date.now() : false;
+      if (!windowOpen) {
+        if (account.platform === 'whatsapp' && config.out_of_window_template) {
+          template = config.out_of_window_template;
+        } else if (!isLifecycleNote && account.platform === 'messenger' && typeof config.out_of_window_note === 'string' && config.out_of_window_note.trim()) {
+          // The note IS the message sent outside the window.
+          body = config.out_of_window_note;
+          CHANNEL_OUTBOUND_METRICS.windowDenied.inc({ platform: account.platform });
+        } else {
+          CHANNEL_OUTBOUND_METRICS.windowDenied.inc({ platform: account.platform });
+          await this.links.markLinkState(orgId, messageId, 'skipped', { reason: 'messaging_window_closed' });
+          return;
+        }
+      }
+    }
+
+    // Per-account send-rate limiter (Redis; degrade open - the provider's
+    // own 429 + the outbox backoff are the hard safety nets).
+    if (await this.rateLimited(account)) {
+      throw new Error(`channel ${account.platform} send rate limit exceeded for account ${account.id} - retryable`);
+    }
+
+    const sender = this.senders[account.platform];
+    if (!sender) {
+      throw new PermanentSendError(`no sender registered for platform ${account.platform}`);
+    }
+    const externalUserId = await this.identities.externalUserIdFor(orgId, binding.channel_identity_id ?? '');
+    if (!externalUserId) {
+      throw new PermanentSendError(`channel identity ${binding.channel_identity_id} missing external user id`);
+    }
+    try {
+      const result = await sender.send({ account, externalUserId, text: body, internalMessageId: messageId, template });
+      await this.links.markLinkSent(orgId, messageId, result.externalMessageId);
+      CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'sent' });
+    } catch (err) {
+      if (err instanceof PermanentSendError) {
+        await this.links.markLinkState(orgId, messageId, 'failed', { message: err.message.slice(0, 250) });
+        CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'failed' });
+        throw new PermanentConsumerError(err.message);
+      }
+      CHANNEL_OUTBOUND_METRICS.sent.inc({ platform: account.platform, result: 'retryable_error' });
+      throw err;
+    }
   }
 
   private async rateLimited(account: ChannelAccount): Promise<boolean> {

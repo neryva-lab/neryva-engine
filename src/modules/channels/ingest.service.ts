@@ -1,12 +1,8 @@
-import { and, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
-import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
 import { PermanentConsumerError, type OutboxConsumer } from '../../common/infra/outbox/consumer';
 import type { OutboxEvent } from '../../common/infra/outbox/schema';
-import { uuidv7 } from '../../common/ids/uuidv7';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
 // VALUE import (not `import type`): NestJS reads this binding for
 // design:paramtypes metadata — a type-only import erases it and the
@@ -14,9 +10,17 @@ import { sha256Hex } from '../../common/infra/crypto/envelope';
 import { RedisService } from '../../common/infra/redis.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
-import { channelAccounts, channelEvents, channelIdentities, channelMessageLinks, messageReceipts, ChannelAccount } from './schema';
-import { normalizeFor, NormalizedEvent, STALE_EVENT_MS } from './normalize';
+import type { ChannelAccount } from './schema';
+import { normalizeFor, type NormalizedEvent, STALE_EVENT_MS } from './normalize';
 import { VoiceService } from './voice.service';
+import { CHANNEL_ACCOUNT_REPOSITORY } from './repositories/repository-tokens';
+import { CHANNEL_EVENT_REPOSITORY } from './repositories/repository-tokens';
+import { CHANNEL_IDENTITY_REPOSITORY } from './repositories/repository-tokens';
+import { CHANNEL_MESSAGE_LINK_REPOSITORY } from './repositories/repository-tokens';
+import type { IChannelAccountRepository } from './repositories/channel-account.repository';
+import type { IChannelEventRepository, WebhookRecordOutcome } from './repositories/channel-event.repository';
+import type { IChannelIdentityRepository } from './repositories/channel-identity.repository';
+import type { IChannelMessageLinkRepository } from './repositories/channel-message-link.repository';
 
 /**
  * Channel ingest — Phase C2. Two halves:
@@ -31,13 +35,18 @@ import { VoiceService } from './voice.service';
  *    normalizes, resolves/creates identity + conversation, and calls the ONE
  *    message entry point (`ConversationsService.acceptMessage`) with the
  *    channel idempotency key. Status events update delivery state instead.
+ *
+ * Persistence goes through the P3 channel repository ports
+ * (`IChannelEventRepository`, `IChannelIdentityRepository`,
+ * `IChannelMessageLinkRepository`, `IChannelAccountRepository`). This
+ * service holds no provider, Drizzle, or SQL references.
  */
 
 const RATE_WINDOW_SECONDS = 60;
 const RATE_LIMIT_PER_ACCOUNT = 600;
 
 export interface WebhookAcceptResult {
-  outcome: 'accepted' | 'duplicate';
+  outcome: WebhookRecordOutcome;
 }
 
 @Injectable()
@@ -45,11 +54,9 @@ export class ChannelIngestService {
   private static readonly logger = new Logger(ChannelIngestService.name);
 
   constructor(
-    private readonly db: DbService,
-    private readonly conversations: ConversationsService,
-    private readonly purge: RetentionPurgeService,
-    private readonly voice: VoiceService,
-    private readonly redis?: RedisService,
+    @Inject(CHANNEL_ACCOUNT_REPOSITORY) private readonly accounts: IChannelAccountRepository,
+    @Inject(CHANNEL_EVENT_REPOSITORY) private readonly events: IChannelEventRepository,
+    @Optional() private readonly redis?: RedisService,
   ) {}
 
   /**
@@ -81,45 +88,38 @@ export class ChannelIngestService {
     const normalized = normalizeFor(account.platform, safeParse(boundedRaw), boundedRaw);
     const externalEventId = normalized.externalEventId.slice(0, 255);
 
-    return this.db.withBypass(async (tx) => {
-      const inserted = await tx
-        .insert(channelEvents)
-        .values({
-          id: uuidv7(),
-          organizationId: account.organizationId,
-          channelAccountId: account.id,
-          platform: account.platform,
-          externalEventId,
-          payload: { raw: boundedRaw, normalized_kind: normalized.kind, signature_ok: input.signatureOk } as never,
-          signatureOk: input.signatureOk,
-        })
-        .onConflictDoNothing()
-        .returning({ id: channelEvents.id });
-      if (inserted.length === 0) {
-        return { outcome: 'duplicate' as const };
-      }
-      // Canonical fact (received event) + announcement in one TX (invariant 7).
-      await recordOutboxEvent(tx, {
-        aggregateType: 'channel_event',
-        aggregateId: inserted[0].id,
-        organizationId: account.organizationId,
-        eventType: 'channel.event.received',
-        partitionKey: account.id,
-        payload: { channel_account_id: account.id, channel_event_id: inserted[0].id },
-      });
-      return { outcome: 'accepted' as const };
+    // Durable receipt + outbox announce in ONE transaction (invariant 7).
+    // The (account, external_event_id) unique key makes redelivery a
+    // `duplicate` with no second outbox event.
+    const outcome = await this.events.recordWebhookEvent({
+      accountId: account.id,
+      orgId: account.organizationId,
+      platform: account.platform,
+      boundedRaw,
+      externalEventId,
+      normalizedKind: normalized.kind,
+      signatureOk: input.signatureOk,
     });
+
+    ChannelIngestService.logger.log(
+      `webhook ${outcome} for account ${account.id} (${account.platform}, event ${externalEventId})`,
+    );
+    return { outcome };
   }
 }
 
 /** Outbox consumer — processes channel.event.received into the conversation plane. */
+@Injectable()
 export class ChannelIngestConsumer implements OutboxConsumer {
   private static readonly logger = new Logger(ChannelIngestConsumer.name);
   readonly name = 'channel-ingest';
   readonly eventTypes = ['channel.event.received'];
 
   constructor(
-    private readonly db: DbService,
+    @Inject(CHANNEL_ACCOUNT_REPOSITORY) private readonly accounts: IChannelAccountRepository,
+    @Inject(CHANNEL_EVENT_REPOSITORY) private readonly events: IChannelEventRepository,
+    @Inject(CHANNEL_IDENTITY_REPOSITORY) private readonly identities: IChannelIdentityRepository,
+    @Inject(CHANNEL_MESSAGE_LINK_REPOSITORY) private readonly links: IChannelMessageLinkRepository,
     private readonly conversations: ConversationsService,
     private readonly purge: RetentionPurgeService,
     private readonly voice: VoiceService,
@@ -133,25 +133,21 @@ export class ChannelIngestConsumer implements OutboxConsumer {
     // Same FORCE-RLS root-read class as the G1 getByPublicKey fix: the
     // worker resolves by exact ids from a trusted outbox event (no tenant
     // context exists here) — bypass vehicle, matching settle() below.
-    // (Hoisted locals: property narrowing does not survive the closure.)
-    const accountId = payload.channel_account_id as string;
-    const eventId = payload.channel_event_id as string;
-    const { account, stored } = await this.db.withBypass(async (tx) => {
-      const accountRows = await tx.select().from(channelAccounts).where(eq(channelAccounts.id, accountId)).limit(1);
-      const eventRows = await tx.select().from(channelEvents).where(eq(channelEvents.id, eventId)).limit(1);
-      return { account: accountRows[0], stored: eventRows[0] };
-    });
+    const accountId = payload.channel_account_id;
+    const eventId = payload.channel_event_id;
+    const account = await this.accounts.getAccountByIdForIngest(accountId);
+    const stored = await this.events.getEventByIdForIngest(eventId);
     if (!account) {
       throw new PermanentConsumerError(`channel account ${payload.channel_account_id} vanished`);
     }
-    if (!stored) {
+    if (!stored || stored.channelAccountId !== accountId) {
       throw new PermanentConsumerError(`channel event ${payload.channel_event_id} vanished`);
     }
     if (stored.status === 'processed') {
       return; // redelivery after a settled event — nothing to do
     }
     if (stored.signatureOk === false) {
-      await this.settle(stored.id, 'quarantined', 'signature verification failed');
+      await this.events.settleEvent(stored.id, 'quarantined', 'signature verification failed');
       return;
     }
 
@@ -172,13 +168,13 @@ export class ChannelIngestConsumer implements OutboxConsumer {
           // Normal, quiet: typing echoes and non-message updates.
           break;
       }
-      await this.settle(stored.id, 'processed');
+      await this.events.settleEvent(stored.id, 'processed');
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.getStatus() === 410) {
           // Tombstoned conversation — the platform keeps sending for a purged
           // chat; quarantine rather than burning retries forever.
-          await this.settle(stored.id, 'quarantined', err.message);
+          await this.events.settleEvent(stored.id, 'quarantined', err.message);
           return;
         }
         const status = err.getStatus();
@@ -262,97 +258,62 @@ export class ChannelIngestConsumer implements OutboxConsumer {
       throw new PermanentConsumerError(`channel account ${account.id} has no default_assistant_id — configure before activating`);
     }
 
-    await this.db.withBypass(async (tx) => {
-      // 1. Identity upsert + 24h messaging window (Meta platforms only).
-      const hasWindow = account.platform === 'whatsapp' || account.platform === 'messenger' || account.platform === 'instagram';
-      const now = new Date().toISOString();
-      const windowExpires = hasWindow ? new Date(Date.now() + 24 * 3600 * 1000).toISOString() : null;
-      await tx
-        .insert(channelIdentities)
-        .values({
-          id: uuidv7(),
-          organizationId: account.organizationId,
-          channelAccountId: account.id,
-          platform: account.platform,
-          externalUserId: event.externalUserId.slice(0, 255),
-          displayName: event.profileName?.slice(0, 255) ?? null,
-          locale: event.locale?.slice(0, 32) ?? null,
-          lastInboundAt: now,
-          windowExpiresAt: windowExpires,
-        })
-        .onConflictDoUpdate({
-          target: [channelIdentities.channelAccountId, channelIdentities.externalUserId],
-          set: { lastInboundAt: now, windowExpiresAt: windowExpires, updatedAt: now },
-        });
-      const identityRows = await tx
-        .select({ id: channelIdentities.id })
-        .from(channelIdentities)
-        .where(and(eq(channelIdentities.channelAccountId, account.id), eq(channelIdentities.externalUserId, event.externalUserId.slice(0, 255))))
-        .limit(1);
-      const identityId = identityRows[0]?.id;
-      if (!identityId) {
-        throw new Error('channel identity vanished after upsert');
-      }
+    // 1. Identity upsert + 24h messaging window (Meta platforms only).
+    //    First-inbound races converge on one row via the unique
+    //    (account, external_user_id) key.
+    const hasWindow = account.platform === 'whatsapp' || account.platform === 'messenger' || account.platform === 'instagram';
+    const identityId = await this.identities.upsertInboundIdentity({
+      orgId: account.organizationId,
+      accountId: account.id,
+      platform: account.platform,
+      externalUserId: event.externalUserId,
+      displayName: event.profileName ?? null,
+      locale: event.locale ?? null,
+      hasWindow,
+    });
 
-      // 2. Conversation: latest active conversation bound to this identity;
-      //    purged (tombstoned) conversations are never revived.
-      const convRows = await tx.execute(sql`
-        select id from conversations
-        where organization_id = ${account.organizationId}::uuid
-          and channel_binding->>'channel_identity_id' = ${identityId}
-          and status = 'active'
-        order by updated_at desc
-        limit 1
-      `);
-      const existingId = (convRows.rows[0] as { id: string } | undefined)?.id;
-      let conversationId = existingId;
-      if (existingId) {
-        await this.purge.assertNotTombstoned('conversation', existingId);
-      }
-      if (!conversationId) {
-        const created = await this.conversations.createConversation({
-          orgId: account.organizationId,
-          assistantId: String(config.default_assistant_id),
-          createdBy: `channel:${account.id}`,
-          channelBinding: {
-            platform: account.platform,
-            channel_account_id: account.id,
-            channel_identity_id: identityId,
-          },
-          participantScope: 'channel',
-        });
-        conversationId = created.id;
-      }
-
-      // 3. THE one message entry point — idempotency tier, run pinning,
-      //    one-active-turn, outbox all happen here (ledger 4.7).
-      const result = await this.conversations.acceptMessage({
+    // 2. Conversation: latest active conversation bound to this identity;
+    //    purged (tombstoned) conversations are never revived.
+    let conversationId = await this.identities.findActiveConversationIdByIdentity(account.organizationId, identityId);
+    if (conversationId) {
+      await this.purge.assertNotTombstoned('conversation', conversationId);
+    } else {
+      const created = await this.conversations.createConversation({
         orgId: account.organizationId,
-        principalId: `channel:${account.id}`,
-        conversationId,
-        content: {
-          text: event.text,
-          channel: { platform: account.platform },
-          ...(voice?.transcribed ? { voice: { transcribed: true } } : {}),
-        },
-        idempotencyKey: `channel:${account.id}:${event.externalMessageId || sha256Hex(raw).slice(0, 32)}`,
-      });
-
-      // 4. Inbound link (dedup anchor: (account, external_message_id)).
-      await tx
-        .insert(channelMessageLinks)
-        .values({
-          id: uuidv7(),
-          organizationId: account.organizationId,
-          conversationId,
-          messageId: result.message_id,
-          channelAccountId: account.id,
-          direction: 'inbound',
+        assistantId: String(config.default_assistant_id),
+        createdBy: `channel:${account.id}`,
+        channelBinding: {
           platform: account.platform,
-          externalMessageId: event.externalMessageId || null,
-          deliveryState: 'sent',
-        })
-        .onConflictDoNothing();
+          channel_account_id: account.id,
+          channel_identity_id: identityId,
+        },
+        participantScope: 'channel',
+      });
+      conversationId = created.id;
+    }
+
+    // 3. THE one message entry point — idempotency tier, run pinning,
+    //    one-active-turn, outbox all happen here (ledger 4.7).
+    const result = await this.conversations.acceptMessage({
+      orgId: account.organizationId,
+      principalId: `channel:${account.id}`,
+      conversationId,
+      content: {
+        text: event.text,
+        channel: { platform: account.platform },
+        ...(voice?.transcribed ? { voice: { transcribed: true } } : {}),
+      },
+      idempotencyKey: `channel:${account.id}:${event.externalMessageId || sha256Hex(raw).slice(0, 32)}`,
+    });
+
+    // 4. Inbound link (dedup anchor: (account, external_message_id)).
+    await this.links.recordInboundLink({
+      orgId: account.organizationId,
+      conversationId,
+      messageId: result.message_id,
+      accountId: account.id,
+      platform: account.platform,
+      externalMessageId: event.externalMessageId || null,
     });
   }
 
@@ -360,47 +321,15 @@ export class ChannelIngestConsumer implements OutboxConsumer {
     if (!event.externalMessageId) {
       return;
     }
-    await this.db.withOrg(account.organizationId, async (tx) => {
-      const links = await tx
-        .select({ messageId: channelMessageLinks.messageId, conversationId: channelMessageLinks.conversationId, direction: channelMessageLinks.direction })
-        .from(channelMessageLinks)
-        .where(and(eq(channelMessageLinks.channelAccountId, account.id), eq(channelMessageLinks.externalMessageId, event.externalMessageId)))
-        .limit(1);
-      const link = links[0];
-      await tx
-        .update(channelMessageLinks)
-        .set({
-          deliveryState: event.status,
-          providerError: event.errorCode ? { code: event.errorCode, message: event.errorMessage ?? null } : null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(eq(channelMessageLinks.channelAccountId, account.id), eq(channelMessageLinks.externalMessageId, event.externalMessageId)));
-      // FL-3.19 — delivery/read receipts for OUTBOUND messages, upserted per
-      // (message, account, state); the first platform report wins.
-      if (link && link.direction === 'outbound' && (event.status === 'delivered' || event.status === 'read')) {
-        await tx
-          .insert(messageReceipts)
-          .values({
-            id: uuidv7(),
-            organizationId: account.organizationId,
-            conversationId: link.conversationId,
-            messageId: link.messageId,
-            channelAccountId: account.id,
-            platform: account.platform,
-            state: event.status,
-            occurredAt: event.occurredAtMs ? new Date(event.occurredAtMs).toISOString() : new Date().toISOString(),
-          })
-          .onConflictDoNothing();
-      }
-    });
-  }
-
-  private async settle(eventId: string, status: 'processed' | 'quarantined', error?: string): Promise<void> {
-    await this.db.withBypass(async (tx) => {
-      await tx
-        .update(channelEvents)
-        .set({ status, processedAt: new Date().toISOString(), ...(error ? { lastError: error.slice(0, 4000) } : {}) })
-        .where(eq(channelEvents.id, eventId));
+    // Tenant-scoped to the account's org (pre-P3 used withOrg(account.org)).
+    // No matching link → no-op; the event still settles as processed.
+    await this.links.applyStatusEvent({
+      orgId: account.organizationId,
+      accountId: account.id,
+      externalMessageId: event.externalMessageId,
+      status: event.status,
+      providerError: event.errorCode ? { code: event.errorCode, message: event.errorMessage ?? null } : null,
+      ...(event.occurredAtMs !== undefined ? { occurredAtMs: event.occurredAtMs } : {}),
     });
   }
 }

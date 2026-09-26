@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Worker, type Job } from 'bullmq';
 import { env } from '../../common/config/env';
 import { QueueService, bullQueueName } from '../../common/infra/queue.service';
@@ -10,8 +10,8 @@ import { UsageLedgerService } from './usage-ledger.service';
 import { TrialExpiryService } from './trial-expiry.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BurnRateService } from '../assistants/burn-rate.service';
-import { DbService } from '../../common/infra/db/db.service';
-import { sql } from 'drizzle-orm';
+import { SPEND_EVENT_REPOSITORY } from './repositories/repository-tokens';
+import type { ISpendEventRepository } from './repositories/spend-event.repository';
 
 /**
  * The billing namespace worker (partitioning Tier-1: every module owns its
@@ -39,7 +39,7 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
     private readonly credits: BillingCreditsService,
     private readonly cycle: BillingCycleService,
     private readonly notifications: NotificationsService,
-    private readonly db: DbService,
+    @Inject(SPEND_EVENT_REPOSITORY) private readonly spend: ISpendEventRepository,
     private readonly trialExpiry: TrialExpiryService,
     private readonly quota: QuotaService,
     private readonly ledger: UsageLedgerService,
@@ -74,14 +74,7 @@ export class BillingWorker implements OnModuleInit, OnModuleDestroy {
         if (job.name === 'billing.budget_eval') {
           const result = await this.credits.evaluateBudgets(async (orgId, product, _projectId) => {
             const monthStart = new Date(new Date().toISOString().slice(0, 7) + '-01T00:00:00.000Z').toISOString();
-            const rows = await this.db.withBypass((tx) =>
-              tx.execute<{ total: string }>(sql`
-                select coalesce(sum(cost_usd), 0)::text as total from billing.spend_events
-                where org_id = ${orgId} and occurred_at >= ${monthStart}::timestamptz
-                  ${product ? sql`and product = ${product}` : sql``}
-              `),
-            );
-            return Number(rows.rows[0]?.total ?? 0);
+            return this.spend.monthlySpend(orgId, product, monthStart);
           }, this.notifications);
           if (result.alerted > 0) {
             BillingWorker.logger.log(`budget evaluation: ${result.alerted} threshold alert(s) sent`);

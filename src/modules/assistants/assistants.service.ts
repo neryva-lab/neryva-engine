@@ -1,21 +1,12 @@
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { pgViolation } from '../../common/infra/db/pg-types';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
-import {
-  assistants,
-  assistantVersions,
-  policySnapshots,
-  assistantInstalls,
+import type {
   Assistant,
   AssistantVersion,
   PolicySnapshot,
   AssistantVersionExport,
-  POLICY_SNAPSHOT_SCHEMA_VERSION,
 } from './schema';
 import {
   validateAssistantPayload,
@@ -24,23 +15,25 @@ import {
   rejectUnknownPayloadKeys,
   AssistantPayload,
 } from './validation';
-import { evaluatePublishGate, throwGateRefusal } from './release-gate';
 import { TemplatesService } from './templates.service';
-import {
-  ManifestResolutionService,
-  undercoveredPinSlugs,
-  unresolvedPinSlugs,
-} from './manifest-resolution.service';
+import { undercoveredPinSlugs, unresolvedPinSlugs } from './manifest-resolution.service';
 import { ConversationsService } from '../conversations/conversations.service';
-import { conversations, runs } from '../conversations/schema';
-import { evalRuns, evalDatasets } from '../knowledge/eval.schema';
-import { documents } from '../knowledge/schema';
 import { EvalService } from '../knowledge/eval.service';
-import { toolCatalog } from './tool-catalog.schema';
-import { BUILT_IN_TOOLS } from './tool-catalog.service';
+import { BUILT_IN_TOOLS, ToolCatalogService } from './tool-catalog.service';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { normalizeResidency, modelServesResidency, Residency } from './residency';
 import { ModelCatalogService, unknownPlatformModels } from './model-catalog.service';
+import {
+  ASSISTANT_REPOSITORY,
+  ASSISTANT_VERSION_REPOSITORY,
+  POLICY_SNAPSHOT_REPOSITORY,
+  ASSISTANT_KNOWLEDGE_QUERIES,
+  type IAssistantRepository,
+  type IAssistantVersionRepository,
+  type IPolicySnapshotRepository,
+  type IAssistantKnowledgeQueries,
+  type VersionPayloadValues,
+} from './repositories/tokens';
 
 /**
  * Assistants domain — Phase 3.1-3.3
@@ -59,19 +52,19 @@ import { ModelCatalogService, unknownPlatformModels } from './model-catalog.serv
 export class AssistantsService {
   private static readonly logger = new Logger(AssistantsService.name);
 
-  /** Hard caps for unpaginated list endpoints (public API checklist: bounded responses). */
-  private static readonly LIST_CAP = 200;
-  private static readonly VERSION_LIST_CAP = 500;
-
   constructor(
-    private readonly db: DbService,
+    @Inject(ASSISTANT_REPOSITORY) private readonly assistants: IAssistantRepository,
+    @Inject(ASSISTANT_VERSION_REPOSITORY) private readonly versions: IAssistantVersionRepository,
+    @Inject(POLICY_SNAPSHOT_REPOSITORY) private readonly snapshots: IPolicySnapshotRepository,
+    @Inject(ASSISTANT_KNOWLEDGE_QUERIES)
+    private readonly knowledgeQueries: IAssistantKnowledgeQueries,
     private readonly audit: AuditService,
     private readonly configPublish: ConfigPublishService,
     private readonly templates: TemplatesService,
-    private readonly manifests: ManifestResolutionService,
     private readonly evals: EvalService,
     private readonly conversations: ConversationsService,
     private readonly modelCatalog: ModelCatalogService,
+    private readonly toolCatalog: ToolCatalogService,
   ) {}
 
   // ── Assistants (identity) ────────────────────────────────────────────────
@@ -134,45 +127,20 @@ export class AssistantsService {
       const hash = hashPayload(validated.normalized);
       // One transaction: assistant identity + DRAFT version commit together —
       // a failed version insert must never leave a versionless assistant.
-      let assistant: Assistant;
-      let versionId: string;
-      try {
-        const created = await this.db.withOrg(input.orgId, async (tx) => {
-          const assistantRows = await tx
-            .insert(assistants)
-            .values({
-              organizationId: input.orgId,
-              name: input.name.trim(),
-              description: input.description?.trim() ?? null,
-            })
-            .returning();
-          const versionRows = await tx
-            .insert(assistantVersions)
-            .values({
-              assistantId: assistantRows[0].id,
-              organizationId: input.orgId,
-              version: 0, // sentinel for DRAFT — publish assigns monotonic version
-              status: 'DRAFT',
-              modelPolicy: validated.normalized.model_policy,
-              contextPolicy: validated.normalized.context_policy,
-              toolPolicy: validated.normalized.tool_policy,
-              knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-              guardrailPolicy: validated.normalized.guardrail_policy,
-              instructions: validated.normalized.instructions ?? null,
-              modelParams: validated.normalized.model_params ?? null,
-              budgetPolicy: validated.normalized.budget_policy ?? null,
-              brand: validated.normalized.brand ?? null,
-              hash,
-            })
-            .returning({ id: assistantVersions.id });
-          return { assistant: assistantRows[0], versionId: versionRows[0].id };
-        });
-        assistant = created.assistant;
-        versionId = created.versionId;
-      } catch (err) {
-        if (err instanceof ApiError) throw err;
-        throw mapAssistantUniqueViolation(err, input.name);
-      }
+      // Transaction ownership and unique-violation mapping live in the
+      // repository; the raw name is passed so conflict details match.
+      const created = await this.assistants.createAssistantWithDraftVersion({
+        orgId: input.orgId,
+        name: input.name,
+        description: input.description,
+        versionValues: {
+          ...toVersionPayloadValues(validated.normalized),
+          parentVersionId: null,
+          hash,
+        },
+      });
+      const assistant = created.assistant;
+      const versionId = created.versionId;
       await this.audit.add({
         action: 'assistant.created',
         resourceType: 'assistant',
@@ -193,22 +161,13 @@ export class AssistantsService {
       });
       return { assistant, version_id: versionId, template: null, hash };
     }
-    let row: Assistant;
-    try {
-      const rows = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .insert(assistants)
-          .values({
-            organizationId: input.orgId,
-            name: input.name.trim(),
-            description: input.description?.trim() ?? null,
-          })
-          .returning(),
-      );
-      row = rows[0];
-    } catch (err) {
-      throw mapAssistantUniqueViolation(err, input.name);
-    }
+    // Transaction ownership and unique-violation mapping live in the
+    // repository; the raw name is passed so conflict details match.
+    const row = await this.assistants.createAssistant({
+      orgId: input.orgId,
+      name: input.name,
+      description: input.description,
+    });
     await this.audit.add({
       action: 'assistant.created',
       resourceType: 'assistant',
@@ -224,22 +183,12 @@ export class AssistantsService {
   async get(orgId: string, assistantId: string): Promise<Assistant | null> {
     assertOrgId(orgId);
     assertUuid(assistantId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(assistants).where(eq(assistants.id, assistantId)).limit(1),
-    );
-    return rows[0] ?? null;
+    return this.assistants.getAssistant(orgId, assistantId);
   }
 
   async list(orgId: string): Promise<Assistant[]> {
     assertOrgId(orgId);
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(assistants)
-        .where(eq(assistants.organizationId, orgId))
-        .orderBy(desc(assistants.updatedAt))
-        .limit(AssistantsService.LIST_CAP),
-    );
+    return this.assistants.listAssistants(orgId);
   }
 
   /**
@@ -261,42 +210,13 @@ export class AssistantsService {
     // assistant delete all run inside ONE transaction. The old code
     // hard-deleted the assistant row and relied on the FK catch — but
     // archiving never cleared the FK, so the documented "archive them before
-    // deleting" workflow could never succeed.
-    let retiredCount = 0;
-    let deletedName = '';
+    // deleting" workflow could never succeed. Transaction ownership and
+    // race/FK conflict mapping live in the repository.
     try {
-      await this.db.withOrg(input.orgId, async (tx) => {
-        // Active conversations block deletion; archived/deleted ones are
-        // removed below.
-        const active = await tx
-          .select({ id: conversations.id })
-          .from(conversations)
-          .where(
-            and(
-              eq(conversations.assistantId, input.assistantId),
-              eq(conversations.status, 'active'),
-            ),
-          )
-          .limit(1);
-        if (active.length > 0) {
-          throw ApiError.conflict('assistant has active conversations — archive them before deleting');
-        }
-        const retired = await tx
-          .delete(conversations)
-          .where(
-            and(
-              eq(conversations.assistantId, input.assistantId),
-              inArray(conversations.status, ['archived', 'deleted']),
-            ),
-          )
-          .returning({ id: conversations.id });
-        retiredCount = retired.length;
-        const rows = await tx.delete(assistants).where(eq(assistants.id, input.assistantId)).returning();
-        if (rows.length === 0) {
-          throw ApiError.notFound('assistant');
-        }
-        deletedName = rows[0].name;
-      });
+      const deleted = await this.assistants.deleteAssistantWithRetiredConversations(
+        input.orgId,
+        input.assistantId,
+      );
       await this.audit.add({
         action: 'assistant.deleted',
         resourceType: 'assistant',
@@ -304,7 +224,7 @@ export class AssistantsService {
         actorType: 'account',
         actorId: input.actorId,
         tenantId: input.orgId,
-        details: { name: deletedName, conversationsRemoved: retiredCount },
+        details: { name: deleted.name, conversationsRemoved: deleted.conversationsRemoved },
       });
     } catch (err) {
       if (err instanceof ApiError) throw err;
@@ -331,30 +251,11 @@ export class AssistantsService {
   }): Promise<Assistant> {
     assertOrgId(input.orgId);
     assertUuid(input.assistantId);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(assistants)
-        .set(
-          input.disabled
-            ? {
-                disabledAt: new Date().toISOString(),
-                disabledBy: input.actorId.slice(0, 128),
-                disabledReason: (input.reason ?? 'operator kill switch').slice(0, 512),
-                updatedAt: new Date().toISOString(),
-              }
-            : {
-                disabledAt: null,
-                disabledBy: null,
-                disabledReason: null,
-                updatedAt: new Date().toISOString(),
-              },
-        )
-        .where(eq(assistants.id, input.assistantId))
-        .returning(),
-    );
-    if (rows.length === 0) {
-      throw ApiError.notFound('assistant');
-    }
+    // Transaction ownership and the 404 live in the repository.
+    const row = await this.assistants.setDisabled(input.orgId, input.assistantId, input.disabled, {
+      reason: input.reason,
+      actorId: input.actorId,
+    });
     await this.audit.add({
       action: input.disabled ? 'assistant.disabled' : 'assistant.enabled',
       resourceType: 'assistant',
@@ -362,9 +263,9 @@ export class AssistantsService {
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
-      details: input.disabled ? { reason: rows[0].disabledReason } : {},
+      details: input.disabled ? { reason: row.disabledReason } : {},
     });
-    return rows[0];
+    return row;
   }
 
   async createVersion(input: {
@@ -394,42 +295,15 @@ export class AssistantsService {
     // DRAFT is always a new row; version is assigned only on publish. The
     // (assistant_id, version=0) sentinel is unique — a second draft before
     // the first is published surfaces as a typed 409, never a raw 23505.
-    // Unknown keys refuse here exactly like the definition-create path
-    // (rejectUnknownPayloadKeys runs inside validateAssistantPayload's
-    // callers — see updateDraft for the shared strict chain).
-
-    // DRAFT is always a new row; version is assigned only on publish. The
-    // (assistant_id, version=0) sentinel is unique — a second draft before
-    // the first is published surfaces as a typed 409, never a raw 23505.
-    let row: AssistantVersion;
-    try {
-      const rows = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .insert(assistantVersions)
-          .values({
-            assistantId: input.assistantId,
-            organizationId: input.orgId,
-            version: 0, // sentinel for DRAFT — publish assigns monotonic version
-            status: 'DRAFT',
-            modelPolicy: validated.normalized.model_policy,
-            contextPolicy: validated.normalized.context_policy,
-            toolPolicy: validated.normalized.tool_policy,
-            knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-            guardrailPolicy: validated.normalized.guardrail_policy,
-            instructions: validated.normalized.instructions ?? null,
-            modelParams: validated.normalized.model_params ?? null,
-            budgetPolicy: validated.normalized.budget_policy ?? null,
-            brand: validated.normalized.brand ?? null,
-            parentVersionId,
-            hash,
-          })
-          .returning(),
-      );
-      row = rows[0];
-    } catch (err) {
-      if (err instanceof ApiError) throw err;
-      throw mapAssistantUniqueViolation(err, '');
-    }
+    // Unique-violation mapping lives in the repository. Unknown keys refuse
+    // here exactly like the definition-create path (rejectUnknownPayloadKeys
+    // runs inside validateAssistantPayload's callers — see updateDraft for
+    // the shared strict chain).
+    const row = await this.versions.createDraftVersion({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      payloadValues: { ...toVersionPayloadValues(validated.normalized), parentVersionId, hash },
+    });
     await this.audit.add({
       action: 'assistant.version_drafted',
       resourceType: 'assistant_version',
@@ -475,46 +349,27 @@ export class AssistantsService {
     // derives from v3's state, not from whatever was active when the draft
     // row was first created (one PK read; negligible beside the update).
     // Same-hash idempotent saves rebase harmlessly (same value rewritten).
-    const forkRows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ activeVersionId: assistants.activeVersionId })
-        .from(assistants)
-        .where(eq(assistants.id, input.assistantId))
-        .limit(1),
-    );
-    const rebasedParent = forkRows[0]?.activeVersionId ?? null;
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(assistantVersions)
-        .set({
-          modelPolicy: validated.normalized.model_policy,
-          contextPolicy: validated.normalized.context_policy,
-          toolPolicy: validated.normalized.tool_policy,
-          knowledgePolicy: validated.normalized.knowledge_policy ?? null,
-          guardrailPolicy: validated.normalized.guardrail_policy,
-          instructions: validated.normalized.instructions ?? null,
-          modelParams: validated.normalized.model_params ?? null,
-          budgetPolicy: validated.normalized.budget_policy ?? null,
-          brand: validated.normalized.brand ?? null,
-          parentVersionId: rebasedParent,
-          hash,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(
-          and(
-            eq(assistantVersions.id, input.versionId),
-            eq(assistantVersions.assistantId, input.assistantId),
-            eq(assistantVersions.status, 'DRAFT'),
-            eq(assistantVersions.hash, input.expectedHash),
-          ),
-        )
-        .returning(),
-    );
-    if (rows[0]) {
+    const assistant = await this.assistants.getAssistant(input.orgId, input.assistantId);
+    const rebasedParent = assistant?.activeVersionId ?? null;
+    // The conditional UPDATE and OCC-miss classification live in the
+    // repository; the single statement still matches id + DRAFT status +
+    // expected hash so two authors never silently clobber.
+    const row = await this.versions.updateDraftContent({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      versionId: input.versionId,
+      expectedHash: input.expectedHash,
+      payloadValues: {
+        ...toVersionPayloadValues(validated.normalized),
+        parentVersionId: rebasedParent,
+        hash,
+      },
+    });
+    if (row) {
       await this.audit.add({
         action: 'assistant.version_redrafted',
         resourceType: 'assistant_version',
-        resourceId: rows[0].id,
+        resourceId: row.id,
         actorType: 'account',
         actorId: input.actorId,
         tenantId: input.orgId,
@@ -524,7 +379,7 @@ export class AssistantsService {
           to: hash.slice(0, 16),
         },
       });
-      return rows[0];
+      return row;
     }
     const current = await this.getVersion(input.orgId, input.versionId);
     throw draftWriteMissError({
@@ -574,47 +429,12 @@ export class AssistantsService {
         { status: current.status },
       );
     }
-    await this.db.withOrg(input.orgId, async (tx) => {
-      const evalProbe = await tx
-        .select({ id: evalRuns.id })
-        .from(evalRuns)
-        .where(
-          and(
-            eq(evalRuns.organizationId, input.orgId),
-            eq(evalRuns.assistantVersionId, input.versionId),
-          ),
-        )
-        .limit(1);
-      if (evalProbe.length > 0) {
-        throw ApiError.conflict(
-          'draft cannot be discarded: it has evaluation runs (durable release provenance)',
-          { assistant_version_id: input.versionId, eval_run_id: evalProbe[0].id },
-        );
-      }
-      const nonTestProbe = await tx
-        .select({ id: runs.id })
-        .from(runs)
-        .where(
-          and(
-            eq(runs.organizationId, input.orgId),
-            eq(runs.assistantVersionId, input.versionId),
-            ne(runs.runKind, 'test'),
-          ),
-        )
-        .limit(1);
-      if (nonTestProbe.length > 0) {
-        throw ApiError.conflict('draft cannot be discarded: non-test runs are pinned to this version', {
-          assistant_version_id: input.versionId,
-          run_id: nonTestProbe[0].id,
-        });
-      }
-      // A2-21: the builder's Try console leaves test runs pinned to the
-      // draft; delete them here (same TX) instead of letting the FK explode
-      // into a 500.
-      await tx
-        .delete(runs)
-        .where(and(eq(runs.organizationId, input.orgId), eq(runs.assistantVersionId, input.versionId)));
-      await tx.delete(assistantVersions).where(eq(assistantVersions.id, input.versionId));
+    // Transaction ownership, the durable eval/non-test-run refusals, and
+    // the test-run cascade live in the repository.
+    await this.versions.discardDraftVersion({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      versionId: input.versionId,
     });
     await this.audit.add({
       action: 'assistant.version_draft_discarded',
@@ -669,18 +489,9 @@ export class AssistantsService {
     const ids = pins
       .filter((p) => p?.resolved === true && typeof p?.document_id === 'string')
       .map((p) => p.document_id as string);
-    const states = new Map<string, string>();
-    if (ids.length > 0) {
-      const rows = await this.db.withOrg(orgId, (tx) =>
-        tx
-          .select({ id: documents.id, state: documents.state })
-          .from(documents)
-          .where(inArray(documents.id, ids)),
-      );
-      for (const r of rows) {
-        states.set(r.id, r.state);
-      }
-    }
+    // Document states come from the knowledge query port (persistence
+    // only) — the degradation rules below stay here in the service.
+    const states = await this.knowledgeQueries.getDocumentStates(orgId, ids);
     // P0 (GAP-1): live embedding coverage for resolved pins, computed against
     // the PINNED version (not latest — the snapshot is the pinning authority).
     // Pins without a model (legacy snapshots) report null: unknown, not broken.
@@ -699,25 +510,7 @@ export class AssistantsService {
         versionId: p.document_version_id as string,
         model: p.embedding_model as string,
       }));
-      const rows = await this.db.withOrg(orgId, (tx) =>
-        tx.execute(sql`
-          select c.document_version_id as version_id,
-                 count(c.id)::int as total,
-                 count(e.id)::int as embedded
-          from chunks c
-          join (values ${sql.join(
-            pairs.map((pair) => sql`(${pair.versionId}::uuid, ${pair.model})`),
-            sql`, `,
-          )}) as want(version_id, model) on want.version_id = c.document_version_id
-          left join embeddings e on e.chunk_id = c.id and e.model = want.model
-          where c.organization_id = ${orgId}::uuid
-          group by c.document_version_id
-        `),
-      );
-      const byVersion = new Map<string, { total: number; embedded: number }>();
-      for (const r of rows.rows as Array<{ version_id: string; total: number; embedded: number }>) {
-        byVersion.set(r.version_id, { total: Number(r.total), embedded: Number(r.embedded) });
-      }
+      const byVersion = await this.knowledgeQueries.getChunkEmbeddingStats(orgId, pairs);
       for (const p of coverable) {
         const stat = byVersion.get(p.document_version_id as string);
         if (stat !== undefined) {
@@ -758,23 +551,13 @@ export class AssistantsService {
   async getVersion(orgId: string, versionId: string): Promise<AssistantVersion | null> {
     assertOrgId(orgId);
     assertUuid(versionId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(assistantVersions).where(eq(assistantVersions.id, versionId)).limit(1),
-    );
-    return rows[0] ?? null;
+    return this.versions.getVersion(orgId, versionId);
   }
 
   async listVersions(orgId: string, assistantId: string): Promise<AssistantVersion[]> {
     assertOrgId(orgId);
     assertUuid(assistantId);
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(assistantVersions)
-        .where(eq(assistantVersions.assistantId, assistantId))
-        .orderBy(desc(assistantVersions.version), desc(assistantVersions.createdAt))
-        .limit(AssistantsService.VERSION_LIST_CAP),
-    );
+    return this.versions.listVersions(orgId, assistantId);
   }
 
   /**
@@ -824,48 +607,22 @@ export class AssistantsService {
     assertPublishable(validated.normalized);
     await this.assertToolPins(input.orgId, validated.normalized);
 
-    const published = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`,
-      );
-
-      const latest = await tx
-        .select({ version: assistantVersions.version })
-        .from(assistantVersions)
-        .where(
-          and(
-            eq(assistantVersions.assistantId, input.assistantId),
-            eq(assistantVersions.status, 'PUBLISHED'),
-          ),
-        )
-        .orderBy(desc(assistantVersions.version))
-        .limit(1);
-      // Also consider non-PUBLISHED but already versioned rows (RETIRED, etc.)
-      const maxAll = await tx
-        .select({ version: assistantVersions.version })
-        .from(assistantVersions)
-        .where(
-          and(
-            eq(assistantVersions.assistantId, input.assistantId),
-            sql`${assistantVersions.version} > 0`,
-          ),
-        )
-        .orderBy(desc(assistantVersions.version))
-        .limit(1);
-      const nextVersion = Math.max(latest[0]?.version ?? 0, maxAll[0]?.version ?? 0) + 1;
-
-      return this.insertPublishedVersion(tx, {
-        orgId: input.orgId,
-        assistantId: input.assistantId,
-        version: nextVersion,
-        schemaVersion: draft.schemaVersion,
-        normalized: validated.normalized,
-        publishedBy: input.publishedBy,
-        rollbackOf: null,
-        // P6: the published row inherits the draft's fork point.
-        parentVersionId: draft.parentVersionId ?? null,
-        acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
-      });
+    // The repository owns the advisory-lock serialization, next-version
+    // computation, manifest resolution, the no-op/release/degraded gates,
+    // the PUBLISHED insert + snapshot, and the active-pointer move — one
+    // commit. `version` is advisory: the repository computes nextVersion
+    // under the lock (the published row inherits the draft's fork point).
+    const published = await this.versions.publishVersion({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      version: 0,
+      schemaVersion: draft.schemaVersion,
+      normalized: validated.normalized,
+      publishedBy: input.publishedBy,
+      rollbackOf: null,
+      // P6: the published row inherits the draft's fork point.
+      parentVersionId: draft.parentVersionId ?? null,
+      acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
     });
 
     await this.audit.add({
@@ -883,6 +640,7 @@ export class AssistantsService {
     });
     await this.auditDegradedBypass(
       input.orgId,
+      input.assistantId,
       published.id,
       input.publishedBy,
       input.acknowledgeDegradedKnowledge === true,
@@ -912,37 +670,9 @@ export class AssistantsService {
     // Serialize against publish/rollback (same advisory lock domain) so a
     // concurrent publish cannot re-activate the version mid-retire, and a
     // concurrent rollback cannot point `active_version_id` at the retiring row.
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`,
-      );
-      const active = await tx
-        .select({ activeVersionId: assistants.activeVersionId })
-        .from(assistants)
-        .where(eq(assistants.id, input.assistantId))
-        .limit(1);
-      if (active[0]?.activeVersionId === version.id) {
-        // The active pointer must never reference a RETIRED version — runs
-        // started after retire would pin a version the org has withdrawn.
-        // Withdraw by publishing/rolling back to a successor first.
-        throw ApiError.conflict(
-          'cannot retire the active version — publish or roll back to a successor first',
-          {
-            assistant_id: input.assistantId,
-            version_id: version.id,
-          },
-        );
-      }
-      const rows = await tx
-        .update(assistantVersions)
-        .set({ status: 'RETIRED', updatedAt: new Date().toISOString() })
-        .where(and(eq(assistantVersions.id, version.id), eq(assistantVersions.status, 'PUBLISHED')))
-        .returning();
-      if (rows.length === 0) {
-        throw ApiError.conflict('assistant version was retired concurrently');
-      }
-      return rows[0];
-    });
+    // The lock, the active-pointer guard, and the conditional status move
+    // live in the repository.
+    const row = await this.versions.retireVersion(input.orgId, input.assistantId, input.versionId);
     await this.audit.add({
       action: 'assistant.retired',
       resourceType: 'assistant_version',
@@ -991,34 +721,20 @@ export class AssistantsService {
     await this.rejectUnknownModels(input.orgId, validated.normalized);
     assertPublishable(validated.normalized);
     await this.assertToolPins(input.orgId, validated.normalized);
-    const published = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${`assistant:${input.assistantId}`}))`,
-      );
-      const maxAll = await tx
-        .select({ version: assistantVersions.version })
-        .from(assistantVersions)
-        .where(
-          and(
-            eq(assistantVersions.assistantId, input.assistantId),
-            sql`${assistantVersions.version} > 0`,
-          ),
-        )
-        .orderBy(desc(assistantVersions.version))
-        .limit(1);
-      const nextVersion = (maxAll[0]?.version ?? 0) + 1;
-      return this.insertPublishedVersion(tx, {
-        orgId: input.orgId,
-        assistantId: input.assistantId,
-        version: nextVersion,
-        schemaVersion: target.schemaVersion,
-        normalized: validated.normalized,
-        publishedBy: input.publishedBy,
-        rollbackOf: target.id,
-        // P6: rollback-as-new derives from the restored version.
-        parentVersionId: target.id,
-        acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
-      });
+    // Rollback flows through the same repository commit as publish
+    // (advisory lock, manifest resolution, gates, snapshot, pointer move).
+    // `version` is advisory: the repository computes nextVersion under the
+    // lock. P6: rollback-as-new derives from the restored version.
+    const published = await this.versions.publishVersion({
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      version: 0,
+      schemaVersion: target.schemaVersion,
+      normalized: validated.normalized,
+      publishedBy: input.publishedBy,
+      rollbackOf: target.id,
+      parentVersionId: target.id,
+      acknowledgeDegradedKnowledge: input.acknowledgeDegradedKnowledge === true,
     });
     await this.audit.add({
       action: 'assistant.rolled_back',
@@ -1035,6 +751,7 @@ export class AssistantsService {
     });
     await this.auditDegradedBypass(
       input.orgId,
+      input.assistantId,
       published.id,
       input.publishedBy,
       input.acknowledgeDegradedKnowledge === true,
@@ -1047,10 +764,7 @@ export class AssistantsService {
   async getSnapshot(orgId: string, snapshotId: string): Promise<PolicySnapshot | null> {
     assertOrgId(orgId);
     assertUuid(snapshotId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(policySnapshots).where(eq(policySnapshots.id, snapshotId)).limit(1),
-    );
-    return rows[0] ?? null;
+    return this.snapshots.getSnapshot(orgId, snapshotId);
   }
 
   async getSnapshotForVersion(
@@ -1061,36 +775,7 @@ export class AssistantsService {
     assertOrgId(orgId);
     assertUuid(assistantId);
     assertUuid(versionId);
-    return this.db.withOrg(orgId, async (tx) => {
-      const version = await tx
-        .select({
-          id: assistantVersions.id,
-          assistantId: assistantVersions.assistantId,
-          hash: assistantVersions.hash,
-        })
-        .from(assistantVersions)
-        .where(
-          and(eq(assistantVersions.id, versionId), eq(assistantVersions.assistantId, assistantId)),
-        )
-        .limit(1);
-      if (version.length === 0) {
-        return null;
-      }
-      // Content-addressed (drizzle/0069): "the version's snapshot" is the row
-      // matching the version's LIVE hash — older rows are immutable history
-      // for runs dispatched against them.
-      const rows = await tx
-        .select()
-        .from(policySnapshots)
-        .where(
-          and(
-            eq(policySnapshots.assistantVersionId, versionId),
-            eq(policySnapshots.hash, version[0].hash),
-          ),
-        )
-        .limit(1);
-      return rows[0] ?? null;
-    });
+    return this.snapshots.getSnapshotForVersion(orgId, assistantId, versionId);
   }
 
   /**
@@ -1159,29 +844,16 @@ export class AssistantsService {
 
   /** Template-seeded dataset id for an assistant (`template:<slug>@<version>`), if installed. */
   private async resolveTemplateDataset(orgId: string, assistantId: string): Promise<string | null> {
-    const name = await this.db.withOrg(orgId, async (tx) => {
-      const installs = await tx
-        .select()
-        .from(assistantInstalls)
-        .where(eq(assistantInstalls.assistantId, assistantId))
-        .limit(1);
-      const install = installs[0];
-      if (!install || install.organizationId !== orgId) {
-        return null;
-      }
-      return `template:${install.slug}@${install.templateVersion}`;
-    });
-    if (!name) {
+    // Install resolution lives in TemplatesService (org predicate inside);
+    // the dataset-by-exact-name read is a knowledge query-port read.
+    const template = await this.templates.resolveInstallTemplate(orgId, assistantId);
+    if (!template) {
       return null;
     }
-    const datasets = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ id: evalDatasets.id })
-        .from(evalDatasets)
-        .where(and(eq(evalDatasets.organizationId, orgId), eq(evalDatasets.name, name)))
-        .limit(1),
+    return this.knowledgeQueries.findEvalDatasetId(
+      orgId,
+      `template:${template.slug}@${template.version}`,
     );
-    return datasets[0]?.id ?? null;
   }
 
   /**
@@ -1220,34 +892,16 @@ export class AssistantsService {
       );
       update_available = entry?.update_available ?? 'none';
     }
-    const runs = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          decision: evalRuns.decision,
-          score: evalRuns.score,
-          finishedAt: evalRuns.finishedAt,
-        })
-        .from(evalRuns)
-        .where(
-          and(
-            eq(evalRuns.organizationId, orgId),
-            eq(evalRuns.assistantVersionId, versionId),
-            eq(evalRuns.state, 'completed'),
-            // P5: the version verdict is the FORMAL decision — shadow
-            // observations surface via drift alerts, never here.
-            eq(evalRuns.isShadow, false),
-          ),
-        )
-        .orderBy(desc(evalRuns.finishedAt))
-        .limit(1),
-    );
-    const last = runs[0];
+    // Latest completed, non-shadow eval decision — formal verdict only
+    // (shadow observations surface via drift alerts, never here). Read via
+    // the knowledge query port; the predicate is byte-identical.
+    const last = await this.knowledgeQueries.getLatestEvalDecision(orgId, versionId);
     return {
       template,
       manifest_hash: (snapshot?.manifestHash ?? null) as string | null,
       update_available,
       last_evaluation: last?.decision
-        ? { decision: last.decision, score: last.score, finished_at: last.finishedAt }
+        ? { decision: last.decision, score: last.score, finished_at: last.finished_at }
         : null,
       parent_version_id: version.parentVersionId ?? null,
     };
@@ -1446,17 +1100,9 @@ export class AssistantsService {
     if (tools.length === 0) {
       return;
     }
-    const names = tools.map((t) => t.name);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          name: toolCatalog.name,
-          hash: toolCatalog.hash,
-          enabled: toolCatalog.enabled,
-        })
-        .from(toolCatalog)
-        .where(eq(toolCatalog.organizationId, orgId)),
-    );
+    // The catalog read is unfiltered (disabled rows included) so the
+    // 'not present or disabled' verdict is computed here, exactly as before.
+    const rows = await this.toolCatalog.list(orgId, { includeDisabled: true });
     const byName = new Map(rows.map((r) => [r.name, r]));
     const problems: string[] = [];
     for (const entry of tools) {
@@ -1476,7 +1122,6 @@ export class AssistantsService {
     if (problems.length > 0) {
       throw ApiError.validation({ tool_policy: `tool pins rejected: ${problems.join('; ')}` });
     }
-    void names;
   }
 
   /**
@@ -1501,89 +1146,9 @@ export class AssistantsService {
     assertOrgId(orgId);
     assertUuid(assistantId);
     assertUuid(versionId);
-    await this.db.withOrg(orgId, async (tx) => {
-      const versionRows = await tx
-        .select()
-        .from(assistantVersions)
-        .where(
-          and(eq(assistantVersions.id, versionId), eq(assistantVersions.organizationId, orgId)),
-        )
-        .limit(1);
-      const version = versionRows[0];
-      if (!version || version.assistantId !== assistantId) {
-        throw ApiError.notFound('assistant version');
-      }
-      // Content-addressed + immutable (drizzle/0069): one row per
-      // (version, content hash). A draft edited after the snapshot was taken
-      // INSERTS a new row — never mutates the existing one. In-place refresh
-      // was the in-flight edit race: an eval dispatched against H1 completed
-      // after the refresh and pinned H2 in its provenance, and in-flight
-      // runs re-reading the snapshot by id silently switched content
-      // mid-run. Runs reference their snapshot row by id and always see the
-      // content they were dispatched against.
-      const existing = await tx
-        .select({ id: policySnapshots.id })
-        .from(policySnapshots)
-        .where(
-          and(
-            eq(policySnapshots.assistantVersionId, versionId),
-            eq(policySnapshots.hash, version.hash),
-          ),
-        )
-        .limit(1);
-      if (existing.length > 0) {
-        return; // snapshot already reflects this exact content
-      }
-      const payload: AssistantPayload = {
-        model_policy: version.modelPolicy as AssistantPayload['model_policy'],
-        context_policy: version.contextPolicy as AssistantPayload['context_policy'],
-        tool_policy: version.toolPolicy as AssistantPayload['tool_policy'],
-        knowledge_policy: (version.knowledgePolicy ??
-          undefined) as AssistantPayload['knowledge_policy'],
-        guardrail_policy: version.guardrailPolicy as AssistantPayload['guardrail_policy'],
-        instructions: (version.instructions ?? undefined) as AssistantPayload['instructions'],
-        model_params: (version.modelParams ?? undefined) as AssistantPayload['model_params'],
-        budget_policy: (version.budgetPolicy ?? undefined) as AssistantPayload['budget_policy'],
-        brand: (version.brand ?? undefined) as AssistantPayload['brand'],
-      };
-      const validated = validateAssistantPayload(payload);
-      if (!validated.ok) {
-        throw ApiError.validation({ assistant: validated.issues });
-      }
-      const manifest = await this.manifests.resolveForPublish(
-        tx,
-        orgId,
-        assistantId,
-        validated.normalized,
-      );
-      const snapshotValues = {
-        organizationId: orgId,
-        assistantVersionId: versionId,
-        snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
-        modelPolicy: version.modelPolicy,
-        contextPolicy: version.contextPolicy,
-        toolPolicy: version.toolPolicy,
-        guardrailPolicy: version.guardrailPolicy,
-        knowledgePolicy: version.knowledgePolicy ?? null,
-        instructions: version.instructions ?? null,
-        modelParams: version.modelParams ?? null,
-        budgetPolicy: version.budgetPolicy ?? null,
-        brand: version.brand ?? null,
-        hash: version.hash,
-        toolBindings: manifest.toolBindings,
-        knowledgePins: manifest.knowledgePins,
-        modelRef: manifest.modelRef,
-        templateRef: manifest.templateRef,
-        manifestHash: manifest.manifestHash,
-      };
-      // Immutable rows: a new content hash always INSERTS. The unique key is
-      // (assistant_version_id, hash) — concurrent inserts of the same
-      // content resolve via on-conflict-do-nothing below.
-      await tx
-        .insert(policySnapshots)
-        .values(snapshotValues)
-        .onConflictDoNothing({ target: [policySnapshots.assistantVersionId, policySnapshots.hash] });
-    });
+    // Synthesis owns its own transaction in the repository and commits
+    // before any caller pins the row (see the doc comment above).
+    await this.snapshots.synthesizeSnapshotForVersion({ orgId, assistantId, versionId });
   }
 
   /**
@@ -1655,19 +1220,6 @@ export class AssistantsService {
   }
 
   /**
-   * Shared publish/rollback commit — version row + resolved snapshot + active
-   * pointer in ONE transaction (caller holds the advisory lock).
-   *
-   * In-TX gates (no TOCTOU against concurrent publishes of this assistant):
-   *  - no-op guard (active pointer already carries the payload),
-   *  - BLOCK gate (TPL-6.1): content whose hash matches a BLOCK-decided eval
-   *    run can never publish again — critical failures are mathematically
-   *    unpublishable. (Concurrent eval completion racing this TX is covered
-   *    by the release-pointer gate at promotion time.)
-   * Resolution failures (missing pins, drifted catalog) abort the TX —
-   * nothing half-publishes.
-   */
-  /**
    * Post-commit degraded-knowledge audit. Reads the COMMITTED snapshot (no
    * TOCTOU — the gate already enforced inside the TX) and records the
    * acknowledged slugs only when the bypass flag was actually set. Silent
@@ -1675,6 +1227,7 @@ export class AssistantsService {
    */
   private async auditDegradedBypass(
     orgId: string,
+    assistantId: string,
     versionId: string,
     actorId: string,
     acknowledged: boolean,
@@ -1682,27 +1235,10 @@ export class AssistantsService {
     if (!acknowledged) {
       return;
     }
-    const snapRows = await this.db.withOrg(orgId, async (tx) => {
-      // The COMMITTED snapshot: the row matching the version's live hash
-      // (content-addressed, drizzle/0069 — older rows are immutable history).
-      const vRows = await tx
-        .select({ hash: assistantVersions.hash })
-        .from(assistantVersions)
-        .where(and(eq(assistantVersions.id, versionId), eq(assistantVersions.organizationId, orgId)))
-        .limit(1);
-      if (vRows.length === 0) return [];
-      return tx
-        .select({ knowledgePins: policySnapshots.knowledgePins })
-        .from(policySnapshots)
-        .where(
-          and(
-            eq(policySnapshots.assistantVersionId, versionId),
-            eq(policySnapshots.hash, vRows[0].hash),
-          ),
-        )
-        .limit(1);
-    });
-    const pins = { knowledgePins: (snapRows[0]?.knowledgePins ?? []) as never };
+    // The COMMITTED snapshot: the row matching the version's live hash
+    // (content-addressed, drizzle/0069 — older rows are immutable history).
+    const snap = await this.snapshots.getSnapshotForVersion(orgId, assistantId, versionId);
+    const pins = { knowledgePins: (snap?.knowledgePins ?? []) as never };
     const slugs = unresolvedPinSlugs(pins);
     // P0: the bypass may have covered indexing gaps rather than (or as well
     // as) unresolved slugs — record both so the audit names what was waived.
@@ -1720,149 +1256,6 @@ export class AssistantsService {
     });
   }
 
-  private async insertPublishedVersion(
-    tx: NodePgDatabase,
-    input: {
-      orgId: string;
-      assistantId: string;
-      version: number;
-      schemaVersion: number;
-      normalized: AssistantPayload;
-      publishedBy: string;
-      rollbackOf: string | null;
-      /** P6: content lineage (draft fork point, or restored version). */
-      parentVersionId: string | null;
-      acknowledgeDegradedKnowledge: boolean;
-    },
-  ): Promise<AssistantVersion> {
-    const hash = hashPayload(input.normalized);
-    // P4: manifest resolves BEFORE the no-op guard — the guard compares
-    // RESOLVED SETS, not content. Identical content over a drifted catalog
-    // (perimeter, pins, model refs) is a legitimate re-publish (re-pin),
-    // not a no-op. Eval gates below stay content-hash keyed (decisions judge
-    // content, and a bad payload must not re-enter under a fresh manifest).
-    const manifest = await this.manifests.resolveForPublish(
-      tx,
-      input.orgId,
-      input.assistantId,
-      input.normalized,
-    );
-    await this.rejectNoOpPublish(tx, input.assistantId, hash, manifest.manifestHash);
-    await this.rejectBlockedContent(tx, input.orgId, input.assistantId, hash);
-    // REL-3.2 (D1 adopted): a template release_policy that declares required
-    // checks makes a fresh PASS evaluation a publish precondition — the
-    // BLOCK gate alone was vacuous while nothing executed (GAP-04).
-    await this.rejectUnmetRequiredChecks(tx, input.orgId, input.assistantId, hash);
-    // Degraded-knowledge gate: unresolved pins mean the agent would ship
-    // without context the maker assumes it has (retrieval fails closed).
-    // Refuse with the slugs — unless explicitly acknowledged (audited at the
-    // call site from the committed snapshot).
-    // P0 (GAP-1): undercovered pins join the same gate. A READY document
-    // whose pinned version is not fully embedded for the active model scores
-    // NOTHING at retrieval — shipping it is the same class of silent context
-    // loss as an unresolved slug. Same flag acknowledges both; the message
-    // names which slugs and how many chunks are still indexing.
-    const degraded = unresolvedPinSlugs(manifest);
-    const undercovered = undercoveredPinSlugs(manifest);
-    if ((degraded.length > 0 || undercovered.length > 0) && !input.acknowledgeDegradedKnowledge) {
-      const parts: string[] = [];
-      if (degraded.length > 0) {
-        parts.push(`unresolved knowledge sources cannot publish: ${degraded.join(', ')}`);
-      }
-      for (const pin of undercovered) {
-        parts.push(
-          `${pin.slug}: vectors indexing for model ${pin.model} (${pin.embedded}/${pin.total} chunks)`,
-        );
-      }
-      throw ApiError.validation({
-        knowledge_pins: `${parts.join('; ')} — ingest and map the documents (or wait for indexing), or acknowledge degraded knowledge explicitly`,
-      });
-    }
-    const rows = await tx
-      .insert(assistantVersions)
-      .values({
-        assistantId: input.assistantId,
-        organizationId: input.orgId,
-        version: input.version,
-        schemaVersion: input.schemaVersion,
-        status: 'PUBLISHED',
-        modelPolicy: input.normalized.model_policy,
-        contextPolicy: input.normalized.context_policy,
-        toolPolicy: input.normalized.tool_policy,
-        knowledgePolicy: input.normalized.knowledge_policy ?? null,
-        guardrailPolicy: input.normalized.guardrail_policy,
-        instructions: input.normalized.instructions ?? null,
-        modelParams: input.normalized.model_params ?? null,
-        budgetPolicy: input.normalized.budget_policy ?? null,
-        brand: input.normalized.brand ?? null,
-        rollbackOf: input.rollbackOf,
-        parentVersionId: input.parentVersionId,
-        hash,
-        publishedAt: new Date().toISOString(),
-        publishedBy: input.publishedBy,
-      })
-      .returning();
-    const inserted = rows[0];
-
-    // Snapshot materialized in the same TX as publish — the pinning
-    // authority Phase 4 runs reference (pinned decision, ledger 3.1),
-    // now carrying the fully resolved set (TPL-5.2 … TPL-5.5).
-    await tx.insert(policySnapshots).values({
-      organizationId: input.orgId,
-      assistantVersionId: inserted.id,
-      snapshotVersion: POLICY_SNAPSHOT_SCHEMA_VERSION,
-      modelPolicy: input.normalized.model_policy,
-      contextPolicy: input.normalized.context_policy,
-      toolPolicy: input.normalized.tool_policy,
-      guardrailPolicy: input.normalized.guardrail_policy,
-      knowledgePolicy: input.normalized.knowledge_policy ?? null,
-      instructions: input.normalized.instructions ?? null,
-      modelParams: input.normalized.model_params ?? null,
-      budgetPolicy: input.normalized.budget_policy ?? null,
-      brand: input.normalized.brand ?? null,
-      hash,
-      toolBindings: manifest.toolBindings,
-      knowledgePins: manifest.knowledgePins,
-      modelRef: manifest.modelRef,
-      templateRef: manifest.templateRef,
-      manifestHash: manifest.manifestHash,
-    });
-
-    // P5 (degraded lifecycle): a publish that WAIVED degraded pins starts a
-    // 7-day clock instead of a silent waiver; a healthy publish clears it.
-    // Reaching here with degraded/undercovered non-empty implies the bypass
-    // flag (the gate above threw otherwise).
-    const waived = degraded.length > 0 || undercovered.length > 0;
-    if (waived) {
-      const waivedSlugs = [
-        ...degraded.map((s) => `unresolved:${s}`),
-        ...undercovered.map((p) => `${p.slug}:${p.embedded}/${p.total}`),
-      ];
-      await tx
-        .update(assistants)
-        .set({
-          activeVersionId: inserted.id,
-          degradedUntil: new Date(Date.now() + 7 * 86_400_000).toISOString(),
-          degradedReason: waivedSlugs.join('; ').slice(0, 512),
-          degradedAlertedAt: null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(assistants.id, input.assistantId));
-    } else {
-      await tx
-        .update(assistants)
-        .set({
-          activeVersionId: inserted.id,
-          degradedUntil: null,
-          degradedReason: null,
-          degradedAlertedAt: null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(assistants.id, input.assistantId));
-    }
-
-    return inserted;
-  }
 
   /**
    * P5 (degraded lifecycle) — sweep overdue + due-soon degraded assistants.
@@ -1881,179 +1274,43 @@ export class AssistantsService {
   }> {
     const suspended: Array<{ orgId: string; assistantId: string; name: string }> = [];
     const dueSoon: Array<{ orgId: string; assistantId: string; name: string }> = [];
-    const orgFilter = (alias: string) =>
-      input.orgId === undefined
-        ? sql``
-        : sql`and ${sql.raw(alias)}.organization_id = ${input.orgId}::uuid`;
-    const overdue = await this.db.withBypass(async (tx) => {
-      const rows = await tx.execute(sql`
-        select id, organization_id, name from assistants
-        where degraded_until is not null
-          and degraded_until < now()
-          and disabled_at is null
-          ${orgFilter('assistants')}
-        limit 100
-        for update skip locked
-      `);
-      return rows.rows as Array<{ id: string; organization_id: string; name: string }>;
-    });
+    // Claim + mark live in the repository (bypass boundary, FOR UPDATE
+    // SKIP LOCKED); the disable path stays the audited service method.
+    const overdue = await this.assistants.claimOverdueDegradedAssistants({ orgId: input.orgId });
     for (const row of overdue) {
       try {
         await this.setDisabled({
-          orgId: row.organization_id,
-          assistantId: row.id,
+          orgId: row.orgId,
+          assistantId: row.assistantId,
           disabled: true,
           reason:
             'degraded knowledge unresolved past the 7-day waiver — fix the pins and re-enable',
           actorId: 'system:degraded-sweep',
         });
-        suspended.push({ orgId: row.organization_id, assistantId: row.id, name: row.name });
+        suspended.push({ orgId: row.orgId, assistantId: row.assistantId, name: row.name });
       } catch {
         // Per-candidate isolation (a concurrent disable/rename just skips).
       }
     }
-    const soon = await this.db.withBypass(async (tx) => {
-      const rows = await tx.execute(sql`
-        select id, organization_id, name from assistants
-        where degraded_until is not null
-          and degraded_until >= now()
-          and degraded_until < now() + interval '24 hours'
-          and degraded_alerted_at is null
-          and disabled_at is null
-          ${orgFilter('assistants')}
-        limit 100
-        for update skip locked
-      `);
-      return rows.rows as Array<{ id: string; organization_id: string; name: string }>;
-    });
+    const soon = await this.assistants.claimDueSoonDegradedAssistants({ orgId: input.orgId });
     for (const row of soon) {
       try {
-        await this.db.withBypass(async (tx) => {
-          await tx.execute(sql`
-            update assistants set degraded_alerted_at = now()
-            where id = ${row.id}::uuid and degraded_alerted_at is null
-          `);
-        });
+        await this.assistants.markDegradedAlerted(row.assistantId);
         await this.audit.add({
           action: 'assistant.degraded_warning',
           resourceType: 'assistant',
-          resourceId: row.id,
+          resourceId: row.assistantId,
           actorType: 'service',
           actorId: 'system:degraded-sweep',
-          tenantId: row.organization_id,
+          tenantId: row.orgId,
           details: {},
         });
-        dueSoon.push({ orgId: row.organization_id, assistantId: row.id, name: row.name });
+        dueSoon.push({ orgId: row.orgId, assistantId: row.assistantId, name: row.name });
       } catch {
         // Per-candidate isolation.
       }
     }
     return { suspended, dueSoon };
-  }
-
-  /**
-   * REL-3.2 — the release-policy publish gate (D1 adopted, report §6.4.1).
-   * When the version's source template declares `required` checks in its
-   * release_policy, publishing demands the latest eval decision on THIS
-   * content hash to be PASS (WARN/BLOCK/absent all refuse). Templates
-   * without declared checks keep the legacy posture (BLOCK gate only) —
-   * the policy declares the bar; the gate enforces it. Canary WARN
-   * leniency is moot at publish time: a canary promotes a version that
-   * already had to PASS here.
-   */
-  private async rejectUnmetRequiredChecks(
-    tx: NodePgDatabase,
-    orgId: string,
-    assistantId: string,
-    hash: string,
-  ): Promise<void> {
-    // Rule lives in release-gate.ts (REL-3.3 matrix) — this stays a thin
-    // throw-wrapper so the publish path and the tested evaluator cannot drift.
-    // Throwing on either refusal is behavior-preserving here: the BLOCK gate
-    // runs first in the publish sequence, so by the time this runs the BLOCK
-    // branch cannot fire — unless the caller sequence changes, in which case
-    // refusing is still the fail-closed answer.
-    const refusal = await evaluatePublishGate(tx, orgId, assistantId, hash);
-    if (refusal) {
-      throwGateRefusal(refusal, assistantId);
-    }
-  }
-
-  /**
-   * BLOCK gate (TPL-6.1): the LATEST completed eval decision for this content
-   * hash must not be BLOCK — critical failures are mathematically unpublishable
-   * while they stand. Keyed by CONTENT hash (not row id), so the same bad
-   * payload cannot re-enter through rollback-as-new or a fresh draft either.
-   * "Latest wins" is deliberate: a re-evaluation that passes clears an earlier
-   * BLOCK — publishability tracks the current verdict, not history.
-   */
-  private async rejectBlockedContent(
-    tx: NodePgDatabase,
-    orgId: string,
-    assistantId: string,
-    hash: string,
-  ): Promise<void> {
-    // Same evaluator as the required-checks gate (REL-3.3): in publish
-    // sequence this runs first, so a BLOCK refusal surfaces here with the
-    // BLOCK message before the required-checks rule is ever consulted.
-    const refusal = await evaluatePublishGate(tx, orgId, assistantId, hash);
-    if (refusal && refusal.gate === 'blocked_content') {
-      throwGateRefusal(refusal, assistantId);
-    }
-  }
-
-  /**
-   * Publish/rollback that would change NOTHING is a no-op — rejected as a
-   * conflict. Compared on content hash AND resolved-set hash jointly:
-   * - same content + same manifest → true no-op (the concurrent-publish
-   *   race lands here deterministically);
-   * - same content + drifted manifest (perimeter widened, pins re-resolved,
-   *   model refs moved) → legitimate re-publish that re-pins the world
-   *   (refusing it would strand operators with no path to re-pin);
-   * - different content → legitimate publish even when the resolved set is
-   *   untouched (the manifest hash covers pins/bindings/refs, NOT the
-   *   prompt or params — prompt-only iteration must always publish).
-   * Restoring a payload that exists on a non-active PUBLISHED row is
-   * legitimate (that is what rollback is for), so only the active pointer
-   * is compared. Legacy snapshots without a manifest hash fall back to the
-   * content comparison (their historical behavior, unchanged).
-   */
-  private async rejectNoOpPublish(
-    tx: NodePgDatabase,
-    assistantId: string,
-    hash: string,
-    manifestHash: string | null,
-  ): Promise<void> {
-    const rows = await tx.execute(sql`
-      select av.hash as active_hash, ps.manifest_hash as active_manifest_hash
-      from assistants a
-      left join assistant_versions av on av.id = a.active_version_id
-      left join policy_snapshots ps on ps.assistant_version_id = av.id and ps.hash = av.hash
-      where a.id = ${assistantId}::uuid
-      limit 1
-    `);
-    const row = (
-      rows.rows as Array<{ active_hash: string | null; active_manifest_hash: string | null }>
-    )[0];
-    if (!row || row.active_hash === null) {
-      return;
-    }
-    if (row.active_hash !== hash) {
-      return;
-    }
-    if (row.active_manifest_hash === null || manifestHash === null) {
-      throw ApiError.conflict('assistant active version already carries this payload', {
-        assistant_id: assistantId,
-      });
-    }
-    if (row.active_manifest_hash === manifestHash) {
-      throw ApiError.conflict(
-        'assistant active version already carries this payload and resolved set',
-        {
-          assistant_id: assistantId,
-        },
-      );
-    }
   }
 
   private async requireAssistant(orgId: string, assistantId: string): Promise<Assistant> {
@@ -2084,30 +1341,25 @@ function assertUuid(id: string): void {
  */
 
 /**
- * Unique-violation mapping for the assistant identity plane (never leak a raw
- * 23505): the org-name unique index is a caller-fixable conflict; the draft
- * sentinel collision (uq_assistant_versions_assistant_version on version=0)
- * means a DRAFT already exists — publish or delete it first.
+ * Normalize a validated payload into the repository's version-values
+ * shape (snake_case → column values). Hash and parentVersionId are
+ * supplied per-call because they differ by path (create: fresh hash, no
+ * parent; updateDraft: rebased parent).
  */
-function mapAssistantUniqueViolation(err: unknown, name: string): unknown {
-  // drizzle wraps driver errors (DrizzleQueryError.cause) — read code via pgViolation or raw 23505s escape.
-  const pg = pgViolation(err);
-  if (pg.code !== '23505') {
-    return err;
-  }
-  if (pg.constraint === 'uq_assistants_org_name') {
-    return ApiError.conflict(
-      'assistant name already taken in this organization — supply a distinct name',
-      { name },
-    );
-  }
-  if (pg.constraint === 'uq_assistant_versions_assistant_version') {
-    return ApiError.conflict(
-      'a draft version already exists for this assistant — publish or delete it before drafting another',
-      { reason: 'draft_exists' },
-    );
-  }
-  return err;
+function toVersionPayloadValues(
+  normalized: AssistantPayload,
+): Omit<VersionPayloadValues, 'parentVersionId' | 'hash'> {
+  return {
+    modelPolicy: normalized.model_policy,
+    contextPolicy: normalized.context_policy,
+    toolPolicy: normalized.tool_policy,
+    knowledgePolicy: normalized.knowledge_policy ?? null,
+    guardrailPolicy: normalized.guardrail_policy,
+    instructions: normalized.instructions ?? null,
+    modelParams: normalized.model_params ?? null,
+    budgetPolicy: normalized.budget_policy ?? null,
+    brand: normalized.brand ?? null,
+  };
 }
 
 function assertName(name: string): void {

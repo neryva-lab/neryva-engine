@@ -1,11 +1,9 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
-import { DbService } from '../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { REEMBED_REPOSITORY } from '../modules/knowledge/repositories/repository-tokens';
+import type { IReEmbedRepository } from '../modules/knowledge/repositories/reembed.repository';
 import { env } from '../common/config/env';
-import { documents, embeddings } from '../modules/knowledge/schema';
 import { EmbeddingService } from '../modules/knowledge/embedding.service';
 import { ConfigPublishService } from '../modules/config-publish/config-publish.service';
-import { uuidv7 } from '../common/ids/uuidv7';
 
 /**
  * Re-embed worker (FL-2.2) — resumable, batched re-indexing when an org's
@@ -27,7 +25,7 @@ export class ReEmbedWorker implements OnModuleInit, OnModuleDestroy {
   private ticking = false;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(REEMBED_REPOSITORY) private readonly reembed: IReEmbedRepository,
     private readonly embedding: EmbeddingService,
     private readonly configPublish: ConfigPublishService,
   ) {}
@@ -49,15 +47,7 @@ export class ReEmbedWorker implements OnModuleInit, OnModuleDestroy {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      const orgs = await this.db.withBypass(async (tx) => {
-        const rows = await tx.execute(sql`
-          select distinct d.organization_id as org_id
-          from documents d
-          where d.state = 'ready'
-          limit 500
-        `);
-        return (rows.rows as Array<{ org_id: string }>).map((r) => r.org_id);
-      });
+      const orgs = await this.reembed.listReadyOrgIds(500);
       for (const orgId of orgs) {
         await this.reembedOrg(orgId);
       }
@@ -78,19 +68,7 @@ export class ReEmbedWorker implements OnModuleInit, OnModuleDestroy {
     const configured = String((config.payload as { embedding_model?: string }).embedding_model ?? '');
     const effective = configured || this.embedding.model;
 
-    const pending = await this.db.withOrg(orgId, async (tx) =>
-      tx
-        .select({ id: documents.id })
-        .from(documents)
-        .where(
-          and(
-            eq(documents.organizationId, orgId),
-            eq(documents.state, 'ready'),
-            sql`(${documents.embeddingModel} is null or ${documents.embeddingModel} <> ${effective})`,
-          ),
-        )
-        .limit(env.WORKERS__REEMBED_BATCH),
-    );
+    const pending = await this.reembed.listPendingDocuments(orgId, effective, env.WORKERS__REEMBED_BATCH);
 
     for (const doc of pending) {
       // P0: per-document isolation — a parity failure (or any transient) on
@@ -106,88 +84,33 @@ export class ReEmbedWorker implements OnModuleInit, OnModuleDestroy {
 
   /** Atomic per-document swap: new vectors in, old sweep + pointer flip in one TX. */
   private async reembedDocument(orgId: string, documentId: string, targetModel: string): Promise<void> {
-    await this.db.withOrg(orgId, async (tx) => {
-      const chunkRows = await tx.execute(sql`
-        select c.id as chunk_id, c.text as text
-        from chunks c
-        join document_versions dv on dv.id = c.document_version_id
-        join documents d on d.id = dv.document_id
-        where d.id = ${documentId}::uuid
-        order by c.sequence
-      `);
-      const rows = chunkRows.rows as Array<{ chunk_id: string; text: string }>;
-      if (rows.length === 0) {
-        await tx
-          .update(documents)
-          .set({ embeddingModel: targetModel, updatedAt: new Date().toISOString() })
-          .where(eq(documents.id, documentId));
-        return;
+    const chunks = await this.reembed.listDocumentChunks(orgId, documentId);
+    const vectors =
+      chunks.length === 0 ? [] : await this.embedding.embed(chunks.map((c) => c.text));
+    const pairs: Array<{ chunkId: string; vector: number[] }> = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const vec = vectors[i];
+      if (!chunk || !vec) {
+        continue;
       }
-      const vectors = await this.embedding.embed(rows.map((r) => r.text));
-      for (let i = 0; i < rows.length; i++) {
-        const chunk = rows[i];
-        const vec = vectors[i];
-        if (!chunk || !vec) {
-          continue;
-        }
-        await tx
-          .insert(embeddings)
-          .values({
-            id: uuidv7(),
-            chunkId: chunk.chunk_id,
-            organizationId: orgId,
-            model: targetModel,
-            embedding: vec,
-          })
-          .onConflictDoNothing();
-      }
-      // P0 (GAP-1) — chunk-count parity BEFORE the pointer flip: every chunk
-      // of the document must carry a target-model row, or the flip would mark
-      // a partially-indexed document complete (and the publish coverage gate
-      // would refuse on it forever until the next tick). Mismatch throws
-      // retryable — the document stays pending and converges next tick
-      // (uq_embeddings_chunk makes the re-inserts idempotent).
-      const parity = await tx.execute(sql`
-        select count(c.id)::int as total,
-               count(e.id)::int as embedded
-        from chunks c
-        join document_versions dv on dv.id = c.document_version_id
-        left join embeddings e on e.chunk_id = c.id and e.model = ${targetModel}
-        where dv.document_id = ${documentId}::uuid
-      `);
-      const parityRow = (parity.rows as Array<{ total: number; embedded: number }>)[0];
-      const total = Number(parityRow?.total ?? 0);
-      const embedded = Number(parityRow?.embedded ?? 0);
-      if (embedded !== total) {
-        throw new Error(`re-embed parity failed for document ${documentId} on ${targetModel} (${embedded}/${total} chunks) — retrying next tick`);
-      }
-      // Pointer flip + old-model cleanup — one TX with the inserts above.
-      await tx
-        .update(documents)
-        .set({ embeddingModel: targetModel, updatedAt: new Date().toISOString() })
-        .where(eq(documents.id, documentId));
-      const oldModels = await tx.execute(sql`
-        select distinct e.model as model
-        from embeddings e
-        join chunks c on c.id = e.chunk_id
-        join document_versions dv on dv.id = c.document_version_id
-        where dv.document_id = ${documentId}::uuid and e.model <> ${targetModel}
-      `);
-      const stale = (oldModels.rows as Array<{ model: string }>).map((r) => r.model);
-      if (stale.length > 0) {
-        await tx.execute(sql`
-          delete from embeddings e
-          using chunks c, document_versions dv
-          where e.chunk_id = c.id
-            and c.document_version_id = dv.id
-            and dv.document_id = ${documentId}::uuid
-            and e.model in (${sql.join(
-              stale.map((m) => sql`${m}`),
-              sql`, `,
-            )})
-        `);
-      }
-      ReEmbedWorker.logger.log(`document ${documentId} re-embedded on ${targetModel} (${rows.length} chunks, ${stale.length} stale model(s) swept)`);
+      pairs.push({ chunkId: chunk.chunkId, vector: vec });
+    }
+    // The repository owns the atomic swap: target-model inserts, chunk-count
+    // parity BEFORE the pointer flip (mismatch throws retryable — the
+    // document stays pending and converges next tick), pointer flip, and
+    // stale-model sweep, all in one TX. Zero-chunk documents flip directly.
+    const result = await this.reembed.swapDocumentEmbeddings({
+      orgId,
+      documentId,
+      targetModel,
+      vectors: pairs,
+      at: new Date(),
     });
+    if (result.chunks > 0) {
+      ReEmbedWorker.logger.log(
+        `document ${documentId} re-embedded on ${targetModel} (${result.chunks} chunks, ${result.staleModelsSwept} stale model(s) swept)`,
+      );
+    }
   }
 }

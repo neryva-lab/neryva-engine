@@ -1,12 +1,11 @@
 import { randomBytes } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
-import { orgServiceAccounts } from './schema';
+import { SERVICE_ACCOUNT_REPOSITORY } from './repositories/repository-tokens';
+import type { IServiceAccountRepository, ServiceAccountRow } from './repositories/service-account.repository';
 
 export const SERVICE_ACCOUNT_TOKEN_PREFIX = 'nrv_sa_';
 
@@ -45,26 +44,22 @@ const MAX_SCOPES = 32;
 @Injectable()
 export class OrgServiceAccountsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(SERVICE_ACCOUNT_REPOSITORY) private readonly serviceAccounts: IServiceAccountRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
   ) {}
 
   async list(orgId: string): Promise<ServiceAccountView[]> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(orgServiceAccounts).where(eq(orgServiceAccounts.orgId, orgId)).orderBy(desc(orgServiceAccounts.createdAt)),
-    );
+    const rows = await this.serviceAccounts.listServiceAccounts(orgId);
     return rows.map(toView);
   }
 
   async get(orgId: string, id: string): Promise<ServiceAccountView> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(orgServiceAccounts).where(and(eq(orgServiceAccounts.id, id), eq(orgServiceAccounts.orgId, orgId))).limit(1),
-    );
-    if (!rows[0]) {
+    const row = await this.serviceAccounts.getServiceAccount(orgId, id);
+    if (!row) {
       throw new NotFoundException('service account');
     }
-    return toView(rows[0]);
+    return toView(row);
   }
 
   async create(input: { orgId: string; name: string; description?: string; scopes: string[]; actorId: string }): Promise<{ view: ServiceAccountView; token: string; note: string }> {
@@ -75,31 +70,26 @@ export class OrgServiceAccountsService {
     const scopes = this.validateScopes(input.scopes);
 
     const token = `${SERVICE_ACCOUNT_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(orgServiceAccounts)
-        .values({
-          orgId: input.orgId,
-          name,
-          description: input.description?.slice(0, 512) ?? null,
-          scopes,
-          tokenHash: sha256Hex(token),
-          tokenPrefix: token.slice(0, SERVICE_ACCOUNT_TOKEN_PREFIX.length + 8),
-          tokenLastRotatedAt: new Date().toISOString(),
-          createdBy: input.actorId,
-        })
-        .returning(),
-    );
+    const inserted = await this.serviceAccounts.createServiceAccount({
+      orgId: input.orgId,
+      name,
+      description: input.description?.slice(0, 512) ?? null,
+      scopes,
+      tokenHash: sha256Hex(token),
+      tokenPrefix: token.slice(0, SERVICE_ACCOUNT_TOKEN_PREFIX.length + 8),
+      tokenLastRotatedAt: new Date().toISOString(),
+      createdBy: input.actorId,
+    });
     await this.audit.add({
       action: 'org.service_account_created',
       resourceType: 'org_service_account',
-      resourceId: inserted[0].id,
+      resourceId: inserted.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
-      details: { name, scopes, token_prefix: inserted[0].tokenPrefix },
+      details: { name, scopes, token_prefix: inserted.tokenPrefix },
     });
-    return { view: toView(inserted[0]), token, note: 'store this token now — it is never shown again' };
+    return { view: toView(inserted), token, note: 'store this token now — it is never shown again' };
   }
 
   /**
@@ -108,10 +98,7 @@ export class OrgServiceAccountsService {
    * previous token is the swap itself — there is at most one live token.
    */
   async rotateToken(input: { orgId: string; id: string; actorId: string }): Promise<{ token: string; note: string }> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(orgServiceAccounts).where(and(eq(orgServiceAccounts.id, input.id), eq(orgServiceAccounts.orgId, input.orgId))).limit(1),
-    );
-    const sa = rows[0];
+    const sa = await this.serviceAccounts.getServiceAccount(input.orgId, input.id);
     if (!sa) {
       throw ApiError.notFound('service account');
     }
@@ -120,20 +107,18 @@ export class OrgServiceAccountsService {
     }
     const token = `${SERVICE_ACCOUNT_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
     const now = new Date().toISOString();
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgServiceAccounts)
-        .set({
-          tokenHash: sha256Hex(token),
-          tokenPrefix: token.slice(0, SERVICE_ACCOUNT_TOKEN_PREFIX.length + 8),
-          tokenExpiresAt: null,
-          tokenLastRotatedAt: now,
-          updatedAt: now,
-        })
-        .where(and(eq(orgServiceAccounts.id, sa.id), eq(orgServiceAccounts.tokenHash, sa.tokenHash ?? '')))
-        .returning({ id: orgServiceAccounts.id }),
-    );
-    if (updated.length !== 1) {
+    // The repository returns false when the expected-hash predicate matched
+    // nothing (stale hash) — the same 409 the pg compare-and-swap produced.
+    const swapped = await this.serviceAccounts.rotateTokenHash({
+      orgId: input.orgId,
+      id: sa.id,
+      expectedTokenHash: sa.tokenHash,
+      tokenHash: sha256Hex(token),
+      tokenPrefix: token.slice(0, SERVICE_ACCOUNT_TOKEN_PREFIX.length + 8),
+      tokenLastRotatedAt: now,
+      updatedAt: now,
+    });
+    if (!swapped) {
       throw ApiError.conflict('token changed concurrently — reload and retry');
     }
     await this.audit.add({
@@ -156,12 +141,7 @@ export class OrgServiceAccountsService {
       throw ApiError.conflict('service account has no active token');
     }
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgServiceAccounts)
-        .set({ tokenHash: null, tokenPrefix: null, tokenExpiresAt: null, updatedAt: now })
-        .where(and(eq(orgServiceAccounts.id, input.id), eq(orgServiceAccounts.orgId, input.orgId))),
-    );
+    await this.serviceAccounts.revokeToken(input.orgId, input.id, now);
     await this.audit.add({
       action: 'org.service_account_token_revoked',
       resourceType: 'org_service_account',
@@ -175,12 +155,7 @@ export class OrgServiceAccountsService {
   async disable(input: { orgId: string; id: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.id);
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgServiceAccounts)
-        .set({ status: 'disabled', tokenHash: null, tokenPrefix: null, tokenExpiresAt: null, updatedAt: now })
-        .where(and(eq(orgServiceAccounts.id, input.id), eq(orgServiceAccounts.orgId, input.orgId))),
-    );
+    await this.serviceAccounts.disableServiceAccount(input.orgId, input.id, now);
     await this.audit.add({
       action: 'org.service_account_disabled',
       resourceType: 'org_service_account',
@@ -195,12 +170,7 @@ export class OrgServiceAccountsService {
   async enable(input: { orgId: string; id: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.id);
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgServiceAccounts)
-        .set({ status: 'active', updatedAt: now })
-        .where(and(eq(orgServiceAccounts.id, input.id), eq(orgServiceAccounts.orgId, input.orgId))),
-    );
+    await this.serviceAccounts.enableServiceAccount(input.orgId, input.id, now);
     await this.audit.add({
       action: 'org.service_account_enabled',
       resourceType: 'org_service_account',
@@ -214,9 +184,7 @@ export class OrgServiceAccountsService {
 
   async remove(input: { orgId: string; id: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.id);
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.delete(orgServiceAccounts).where(and(eq(orgServiceAccounts.id, input.id), eq(orgServiceAccounts.orgId, input.orgId))),
-    );
+    await this.serviceAccounts.removeServiceAccount(input.orgId, input.id);
     await this.audit.add({
       action: 'org.service_account_deleted',
       resourceType: 'org_service_account',
@@ -228,9 +196,10 @@ export class OrgServiceAccountsService {
   }
 
   /**
-   * AuthGuard lookup: resolve a `nrv_sa_` token by hash. Runs under bypass —
-   * authentication happens before any org context exists; the filter is the
-   * globally-unique unguessable hash (uq_org_service_accounts_token_hash).
+   * AuthGuard lookup: resolve a `nrv_sa_` token by hash. Runs through the
+   * repository's global platform-plane lookup — authentication happens
+   * before any org context exists; the filter is the globally-unique
+   * unguessable hash (uq_org_service_accounts_token_hash).
    */
   async validateByHash(tokenHash: string): Promise<{
     valid: boolean;
@@ -241,10 +210,7 @@ export class OrgServiceAccountsService {
     expiresAt?: string | null;
     reason?: 'unknown' | 'disabled' | 'expired' | 'no_token';
   }> {
-    const rows = await this.db.withBypass((tx) =>
-      tx.select().from(orgServiceAccounts).where(eq(orgServiceAccounts.tokenHash, tokenHash)).limit(1),
-    );
-    const row = rows[0];
+    const row = await this.serviceAccounts.findByTokenHash(tokenHash);
     if (!row) {
       return { valid: false, reason: 'unknown' };
     }
@@ -255,9 +221,7 @@ export class OrgServiceAccountsService {
       return { valid: false, reason: 'expired', serviceAccountId: row.id, orgId: row.orgId };
     }
     // Fire-and-forget usage telemetry (same discipline as L2 keys).
-    void this.db
-      .withBypass((tx) => tx.update(orgServiceAccounts).set({ tokenLastUsedAt: new Date().toISOString() }).where(eq(orgServiceAccounts.id, row.id)))
-      .catch(() => undefined);
+    void this.serviceAccounts.touchTokenLastUsed(row.id, new Date().toISOString()).catch(() => undefined);
     return {
       valid: true,
       serviceAccountId: row.id,
@@ -287,7 +251,7 @@ export class OrgServiceAccountsService {
   }
 }
 
-function toView(row: typeof orgServiceAccounts.$inferSelect): ServiceAccountView {
+function toView(row: ServiceAccountRow): ServiceAccountView {
   return {
     id: row.id,
     name: row.name,

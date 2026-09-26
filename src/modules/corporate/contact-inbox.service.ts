@@ -1,13 +1,12 @@
-import { eq, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
 import { EmailService } from './email/email.service';
 import { SuppressionService } from './suppression.service';
 import { NewsletterService } from './newsletter.service';
-import { contactSubmissions } from './public.schema';
+import { CONTACT_INBOX_REPOSITORY } from './repositories/repository-tokens';
+import type { IContactInboxRepository } from './repositories/contact-inbox.repository';
 
 /**
  * The contact inbox (E-2 to production grade): submissions land public-side
@@ -18,6 +17,9 @@ import { contactSubmissions } from './public.schema';
  *    (the "who contacts us should hear back AND wake a human" pair).
  * opt_in_updates=true flows the sender into the newsletter PENDING state
  * (they still confirm — double opt-in is not bypassed by a checkbox).
+ *
+ * Persistence-blind (P3): all storage goes through `IContactInboxRepository`.
+ * Corporate tables are global (non-tenant).
  */
 export const CONTACT_STATUSES = ['new', 'read', 'replied', 'archived'] as const;
 export type ContactStatus = (typeof CONTACT_STATUSES)[number];
@@ -31,7 +33,7 @@ const CONTACT_TRANSITIONS: Record<ContactStatus, readonly ContactStatus[]> = {
 @Injectable()
 export class ContactInboxService {
   constructor(
-    private readonly db: DbService,
+    @Inject(CONTACT_INBOX_REPOSITORY) private readonly inbox: IContactInboxRepository,
     private readonly audit: AuditService,
     private readonly email: EmailService,
     private readonly suppressions: SuppressionService,
@@ -51,7 +53,7 @@ export class ContactInboxService {
       throw ApiError.validation({ message: 'rejected' });
     }
     const email = input.email.toLowerCase();
-    await this.db.root.insert(contactSubmissions).values({
+    await this.inbox.insertSubmission({
       name: input.name,
       email,
       company: input.company ?? null,
@@ -99,28 +101,11 @@ export class ContactInboxService {
   // ── staff inbox ────────────────────────────────────────────────────────────
 
   async list(filter: { status?: string; q?: string; limit?: number; offset?: number }) {
-    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-    const offset = Math.max(filter.offset ?? 0, 0);
-    const like = filter.q ? `%${filter.q.replace(/[%_]/g, '')}%` : null;
-    const rows = await this.db.root.execute<Record<string, unknown>>(sql`
-      select id, name, email, company, message, status, notes, replied_at, opt_in_updates, created_at
-      from contact_submissions
-      where (${filter.status ?? null}::varchar is null or status = ${filter.status ?? null})
-        and (${like}::varchar is null or email like ${like} or name ilike ${like} or company ilike ${like})
-      order by created_at desc
-      limit ${limit} offset ${offset}
-    `);
-    const total = await this.db.root.execute<{ count: number }>(sql`
-      select count(*)::int as count from contact_submissions
-      where (${filter.status ?? null}::varchar is null or status = ${filter.status ?? null})
-        and (${like}::varchar is null or email like ${like} or name ilike ${like} or company ilike ${like})
-    `);
-    return { submissions: rows.rows, total: total.rows[0]?.count ?? 0, limit, offset };
+    return this.inbox.listSubmissions(filter);
   }
 
   async transition(input: { submissionId: string; target: ContactStatus; notes?: string; actorId: string }) {
-    const rows = await this.db.root.select().from(contactSubmissions).where(eq(contactSubmissions.id, input.submissionId)).limit(1);
-    const submission = rows[0];
+    const submission = await this.inbox.getSubmissionById(input.submissionId);
     if (!submission) {
       throw ApiError.notFound('submission');
     }
@@ -130,14 +115,12 @@ export class ContactInboxService {
     if (submission.status !== input.target && !CONTACT_TRANSITIONS[submission.status as ContactStatus].includes(input.target)) {
       throw ApiError.conflict(`invalid contact transition ${submission.status} -> ${input.target}`);
     }
-    await this.db.root
-      .update(contactSubmissions)
-      .set({
-        status: input.target,
-        ...(input.notes !== undefined ? { notes: input.notes.slice(0, 8000) } : {}),
-        ...(input.target === 'replied' ? { repliedAt: new Date().toISOString() } : {}),
-      })
-      .where(eq(contactSubmissions.id, input.submissionId));
+    await this.inbox.transitionSubmission({
+      submissionId: input.submissionId,
+      target: input.target,
+      notes: input.notes,
+      markReplied: input.target === 'replied',
+    });
     await this.audit.add({
       action: 'corporate.contact_transitioned',
       resourceType: 'contact_submission',

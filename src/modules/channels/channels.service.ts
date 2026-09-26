@@ -1,6 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { env, isProduction } from '../../common/config/env';
@@ -8,21 +6,12 @@ import { uuidv7 } from '../../common/ids/uuidv7';
 import { envelopeDecrypt, envelopeEncrypt, randomToken, constantTimeEquals } from '../../common/infra/crypto/envelope';
 import { EntitlementsService } from '../organizations/entitlements.service';
 import { TemplatesService as AssistantTemplatesService } from '../assistants/templates.service';
-import { assistants } from '../assistants/schema';
-import { channelAccounts, channelSessions, ChannelAccount, ChannelConfig, CHANNEL_PLATFORMS } from './schema';
+import { ASSISTANT_REPOSITORY } from '../assistants/repositories/repository-tokens';
+import type { IAssistantRepository } from '../assistants/repositories/assistant.repository';
+import { ChannelAccount, ChannelConfig, CHANNEL_PLATFORMS } from './schema';
 import { assertAllowedDomainFormat, assertCredentialsShape, isUuid, META_GRAPH_VERSION, NK_KEY_PREFIX } from './dto';
-import { pgViolation } from '../../common/infra/db/pg-types';
-
-/**
- * The DB never returns raw 23505s — an (org, platform, display_name)
- * collision is a client conflict the console can explain.
- */
-function mapAccountUniqueViolation(err: unknown): never {
-  if (pgViolation(err).code === '23505') {
-    throw ApiError.conflict('a channel with this name already exists for this platform');
-  }
-  throw err as Error;
-}
+import { CHANNEL_ACCOUNT_REPOSITORY } from './repositories/repository-tokens';
+import type { IChannelAccountRepository } from './repositories/channel-account.repository';
 
 /**
  * P5-C6: the dto assertion helpers (assertCredentialsShape,
@@ -53,13 +42,18 @@ export function storedConfigForUpdate(
  * Credentials are sealed with the AES-256-GCM envelope at WRITE time and are
  * NEVER returned by any API (only rotate/verify touch them, server-side).
  * Every privileged mutation is audited with ids only.
+ *
+ * Persistence goes through `IChannelAccountRepository` (provider-blind P3
+ * port); the assistant-ownership check goes through `IAssistantRepository`.
+ * This service holds no provider, Drizzle, or SQL references.
  */
 @Injectable()
 export class ChannelsService {
   private static readonly logger = new Logger(ChannelsService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(CHANNEL_ACCOUNT_REPOSITORY) private readonly accounts: IChannelAccountRepository,
+    @Inject(ASSISTANT_REPOSITORY) private readonly assistants: IAssistantRepository,
     private readonly audit: AuditService,
     private readonly entitlements: EntitlementsService,
     private readonly assistantTemplates: AssistantTemplatesService,
@@ -96,38 +90,20 @@ export class ChannelsService {
 
     const sealed = this.sealCredentials(input.platform, input.credentials);
     const accountId = uuidv7();
-    let row: ChannelAccount;
-    try {
-      row = await this.db.withOrg(input.orgId, async (tx) => {
-      const countRows = await tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(channelAccounts)
-        .where(and(eq(channelAccounts.organizationId, input.orgId), sql`${channelAccounts.status} <> 'suspended'`));
-      if (Number(countRows[0]?.n ?? 0) >= cap) {
-        throw ApiError.conflict(`channel account cap reached (${cap})`, { cap });
-      }
-      const verifyToken = input.platform === 'whatsapp' || input.platform === 'messenger' ? randomToken(18) : null;
-      const publicKey = input.platform === 'web' ? NK_KEY_PREFIX + randomToken(18) : null;
-      const rows = await tx
-        .insert(channelAccounts)
-        .values({
-          id: accountId,
-          organizationId: input.orgId,
-          platform: input.platform,
-          displayName: input.displayName,
-          publicKey,
-          credentialsSealed: sealed as never,
-          verifyTokenSealed: verifyToken ? envelopeEncrypt(verifyToken) : null,
-          config: config as never,
-          status: 'pending',
-          createdBy: input.actor,
-        })
-        .returning();
-      return rows[0];
-      });
-    } catch (err) {
-      mapAccountUniqueViolation(err);
-    }
+    const verifyToken = input.platform === 'whatsapp' || input.platform === 'messenger' ? randomToken(18) : null;
+    const publicKey = input.platform === 'web' ? NK_KEY_PREFIX + randomToken(18) : null;
+    const row = await this.accounts.createAccount({
+      orgId: input.orgId,
+      accountId,
+      platform: input.platform,
+      displayName: input.displayName,
+      publicKey,
+      credentialsSealed: sealed,
+      verifyTokenSealed: verifyToken ? envelopeEncrypt(verifyToken) : null,
+      config,
+      createdBy: input.actor,
+      cap,
+    });
     await this.audit.add({
       action: 'channel.account_created',
       resourceType: 'channel_account',
@@ -142,17 +118,14 @@ export class ChannelsService {
 
   async get(orgId: string, accountId: string): Promise<ChannelAccount | null> {
     assertUuid2(orgId, accountId);
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(channelAccounts).where(eq(channelAccounts.id, accountId)).limit(1));
-    return rows[0] ?? null;
+    return this.accounts.getAccount(orgId, accountId);
   }
 
   async list(orgId: string): Promise<ChannelAccount[]> {
     if (!isUuid(orgId)) {
       throw ApiError.validation({ orgId: 'must be a uuid' });
     }
-    return this.db.withOrg(orgId, (tx) =>
-      tx.select().from(channelAccounts).where(eq(channelAccounts.organizationId, orgId)).orderBy(desc(channelAccounts.updatedAt)).limit(200),
-    );
+    return this.accounts.listAccounts(orgId);
   }
 
   /** Public (never-secret) projection for console responses. */
@@ -179,26 +152,11 @@ export class ChannelsService {
     if (config?.default_assistant_id) {
       await this.assertAssistantRoutable(input.orgId, resolved?.platform ?? '', config.default_assistant_id);
     }
-    let rows: ChannelAccount[];
-    try {
-      rows = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .update(channelAccounts)
-          .set({
-            ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-            ...(input.status !== undefined ? { status: input.status } : {}),
-            ...(config !== undefined ? { config: config as never } : {}),
-            updatedAt: new Date().toISOString(),
-          })
-          .where(and(eq(channelAccounts.id, input.accountId), eq(channelAccounts.organizationId, input.orgId)))
-          .returning(),
-      );
-    } catch (err) {
-      mapAccountUniqueViolation(err);
-    }
-    if (rows.length === 0) {
-      throw ApiError.notFound('channel account');
-    }
+    const row = await this.accounts.updateAccount(input.orgId, input.accountId, {
+      ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(config !== undefined ? { config } : {}),
+    });
     await this.audit.add({
       action: 'channel.account_updated',
       resourceType: 'channel_account',
@@ -208,29 +166,12 @@ export class ChannelsService {
       tenantId: input.orgId,
       details: { fields: [input.displayName !== undefined && 'display_name', input.status !== undefined && 'status', config !== undefined && 'config'].filter(Boolean) },
     });
-    return rows[0];
+    return row;
   }
 
   async deactivate(input: { orgId: string; accountId: string; actor: string }): Promise<void> {
     assertUuid2(input.orgId, input.accountId);
-    await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .update(channelAccounts)
-        .set({
-          status: 'suspended',
-          // Credentials are destroyed on deactivate — reconnect re-seals.
-          credentialsSealed: {},
-          verifyTokenSealed: null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(eq(channelAccounts.id, input.accountId), eq(channelAccounts.organizationId, input.orgId)))
-        .returning({ id: channelAccounts.id });
-      if (rows.length === 0) {
-        throw ApiError.notFound('channel account');
-      }
-      // Widget sessions die with the account.
-      await tx.update(channelSessions).set({ status: 'revoked', expiresAt: new Date().toISOString() }).where(eq(channelSessions.channelAccountId, input.accountId));
-    });
+    await this.accounts.deactivateAccount(input.orgId, input.accountId);
     await this.audit.add({
       action: 'channel.account_deactivated',
       resourceType: 'channel_account',
@@ -264,18 +205,11 @@ export class ChannelsService {
     // stays a no-op status-wise for web; credential-bearing platforms still go
     // pending until the new material is verified.
     const reverify = account.platform !== 'web';
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(channelAccounts)
-        .set({
-          credentialsSealed: sealed as never,
-          ...(verifyToken ? { verifyTokenSealed: envelopeEncrypt(verifyToken) } : {}),
-          ...(reverify ? { status: 'pending', health: { last_verified: null } } : {}),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(eq(channelAccounts.id, input.accountId), eq(channelAccounts.organizationId, input.orgId)))
-        .returning(),
-    );
+    const row = await this.accounts.rotateCredentials(input.orgId, input.accountId, {
+      credentialsSealed: sealed,
+      verifyTokenSealed: verifyToken ? envelopeEncrypt(verifyToken) : null,
+      reverify,
+    });
     await this.audit.add({
       action: 'channel.credentials_rotated',
       resourceType: 'channel_account',
@@ -285,7 +219,7 @@ export class ChannelsService {
       tenantId: input.orgId,
       details: { platform: account.platform },
     });
-    return rows[0];
+    return row;
   }
 
   /**
@@ -335,9 +269,7 @@ export class ChannelsService {
       message = `probe failed: ${(err as Error).message.slice(0, 200)}`;
     }
     const health = { last_verified: new Date().toISOString(), ok, message: message.slice(0, 250) };
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(channelAccounts).set({ health: health as never, ...(ok ? { status: 'active' } : {}), updatedAt: new Date().toISOString() }).where(eq(channelAccounts.id, account.id)),
-    );
+    await this.accounts.setHealth(input.orgId, account.id, { health, markActive: ok });
     await this.audit.add({
       action: 'channel.credentials_verified',
       resourceType: 'channel_account',
@@ -406,8 +338,7 @@ export class ChannelsService {
     if (!isUuid(accountId)) {
       return null;
     }
-    const rows = await this.db.withBypass((tx) => tx.select().from(channelAccounts).where(eq(channelAccounts.id, accountId)).limit(1));
-    return rows[0] ?? null;
+    return this.accounts.getAccountByIdForIngest(accountId);
   }
 
   /**
@@ -425,10 +356,7 @@ export class ChannelsService {
     if (typeof publicKey !== 'string' || publicKey.length < 10 || publicKey.length > 64) {
       return null;
     }
-    const rows = await this.db.withBypass((tx) =>
-      tx.select().from(channelAccounts).where(eq(channelAccounts.publicKey, publicKey)).limit(1),
-    );
-    return rows[0] ?? null;
+    return this.accounts.getAccountByPublicKey(publicKey);
   }
 
   decryptCredentials(account: ChannelAccount): Record<string, string> {
@@ -557,8 +485,8 @@ export class ChannelsService {
    *     platforms and undeclared/manual assistants are unconstrained).
    */
   private async assertAssistantRoutable(orgId: string, platform: string, assistantId: string): Promise<void> {
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select({ id: assistants.id }).from(assistants).where(eq(assistants.id, assistantId)).limit(1));
-    if (rows.length === 0) {
+    const assistant = await this.assistants.getAssistant(orgId, assistantId);
+    if (!assistant) {
       throw ApiError.validation({ 'config.default_assistant_id': 'assistant does not exist in this organization' });
     }
     const binding = await this.assistantTemplates.resolveAssistantChannels(orgId, assistantId);

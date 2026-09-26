@@ -1,17 +1,9 @@
-import { and, desc, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
-import { ApiError } from '../../common/http/api-error';
-import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { toolCatalog } from './tool-catalog.schema';
-import { BUILT_IN_TOOLS } from './tool-catalog.service';
-import { assistantInstalls, assistantTemplates } from './schema';
-import { modelCatalogEntries } from './model-catalog.schema';
-import { qualifyModelAliases } from '../../common/model-aliases';
-import { chunks, documents, documentVersions, embeddings } from '../knowledge/schema';
 import type { AssistantPayload } from './validation';
+import { resolveForPublishPg } from './repositories/pg-manifest-resolution';
 
 /**
  * Publish-time dependency resolution — TPL-5.2 … TPL-5.5.
@@ -167,13 +159,6 @@ export function undercoveredPinSlugs(
   return out;
 }
 
-/** Default retry posture, versioned with the snapshot (auditable, overridable later). */
-const RETRY_POLICY_V1 = {
-  READ_ONLY: { max_attempts: 2, backoff_ms: 500 },
-  MUTATING: { max_attempts: 1, backoff_ms: 0 },
-  DESTRUCTIVE: { max_attempts: 1, backoff_ms: 0 },
-} as const;
-
 @Injectable()
 export class ManifestResolutionService {
   constructor(
@@ -181,334 +166,31 @@ export class ManifestResolutionService {
     private readonly configPublish: ConfigPublishService,
   ) {}
 
+  /**
+   * Resolve the publish manifest inside the CALLER's transaction.
+   *
+   * Signature and behavior are unchanged — the SQL now lives in
+   * `resolveForPublishPg` (repositories/pg-manifest-resolution.ts) and this
+   * method supplies the two reads that are deliberately NOT part of the
+   * caller's transaction: the fail-soft config lookup
+   * (`configPublish.latest`, fail-soft by contract) and the platform model
+   * catalog read (`db.root`, cross-org by design — it is the platform
+   * catalog, not tenant data).
+   */
   async resolveForPublish(
     tx: NodePgDatabase,
     orgId: string,
     assistantId: string,
     payload: AssistantPayload,
   ): Promise<ResolvedManifest> {
-    const toolBindings = await this.resolveToolBindings(tx, orgId, payload.tool_policy.tools);
-    const knowledgePins = await this.resolveKnowledgePins(
-      tx,
-      orgId,
-      payload.context_policy.knowledge_sources ?? [],
-    );
-    const modelRef = await this.resolveModelRef(orgId, payload);
-    const templateRef = await this.resolveTemplateRef(tx, orgId, assistantId);
-    const manifestHash = canonicalHash({
-      tool_bindings: toolBindings,
-      knowledge_pins: knowledgePins,
-      model_ref: modelRef,
-      template_ref: templateRef,
-      guardrail_policy: payload.guardrail_policy,
-      budget_policy: payload.budget_policy ?? null,
-      // G4: brand is prompt-affecting — it joins the manifest hash so a
-      // voice change is a manifest change (pins, diffs, and audits agree).
-      brand_voice: payload.brand ?? null,
-    });
-    return { toolBindings, knowledgePins, modelRef, templateRef, manifestHash };
+    return resolveForPublishPg(tx, { db: this.db, configPublish: this.configPublish }, orgId, assistantId, payload);
   }
 
-  // ── Tools (TPL-5.2) ──────────────────────────────────────────────────
-
-  private async resolveToolBindings(
-    tx: NodePgDatabase,
-    orgId: string,
-    tools: Array<{
-      name: string;
-      access: string;
-      approval?: string;
-      schema_hash?: string;
-      execution_mode?: string;
-    }>,
-  ): Promise<ToolBinding[]> {
-    const catalogNames = tools.map((t) => t.name).filter((n) => !BUILT_IN_TOOLS.has(n));
-    const rows =
-      catalogNames.length === 0
-        ? []
-        : await tx.select().from(toolCatalog).where(eq(toolCatalog.organizationId, orgId));
-    const byName = new Map(rows.map((r) => [r.name, r]));
-    return tools.map((entry) => {
-      const builtin = BUILT_IN_TOOLS.get(entry.name);
-      const executionMode =
-        entry.execution_mode === 'shadow' ? ('shadow' as const) : ('live' as const);
-      if (builtin) {
-        return {
-          tool_id: null,
-          name: entry.name,
-          tool_version: '1.0.0-platform',
-          schema_hash: null,
-          capability_class: builtin.effectClass,
-          authorization_policy: null,
-          approval_mode:
-            entry.approval === 'required' || builtin.approvalRequirement === 'REQUIRED'
-              ? 'REQUIRED'
-              : 'NONE',
-          credential_binding: null,
-          timeout_ms: 30000,
-          retry_policy: { ...RETRY_POLICY_V1[builtin.effectClass] },
-          rate_limit_per_run: null,
-          // Built-ins execute in the platform itself — no egress surface.
-          execution_environment: 'in_process',
-          allowed_egress_domains: [],
-          execution_mode: executionMode,
-        } satisfies ToolBinding;
-      }
-      const row = byName.get(entry.name);
-      if (!row || !row.enabled) {
-        // assertToolPins runs before resolution in the publish path and
-        // rejects this case with a typed error — this is the fail-closed
-        // backstop if resolution is ever called without it.
-        throw ApiError.validation({
-          tool_policy: `tool pins rejected: ${entry.name}: not present in the tool catalog or disabled`,
-        });
-      }
-      if (entry.schema_hash !== undefined && entry.schema_hash !== row.hash) {
-        throw ApiError.validation({
-          tool_policy: `tool pins rejected: ${entry.name}: schema_hash does not match the catalog entry (pin is stale)`,
-        });
-      }
-      const httpBinding = (row.httpBinding ?? {}) as { timeout_ms?: number };
-      const capability = row.effectClass as ToolBinding['capability_class'];
-      // P4: perimeter pinned from the live row. Migration 0066 backfills
-      // environment (default external_gateway = historical posture); egress
-      // stays null for binding-less rows. Defensive read: a null egress is
-      // [] (no declared surface), never "unbounded".
-      const envRaw = row.executionEnvironment;
-      const executionEnvironment =
-        envRaw === 'in_process' || envRaw === 'sandboxed_microvm' || envRaw === 'external_gateway'
-          ? envRaw
-          : ('external_gateway' as const);
-      const egressRaw = row.allowedEgressDomains as unknown;
-      const allowedEgress = Array.isArray(egressRaw)
-        ? egressRaw.filter((d): d is string => typeof d === 'string')
-        : [];
-      return {
-        tool_id: row.id,
-        name: entry.name,
-        tool_version: row.version,
-        schema_hash: row.hash,
-        capability_class: capability,
-        authorization_policy: null,
-        approval_mode:
-          entry.approval === 'required' || row.approvalRequirement === 'REQUIRED'
-            ? 'REQUIRED'
-            : 'NONE',
-        credential_binding: row.credentialSealed != null ? { catalog_tool_id: row.id } : null,
-        timeout_ms: typeof httpBinding.timeout_ms === 'number' ? httpBinding.timeout_ms : 30000,
-        retry_policy: { ...RETRY_POLICY_V1[capability] },
-        rate_limit_per_run: row.rateLimitPerRun,
-        execution_environment: executionEnvironment,
-        allowed_egress_domains: allowedEgress,
-        execution_mode: executionMode,
-      } satisfies ToolBinding;
-    });
-  }
-
-  // ── Knowledge (TPL-5.3) ──────────────────────────────────────────────
-
-  private async resolveKnowledgePins(
-    tx: NodePgDatabase,
-    orgId: string,
-    sources: string[],
-  ): Promise<KnowledgePin[]> {
-    if (sources.length === 0) {
-      return [];
-    }
-    const knowledgeConfig = await this.safeLatestConfig(orgId, 'knowledge_config');
-    const configPayload = (knowledgeConfig?.payload ?? null) as {
-      chunk_size?: unknown;
-      chunk_overlap?: unknown;
-      embedding_model?: unknown;
-    } | null;
-    const configRef =
-      knowledgeConfig !== null && configPayload !== null
-        ? {
-            config_id: knowledgeConfig.id,
-            payload_hash: canonicalHash(knowledgeConfig.payload),
-            chunk_size: configPayload.chunk_size ?? null,
-            chunk_overlap: configPayload.chunk_overlap ?? null,
-            embedding_model: configPayload.embedding_model ?? null,
-          }
-        : null;
-    const pins: KnowledgePin[] = [];
-    for (const slug of sources) {
-      pins.push(await this.pinSource(tx, orgId, slug, configRef));
-    }
-    return pins;
-  }
-
-  private async pinSource(
-    tx: NodePgDatabase,
-    orgId: string,
-    slug: string,
-    configRef: KnowledgePin['knowledge_config'],
-  ): Promise<KnowledgePin> {
-    const unresolved: KnowledgePin = {
-      source_slug: slug,
-      resolved: false,
-      document_id: null,
-      document_version_id: null,
-      document_version: null,
-      sha256_hex: null,
-      parser_version: null,
-      embedding_model: null,
-      embedding_coverage: null,
-      knowledge_config: configRef,
-    };
-    // E-2 convention (deterministic): a seed slug matches the READY document
-    // carrying it as source_slug — exact, org-unique, immutable except via
-    // the explicit rename endpoint. No title match means the corpus is not
-    // ingested — recorded unresolved, never invented.
-    const docs = await tx
-      .select({ id: documents.id, embeddingModel: documents.embeddingModel })
-      .from(documents)
-      .where(
-        and(
-          eq(documents.organizationId, orgId),
-          eq(documents.sourceSlug, slug),
-          eq(documents.state, 'ready'),
-        ),
-      )
-      .limit(1);
-    if (docs.length === 0) {
-      return unresolved;
-    }
-    const versions = await tx
-      .select()
-      .from(documentVersions)
-      .where(
-        and(
-          eq(documentVersions.organizationId, orgId),
-          eq(documentVersions.documentId, docs[0].id),
-        ),
-      )
-      .orderBy(desc(documentVersions.version))
-      .limit(1);
-    if (versions.length === 0) {
-      return unresolved;
-    }
-    const v = versions[0];
-    // P0 (GAP-1): coverage of the PINNED version for the doc's active model.
-    // One aggregate: chunks in the pinned version vs embedding rows for the
-    // model. A null doc model means legacy vectors — coverage is unknown, not
-    // incomplete (null keeps legacy publishes behaving exactly as before).
-    const coverage = await this.resolveEmbeddingCoverage(tx, orgId, v.id, docs[0].embeddingModel);
-    return {
-      source_slug: slug,
-      resolved: true,
-      document_id: docs[0].id,
-      document_version_id: v.id,
-      document_version: v.version,
-      sha256_hex: Buffer.from(v.sha256 as unknown as Uint8Array).toString('hex'),
-      parser_version: v.parserVersion,
-      embedding_model: docs[0].embeddingModel,
-      embedding_coverage: coverage,
-      knowledge_config: configRef,
-    };
-  }
-
-  private async resolveEmbeddingCoverage(
-    tx: NodePgDatabase,
-    orgId: string,
-    documentVersionId: string,
-    model: string | null,
-  ): Promise<EmbeddingCoverage | null> {
-    if (!model) {
-      return null;
-    }
-    const rows = await tx
-      .select({ chunkId: chunks.id, embedded: embeddings.id })
-      .from(chunks)
-      .leftJoin(embeddings, and(eq(embeddings.chunkId, chunks.id), eq(embeddings.model, model)))
-      .where(
-        and(eq(chunks.documentVersionId, documentVersionId), eq(chunks.organizationId, orgId)),
-      );
-    const total = rows.length;
-    const embedded = rows.filter((r) => r.embedded !== null).length;
-    // Vacuous truth: a chunkless version has nothing to index, so there is
-    // no indexing gap to refuse over — degraded means "vectors missing", not
-    // "document empty".
-    return { model, chunk_total: total, chunk_embedded: embedded, complete: embedded === total };
-  }
-
-  // ── Models (TPL-5.4) ─────────────────────────────────────────────────
-
-  private async resolveModelRef(orgId: string, payload: AssistantPayload): Promise<ModelRef> {
-    const catalog = await this.safeLatestConfig(orgId, 'model_catalog');
-    const entries =
-      (
-        catalog?.payload as {
-          models?: Array<{ provider: string; model: string; enabled: boolean }>;
-        } | null
-      )?.models ?? null;
-    const catalogPayloadHash = catalog !== null ? canonicalHash(catalog.payload) : null;
-    // Qualify bare aliases against the platform catalog so the snapshot's
-    // modelRef carries real providers (not "unknown") — the run-time
-    // provider check in mcp-authority reads modelRef.models[].provider.
-    const platformRows = await this.db.root
-      .select({
-        provider: modelCatalogEntries.provider,
-        modelId: modelCatalogEntries.modelId,
-      })
-      .from(modelCatalogEntries)
-      .where(eq(modelCatalogEntries.status, 'active'));
-    const qualified = qualifyModelAliases(payload.model_policy.allowed_models, platformRows);
-    return {
-      models: qualified.map((alias) => {
-        const slash = alias.indexOf('/');
-        const provider = slash === -1 ? 'unknown' : alias.slice(0, slash);
-        const model = slash === -1 ? alias : alias.slice(slash + 1);
-        const entry = entries?.find((m) => `${m.provider}/${m.model}` === alias) ?? null;
-        return {
-          provider,
-          model,
-          catalog_config_id: catalog?.id ?? null,
-          catalog_payload_hash: catalogPayloadHash,
-          entry_hash: entry !== null ? canonicalHash(entry) : null,
-          // Honesty bound (plan §8): no provider-revision pinning exists, so
-          // an alias without a catalog entry is recorded unresolved — the
-          // manifest pins everything Neryva controls, nothing it cannot.
-          catalog_enabled: entry?.enabled ?? null,
-        };
-      }),
-      model_params: payload.model_params ?? null,
-    };
-  }
-
-  // ── Template provenance (TPL-5.5) ────────────────────────────────────
-
-  private async resolveTemplateRef(
-    tx: NodePgDatabase,
-    orgId: string,
-    assistantId: string,
-  ): Promise<TemplateRef | null> {
-    const installs = await tx
-      .select()
-      .from(assistantInstalls)
-      .where(eq(assistantInstalls.assistantId, assistantId))
-      .limit(1);
-    const install = installs[0];
-    if (!install || install.organizationId !== orgId) {
-      return null;
-    }
-    const templates = await tx
-      .select({ hash: assistantTemplates.hash })
-      .from(assistantTemplates)
-      .where(
-        and(
-          eq(assistantTemplates.slug, install.slug),
-          eq(assistantTemplates.version, install.templateVersion),
-        ),
-      )
-      .limit(1);
-    return {
-      slug: install.slug,
-      version: install.templateVersion,
-      definition_hash: templates[0]?.hash ?? null,
-    };
-  }
-
+  /**
+   * Fail-soft latest-config read: a missing config or a read failure
+   * resolves to null (the caller records a null config_ref / falls back),
+   * never to a thrown error.
+   */
   private async safeLatestConfig(
     orgId: string,
     scope: 'model_catalog' | 'knowledge_config',

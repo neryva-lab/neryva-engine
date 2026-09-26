@@ -1,7 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Injectable, Inject } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
@@ -12,7 +10,9 @@ import { AccountsService } from '../identity/accounts.service';
 import { normalizeEmail } from '../identity/accounts.service';
 import { assertInvitableRole, MembershipsService } from './memberships.service';
 import { getOrgName } from './org-info';
-import { orgInvites, orgMemberships } from './schema';
+import { INVITE_REPOSITORY, ORG_INFO_REPOSITORY } from './repositories/repository-tokens';
+import type { IInviteRepository, InviteRow } from './repositories/invite.repository';
+import type { IOrgInfoRepository } from './repositories/org-info.repository';
 
 /** Computed lifecycle state for the invite list (never stored — cannot drift). */
 export type InviteStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
@@ -46,11 +46,16 @@ const MAX_RESENDS = 5;
  * attempts reset), extend (expiry push without token churn), and computed
  * status on every row. Ownership is never granted by invitation — only via
  * step-up-gated transfer.
+ *
+ * Persistence lives behind `IInviteRepository` (P3) — this service owns
+ * validation, token minting/hashing, the invite state guards, audit,
+ * events, and emails, and never touches the database directly.
  */
 @Injectable()
 export class InvitesService {
   constructor(
-    private readonly db: DbService,
+    @Inject(INVITE_REPOSITORY) private readonly invites: IInviteRepository,
+    @Inject(ORG_INFO_REPOSITORY) private readonly orgInfo: IOrgInfoRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly email: EmailService,
@@ -63,58 +68,52 @@ export class InvitesService {
     const delivery = normalizeInviteDelivery(input.delivery);
     const email = normalizeEmail(input.email);
 
-    // Guard: the email is already an active member.
-    // Guard: a suspended member already holds a (deactivated) membership row
-    // — inviting them would silently reactivate via the addMember upsert.
-    // Reject with the reactivate path instead so the intent is explicit.
-    const priorMember = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ id: orgMemberships.id, status: orgMemberships.status })
-        .from(orgMemberships)
-        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.accountId, sql`(select id from accounts where email = ${email})`)))
-        .limit(1),
-    );
-    if (priorMember[0]?.status === 'active') {
-      throw ApiError.conflict('this email is already a member of the organization');
-    }
-    if (priorMember[0]?.status === 'suspended') {
-      throw ApiError.conflict('this email belongs to a suspended member — reactivate them in the Members tab instead', {
-        reason: 'member_suspended',
+    // The token is minted here (the repository never sees raw tokens — it
+    // receives the hash). On an idempotent replay the token is discarded:
+    // the stored row holds only its hash, so no accept_url can be rebuilt.
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + env.ORG_INVITE_TTL_DAYS * 86_400_000).toISOString();
+    const { invite, created } = await this.invites.createInvite({
+      orgId: input.orgId,
+      email,
+      role: input.role,
+      invitedBy: input.actorId,
+      tokenHash: sha256Hex(token),
+      expiresAt,
+    });
+    if (created) {
+      await this.audit.add({
+        action: 'org.invite_created',
+        resourceType: 'org_invite',
+        resourceId: invite.id,
+        actorType: 'account',
+        actorId: input.actorId,
+        tenantId: input.orgId,
+        details: { role: input.role, ttl_days: env.ORG_INVITE_TTL_DAYS },
       });
+      await this.events.emit(EngineEvents.OrgInviteCreated, { orgId: input.orgId, inviteId: invite.id, email, role: input.role });
     }
-
-    // Guard: one usable invite per (org, email) — revoke it first to re-issue.
-    const pending = await this.pendingFor(input.orgId, email);
-    if (pending) {
-      throw ApiError.conflict('an invitation for this email is already pending — resend or revoke it', { invite_id: pending.id });
-    }
-
-    // Guard: pending-invite ceiling (typo/abuse posture).
-    const pendingCount = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ n: sql<number>`count(*)` })
-        .from(orgInvites)
-        .where(and(eq(orgInvites.orgId, input.orgId), isNull(orgInvites.acceptedAt), isNull(orgInvites.revokedAt), sql`${orgInvites.expiresAt} > now()`)),
-    );
-    if (Number(pendingCount[0]?.n ?? 0) >= env.ORG_MAX_PENDING_INVITES) {
-      throw ApiError.conflict(`the organization is at its pending-invitation cap (${env.ORG_MAX_PENDING_INVITES})`);
-    }
-
-    const { inviteId, token, expiresAt } = await this.insert(input.orgId, email, input.role, input.actorId);
     if (delivery === 'manual') {
       // Manual delivery: the Engine sends nothing. The raw accept URL is
       // returned ONCE here and never again (hash-only storage) — it is
       // never logged, never audited, and never present in list/detail.
-      return { inviteId, email, accept_url: this.inviteUrl(inviteId, token), expires_at: expiresAt };
+      // On an idempotent replay there is no token to return, so accept_url
+      // is absent on that path by construction.
+      return created
+        ? { inviteId: invite.id, email, accept_url: this.inviteUrl(invite.id, token), expires_at: expiresAt }
+        : { inviteId: invite.id, email, expires_at: invite.expiresAt };
     }
-    await this.sendInviteEmail({ inviteId, token, orgId: input.orgId, email, role: input.role, actorId: input.actorId, actorEmail: input.actorEmail });
+    if (created) {
+      await this.sendInviteEmail({ inviteId: invite.id, token, orgId: input.orgId, email, role: input.role, actorId: input.actorId, actorEmail: input.actorEmail });
+    }
     // The token is returned to nobody — only the email carries it. The row
-    // stores its hash.
-    return { inviteId, email };
+    // stores its hash. (On an idempotent replay no email is re-sent: there
+    // is no token to send.)
+    return { inviteId: invite.id, email };
   }
 
   async list(orgId: string): Promise<InviteView[]> {
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(orgInvites).where(eq(orgInvites.orgId, orgId)).orderBy(desc(orgInvites.createdAt)).limit(500));
+    const rows = await this.invites.listInvites(orgId);
     return rows.map(toView);
   }
 
@@ -124,10 +123,7 @@ export class InvitesService {
    * never emits it, so List / Detail / Extend uniformly never return URL/token.
    */
   async detail(orgId: string, inviteId: string): Promise<InviteView> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(orgInvites).where(and(eq(orgInvites.id, inviteId), eq(orgInvites.orgId, orgId))).limit(1),
-    );
-    const invite = rows[0];
+    const invite = await this.invites.getInvite(orgId, inviteId);
     if (!invite) {
       throw ApiError.notFound('invitation');
     }
@@ -135,20 +131,14 @@ export class InvitesService {
   }
 
   async revoke(input: { orgId: string; inviteId: string; actorId: string }): Promise<void> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(orgInvites).where(and(eq(orgInvites.id, input.inviteId), eq(orgInvites.orgId, input.orgId))).limit(1),
-    );
-    const invite = rows[0];
+    const invite = await this.invites.getInvite(input.orgId, input.inviteId);
     if (!invite) {
       throw ApiError.notFound('invitation');
     }
     if (invite.revokedAt || invite.acceptedAt) {
       throw ApiError.conflict('invitation is no longer usable');
     }
-    const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(orgInvites).set({ revokedAt: now, updatedAt: now }).where(eq(orgInvites.id, input.inviteId)),
-    );
+    await this.invites.revokeInvite(input.orgId, input.inviteId);
     await this.audit.add({
       action: 'org.invite_revoked',
       resourceType: 'org_invite',
@@ -168,10 +158,7 @@ export class InvitesService {
    */
   async resend(input: { orgId: string; inviteId: string; delivery: string; actorId: string; actorEmail?: string | null }): Promise<{ expires_at: string; accept_url?: string }> {
     const delivery = normalizeInviteDelivery(input.delivery);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(orgInvites).where(and(eq(orgInvites.id, input.inviteId), eq(orgInvites.orgId, input.orgId))).limit(1),
-    );
-    const invite = rows[0];
+    const invite = await this.invites.getInvite(input.orgId, input.inviteId);
     if (!invite) {
       throw ApiError.notFound('invitation');
     }
@@ -184,17 +171,15 @@ export class InvitesService {
 
     const token = randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + env.ORG_INVITE_TTL_DAYS * 86_400_000).toISOString();
-    const now = new Date().toISOString();
-    // Rotation guard: the update only lands on the row whose hash we read —
-    // a concurrent redeem/resend loses the race visibly instead of silently.
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgInvites)
-        .set({ tokenHash: sha256Hex(token), attempts: 0, expiresAt, resendCount: invite.resendCount + 1, updatedAt: now })
-        .where(and(eq(orgInvites.id, invite.id), eq(orgInvites.tokenHash, invite.tokenHash)))
-        .returning({ id: orgInvites.id }),
-    );
-    if (updated.length !== 1) {
+    const rotated = await this.invites.rotateToken({
+      orgId: input.orgId,
+      inviteId: invite.id,
+      expectedTokenHash: invite.tokenHash,
+      tokenHash: sha256Hex(token),
+      expiresAt,
+      resendCount: invite.resendCount + 1,
+    });
+    if (!rotated) {
       throw ApiError.conflict('invitation changed concurrently — reload and retry');
     }
 
@@ -216,10 +201,7 @@ export class InvitesService {
 
   /** Extend the accept window without rotating the token (the emailed link stays valid). */
   async extend(input: { orgId: string; inviteId: string; days: number; actorId: string }): Promise<{ expires_at: string }> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(orgInvites).where(and(eq(orgInvites.id, input.inviteId), eq(orgInvites.orgId, input.orgId))).limit(1),
-    );
-    const invite = rows[0];
+    const invite = await this.invites.getInvite(input.orgId, input.inviteId);
     if (!invite) {
       throw ApiError.notFound('invitation');
     }
@@ -229,10 +211,7 @@ export class InvitesService {
     const days = Math.min(Math.max(Math.floor(input.days), 1), 30);
     const base = Math.max(Date.parse(invite.expiresAt), Date.now());
     const expiresAt = new Date(base + days * 86_400_000).toISOString();
-    const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(orgInvites).set({ expiresAt, updatedAt: now }).where(eq(orgInvites.id, invite.id)),
-    );
+    await this.invites.extendExpiry(input.orgId, invite.id, expiresAt);
     await this.audit.add({
       action: 'org.invite_extended',
       resourceType: 'org_invite',
@@ -251,16 +230,10 @@ export class InvitesService {
    * token comparison is by hash (constant-time via the unique index lookup).
    */
   async redeem(input: { inviteId: string; token: string; accountId: string }): Promise<{ orgId: string; role: string }> {
-    const rows = await this.db.withBypass((tx) =>
-      // Justification (withBypass): redemption happens BEFORE the caller is
-      // a member — RLS on org_id cannot admit the row yet. Filtering is by
-      // the invite's unguessable id + hash.
-      tx.select().from(orgInvites).where(eq(orgInvites.id, input.inviteId)).limit(1),
-    );
-    const invite = rows[0];
+    const invite = await this.invites.getInviteById(input.inviteId);
     if (!invite || invite.tokenHash !== sha256Hex(input.token)) {
       if (invite) {
-        await this.registerAttempt(invite.id, invite.attempts);
+        await this.invites.registerAttempt(invite.id, invite.attempts);
       }
       throw ApiError.unauthenticated('Invalid invitation');
     }
@@ -276,7 +249,7 @@ export class InvitesService {
 
     const account = await this.accounts.findById(input.accountId);
     if (!account || account.email !== invite.email) {
-      await this.registerAttempt(invite.id, invite.attempts);
+      await this.invites.registerAttempt(invite.id, invite.attempts);
       throw ApiError.forbidden('This invitation was sent to a different email address');
     }
 
@@ -293,18 +266,8 @@ export class InvitesService {
     });
 
     // Single-use guard: the claim only lands on a still-unclaimed row.
-    // Org-scoped via withOrg (NOT this.db.root): org_invites has RLS FORCED,
-    // so an unscoped UPDATE matches 0 rows and redeem would 409 even though
-    // the membership already landed. The caller is a member of invite.orgId
-    // by this point, so the tenant context admits the row.
-    const claimed = await this.db.withOrg(invite.orgId, (tx) =>
-      tx
-        .update(orgInvites)
-        .set({ acceptedAt: new Date().toISOString() })
-        .where(and(eq(orgInvites.id, invite.id), isNull(orgInvites.acceptedAt), isNull(orgInvites.revokedAt)))
-        .returning({ id: orgInvites.id }),
-    );
-    if (claimed.length !== 1) {
+    const claimed = await this.invites.claimInvite(invite.orgId, invite.id);
+    if (!claimed) {
       throw ApiError.conflict('Invitation is no longer usable');
     }
 
@@ -333,13 +296,7 @@ export class InvitesService {
     if (!input.inviteId || !t || t.length > 256) {
       throw ApiError.notFound('invitation');
     }
-    const rows = await this.db.withBypass((tx) =>
-      // Justification (withBypass): preview runs BEFORE the caller is a
-      // member — RLS on org_id cannot admit the row yet. Filtering is by
-      // the invite's unguessable id + hash, same as redeem.
-      tx.select().from(orgInvites).where(eq(orgInvites.id, input.inviteId)).limit(1),
-    );
-    const invite = rows[0];
+    const invite = await this.invites.getInviteById(input.inviteId);
     if (!invite || invite.tokenHash !== sha256Hex(t)) {
       throw ApiError.notFound('invitation');
     }
@@ -348,7 +305,7 @@ export class InvitesService {
     }
     const inviter = invite.invitedBy ? await this.accounts.findById(invite.invitedBy).catch(() => null) : null;
     return {
-      org_name: await getOrgName(this.db, invite.orgId),
+      org_name: await getOrgName(this.orgInfo, invite.orgId),
       role: invite.role,
       expires_at: invite.expiresAt,
       invited_by: inviter?.displayName?.trim() ? String(inviter.displayName) : 'a member of your team',
@@ -366,30 +323,8 @@ export class InvitesService {
     return `${base}/platform/invites/${inviteId}?token=${token}`;
   }
 
-  private async insert(orgId: string, email: string, role: string, actorId: string): Promise<{ inviteId: string; token: string; expiresAt: string }> {
-    const token = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(Date.now() + env.ORG_INVITE_TTL_DAYS * 86_400_000).toISOString();
-    const inserted = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .insert(orgInvites)
-        .values({ orgId, email, role, tokenHash: sha256Hex(token), invitedBy: actorId, expiresAt })
-        .returning({ id: orgInvites.id }),
-    );
-    await this.audit.add({
-      action: 'org.invite_created',
-      resourceType: 'org_invite',
-      resourceId: inserted[0].id,
-      actorType: 'account',
-      actorId,
-      tenantId: orgId,
-      details: { role, ttl_days: env.ORG_INVITE_TTL_DAYS },
-    });
-    await this.events.emit(EngineEvents.OrgInviteCreated, { orgId, inviteId: inserted[0].id, email, role });
-    return { inviteId: inserted[0].id, token, expiresAt };
-  }
-
   private async sendInviteEmail(input: { inviteId: string; token: string; orgId: string; email: string; role: string; actorId: string; actorEmail?: string | null }): Promise<void> {
-    const orgName = await getOrgName(this.db, input.orgId);
+    const orgName = await getOrgName(this.orgInfo, input.orgId);
     await this.email.sendTemplate({
       template: 'org.invite',
       to: input.email,
@@ -403,27 +338,9 @@ export class InvitesService {
       metadata: { inviteId: input.inviteId, orgId: input.orgId },
     });
   }
-
-  private async pendingFor(orgId: string, email: string): Promise<typeof orgInvites.$inferSelect | null> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(orgInvites)
-        .where(and(eq(orgInvites.orgId, orgId), eq(orgInvites.email, email), isNull(orgInvites.acceptedAt), isNull(orgInvites.revokedAt), sql`${orgInvites.expiresAt} > now()`))
-        .limit(1),
-    );
-    return rows[0] ?? null;
-  }
-
-  private async registerAttempt(inviteId: string, currentAttempts: number): Promise<void> {
-    await this.db.root
-      .update(orgInvites)
-      .set({ attempts: currentAttempts + 1 })
-      .where(eq(orgInvites.id, inviteId));
-  }
 }
 
-function toView(row: typeof orgInvites.$inferSelect): InviteView {
+function toView(row: InviteRow): InviteView {
   const status: InviteStatus =
     row.acceptedAt ? 'accepted' : row.revokedAt ? 'revoked' : Date.parse(row.expiresAt) < Date.now() ? 'expired' : 'pending';
   return {

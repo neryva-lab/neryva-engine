@@ -1,18 +1,15 @@
-import { and, desc, eq } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { uuidv7 } from '../../common/ids/uuidv7';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
 import { envelopeEncrypt } from '../../common/infra/crypto/envelope';
-import {
-  toolCatalog,
-  ToolAnnotations,
-  ToolCatalogEntry,
-  TOOL_APPROVAL_REQUIREMENTS,
-  TOOL_EFFECT_CLASSES,
-} from './tool-catalog.schema';
+import { TOOL_CATALOG_REPOSITORY } from './repositories/repository-tokens';
+import type {
+  IToolCatalogRepository,
+  UpsertToolRepositoryInput,
+} from './repositories/tool-catalog.repository';
+import { TOOL_APPROVAL_REQUIREMENTS, TOOL_EFFECT_CLASSES } from './tool-catalog.schema';
+import type { ToolAnnotations, ToolCatalogEntry } from './tool-catalog.schema';
 
 function assertOrgId(orgId: string): void {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orgId)) {
@@ -414,7 +411,7 @@ export class ToolCatalogService {
   private static readonly logger = new Logger(ToolCatalogService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(TOOL_CATALOG_REPOSITORY) private readonly tools: IToolCatalogRepository,
     private readonly audit: AuditService,
   ) {}
 
@@ -449,73 +446,39 @@ export class ToolCatalogService {
       annotations,
     });
 
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .insert(toolCatalog)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          name: input.name,
-          version,
-          description: input.description ?? null,
-          inputSchema: input.inputSchema,
-          outputSchema: input.outputSchema ?? null,
-          effectClass: input.effectClass,
-          approvalRequirement: input.approvalRequirement,
-          annotations,
-          hash,
-          executionEnvironment: perimeter.executionEnvironment,
-          allowedEgressDomains: perimeter.allowedEgressDomains,
-          ...(input.httpBinding
-            ? {
-                httpBinding: {
-                  url: input.httpBinding.url,
-                  method: input.httpBinding.method ?? 'POST',
-                  timeout_ms: input.httpBinding.timeout_ms ?? 10_000,
-                  header_name: input.httpBinding.header_name ?? 'authorization',
-                },
-              }
-            : {}),
-          ...(input.credential ? { credentialSealed: envelopeEncrypt(input.credential) } : {}),
-          ...(input.rateLimitPerRun !== undefined
-            ? { rateLimitPerRun: Math.max(1, input.rateLimitPerRun) }
-            : {}),
-          createdBy: input.actor,
-        })
-        .onConflictDoUpdate({
-          target: [toolCatalog.organizationId, toolCatalog.name],
-          set: {
-            version,
-            description: input.description ?? null,
-            inputSchema: input.inputSchema,
-            outputSchema: input.outputSchema ?? null,
-            effectClass: input.effectClass,
-            approvalRequirement: input.approvalRequirement,
-            annotations,
-            hash,
-            enabled: true,
-            executionEnvironment: perimeter.executionEnvironment,
-            allowedEgressDomains: perimeter.allowedEgressDomains,
-            ...(input.httpBinding
-              ? {
-                  httpBinding: {
-                    url: input.httpBinding.url,
-                    method: input.httpBinding.method ?? 'POST',
-                    timeout_ms: input.httpBinding.timeout_ms ?? 10_000,
-                    header_name: input.httpBinding.header_name ?? 'authorization',
-                  },
-                }
-              : {}),
-            ...(input.credential ? { credentialSealed: envelopeEncrypt(input.credential) } : {}),
-            ...(input.rateLimitPerRun !== undefined
-              ? { rateLimitPerRun: Math.max(1, input.rateLimitPerRun) }
-              : {}),
-            updatedAt: new Date().toISOString(),
-          },
-        })
-        .returning();
-      return rows[0];
-    });
+    // The repository owns the write: the service normalizes (perimeter,
+    // defaults, hash) and seals the credential BEFORE the call — plaintext
+    // never crosses the interface.
+    const repoInput: UpsertToolRepositoryInput = {
+      orgId: input.orgId,
+      name: input.name,
+      version,
+      description: input.description ?? null,
+      inputSchema: input.inputSchema,
+      outputSchema: input.outputSchema ?? null,
+      effectClass: input.effectClass,
+      approvalRequirement: input.approvalRequirement,
+      annotations,
+      hash,
+      executionEnvironment: perimeter.executionEnvironment,
+      allowedEgressDomains: perimeter.allowedEgressDomains,
+      actor: input.actor,
+    };
+    if (input.httpBinding) {
+      repoInput.httpBinding = {
+        url: input.httpBinding.url,
+        method: input.httpBinding.method ?? 'POST',
+        timeout_ms: input.httpBinding.timeout_ms ?? 10_000,
+        header_name: input.httpBinding.header_name ?? 'authorization',
+      };
+    }
+    if (input.credential) {
+      repoInput.sealedCredential = envelopeEncrypt(input.credential);
+    }
+    if (input.rateLimitPerRun !== undefined) {
+      repoInput.rateLimitPerRun = Math.max(1, input.rateLimitPerRun);
+    }
+    const row = await this.tools.upsertTool(repoInput);
 
     await this.audit.add({
       action: 'tool_catalog.upserted',
@@ -537,26 +500,12 @@ export class ToolCatalogService {
 
   async list(orgId: string, opts: { includeDisabled?: boolean } = {}): Promise<ToolCatalogEntry[]> {
     assertOrgId(orgId);
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(toolCatalog)
-        .where(opts.includeDisabled ? undefined : eq(toolCatalog.enabled, true))
-        .orderBy(desc(toolCatalog.updatedAt))
-        .limit(200),
-    );
+    return this.tools.listTools(orgId, opts);
   }
 
   async get(orgId: string, name: string): Promise<ToolCatalogEntry | null> {
     assertOrgId(orgId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(toolCatalog)
-        .where(and(eq(toolCatalog.organizationId, orgId), eq(toolCatalog.name, name)))
-        .limit(1),
-    );
-    return rows[0] ?? null;
+    return this.tools.getTool(orgId, name);
   }
 
   async setEnabled(input: {
@@ -566,17 +515,7 @@ export class ToolCatalogService {
     actor: string;
   }): Promise<ToolCatalogEntry> {
     assertOrgId(input.orgId);
-    const row = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .update(toolCatalog)
-        .set({ enabled: input.enabled, updatedAt: new Date().toISOString() })
-        .where(and(eq(toolCatalog.organizationId, input.orgId), eq(toolCatalog.name, input.name)))
-        .returning();
-      if (rows.length === 0) {
-        throw ApiError.notFound('tool');
-      }
-      return rows[0];
-    });
+    const row = await this.tools.setToolEnabled(input.orgId, input.name, input.enabled);
     await this.audit.add({
       action: input.enabled ? 'tool_catalog.enabled' : 'tool_catalog.disabled',
       resourceType: 'tool_catalog',

@@ -1,11 +1,11 @@
-import { and, eq } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents, AccountCreatedEvent } from '../../../common/events/event-bus';
 import { ApiError } from '../../../common/http/api-error';
-import { accountIdentities, accounts } from '../schema';
 import { CredentialsService } from '../credentials.service';
+import { ACCOUNT_REPOSITORY, IDENTITY_LINK_REPOSITORY } from '../repositories/repository-tokens';
+import type { Account, IAccountRepository } from '../repositories/account.repository';
+import type { IIdentityLinkRepository } from '../repositories/identity-link.repository';
 
 /**
  * The social account-linking policy (doc-06 Δ1 + ADR-001). Order matters —
@@ -24,6 +24,9 @@ import { CredentialsService } from '../credentials.service';
  * CREATED via federation never grows a password. Enforced structurally:
  * `accounts.created_via` records the origin, and the (future) set-password
  * surface refuses federated-origin accounts via federatedOrigin().
+ *
+ * Persistence goes through `IAccountRepository` / `IIdentityLinkRepository`
+ * (provider-blind) — never Drizzle, never `DbService`.
  */
 export interface SocialProfile {
   provider: string; // google | github | apple | microsoft
@@ -36,39 +39,37 @@ export interface SocialProfile {
 @Injectable()
 export class SocialAccountService {
   constructor(
-    private readonly db: DbService,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accounts: IAccountRepository,
+    @Inject(IDENTITY_LINK_REPOSITORY) private readonly links: IIdentityLinkRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly credentials: CredentialsService,
   ) {}
 
   /** Resolve a verified social profile to an account (link or create). */
-  async resolve(profile: SocialProfile): Promise<{ account: typeof accounts.$inferSelect; linked: boolean; created: boolean }> {
+  async resolve(profile: SocialProfile): Promise<{ account: Account; linked: boolean; created: boolean }> {
     // 1. Existing federated identity — the subject is the truth.
-    const identityRows = await this.db.root
-      .select({ accountId: accountIdentities.accountId })
-      .from(accountIdentities)
-      .where(and(eq(accountIdentities.provider, profile.provider), eq(accountIdentities.subject, profile.subject)))
-      .limit(1);
-    if (identityRows[0]) {
-      const accountRows = await this.db.root.select().from(accounts).where(eq(accounts.id, identityRows[0].accountId)).limit(1);
-      const account = accountRows[0];
+    const accountId = await this.links.findAccountId(profile.provider, profile.subject);
+    if (accountId) {
+      const account = await this.accounts.findById(accountId);
       if (!account || account.status !== 'active') {
         throw new Error('account is not active');
       }
-      await this.db.root
-        .update(accountIdentities)
-        .set({ lastUsedAt: new Date().toISOString(), ...(profile.email ? { email: profile.email } : {}) })
-        .where(and(eq(accountIdentities.provider, profile.provider), eq(accountIdentities.subject, profile.subject)));
+      await this.links.touchLastUsed(
+        profile.provider,
+        profile.subject,
+        profile.email ?? null,
+        new Date().toISOString(),
+      );
       return { account, linked: false, created: false };
     }
 
     // 2. Verified-email link into an existing account.
     if (profile.email && profile.emailVerified) {
-      const existing = await this.db.root.select().from(accounts).where(eq(accounts.email, profile.email.toLowerCase())).limit(1);
-      if (existing[0] && existing[0].status === 'active') {
-        await this.linkIdentity(existing[0].id, profile);
-        return { account: existing[0], linked: true, created: false };
+      const existing = await this.accounts.findByEmail(profile.email.toLowerCase());
+      if (existing && existing.status === 'active') {
+        await this.linkIdentity(existing.id, profile);
+        return { account: existing, linked: true, created: false };
       }
     }
 
@@ -76,23 +77,15 @@ export class SocialAccountService {
     //    the provider's noreply form — login-by-subject keeps working and
     //    transactional mail to it simply no-ops (never a guessed real box).
     const email = profile.email?.toLowerCase() ?? `${profile.provider}-${profile.subject}@users.noreply.neryva.com`;
-    const inserted = await this.db.root
-      .insert(accounts)
-      .values({
-        email,
-        emailVerifiedAt: profile.emailVerified ? new Date().toISOString() : null,
-        displayName: profile.displayName?.slice(0, 256) ?? email.split('@')[0],
-        createdVia: `social:${profile.provider}`,
-      })
-      .onConflictDoNothing({ target: accounts.email })
-      .returning();
-    let account = inserted[0];
-    if (!account) {
-      // Lost an insert race (two providers resolving the same instant) —
-      // the winner's row is the account; link into it.
-      const raced = await this.db.root.select().from(accounts).where(eq(accounts.email, email)).limit(1);
-      account = raced[0];
-    }
+    const nowIso = new Date().toISOString();
+    // The port reports whether THIS call won the insert; step 3 treats the
+    // account as its own creation either way (link + created audit + event),
+    // exactly as the pre-port code did on the lost-race path.
+    const { account } = await this.accounts.upsertByEmail(email, {
+      createdVia: `social:${profile.provider}`,
+      emailVerifiedAt: profile.emailVerified ? nowIso : null,
+      displayName: profile.displayName?.slice(0, 256) ?? email.split('@')[0],
+    });
     // The conflicting row can be arbitrarily OLD (locked/disabled long
     // ago) — a non-active account must never gain a session on either the
     // insert or the race path. (Step 1 throws and step 2 skips non-active
@@ -113,19 +106,13 @@ export class SocialAccountService {
   }
 
   private async linkIdentity(accountId: string, profile: SocialProfile): Promise<void> {
-    await this.db.root
-      .insert(accountIdentities)
-      .values({
-        accountId,
-        provider: profile.provider,
-        subject: profile.subject,
-        email: profile.email?.toLowerCase() ?? null,
-        lastUsedAt: new Date().toISOString(),
-      })
-      .onConflictDoUpdate({
-        target: [accountIdentities.provider, accountIdentities.subject],
-        set: { lastUsedAt: new Date().toISOString(), email: profile.email?.toLowerCase() ?? null },
-      });
+    await this.links.link(
+      accountId,
+      profile.provider,
+      profile.subject,
+      profile.email?.toLowerCase() ?? null,
+      new Date().toISOString(),
+    );
     await this.audit.add({
       action: 'identity.linked',
       resourceType: 'account_identity',
@@ -138,7 +125,7 @@ export class SocialAccountService {
 
   /** Linked identities for the account-management surface. */
   async listIdentities(accountId: string): Promise<Array<{ id: string; provider: string; email: string | null; linkedAt: string; lastUsedAt: string | null }>> {
-    const rows = await this.db.root.select().from(accountIdentities).where(eq(accountIdentities.accountId, accountId));
+    const rows = await this.links.listByAccount(accountId);
     return rows.map((row) => ({
       id: row.id,
       provider: row.provider,
@@ -155,17 +142,15 @@ export class SocialAccountService {
    * is not a federated credential.
    */
   async unlink(input: { accountId: string; identityId: string }): Promise<void> {
-    const rows = await this.db.root.select().from(accountIdentities).where(eq(accountIdentities.id, input.identityId)).limit(1);
-    const identity = rows[0];
+    const identity = await this.links.findById(input.identityId);
     if (!identity || identity.accountId !== input.accountId) {
       throw ApiError.notFound('linked identity');
     }
     if (identity.provider === 'local') {
       throw ApiError.forbidden('The local credential is managed by the password surface, not unlink');
     }
-    const accountRows = await this.db.root.select().from(accounts).where(eq(accounts.id, input.accountId)).limit(1);
-    const account = accountRows[0];
-    const remaining = await this.db.root.select().from(accountIdentities).where(eq(accountIdentities.accountId, input.accountId));
+    const account = await this.accounts.findById(input.accountId);
+    const remaining = await this.links.listByAccount(input.accountId);
     // AUTH-3.2: password presence comes from the factor registry, not the account row.
     const passwordHash = await this.credentials.getPasswordHash(input.accountId);
     const otherWaysIn =
@@ -175,7 +160,7 @@ export class SocialAccountService {
     if (!otherWaysIn) {
       throw ApiError.conflict('Cannot remove the only way into this account');
     }
-    await this.db.root.delete(accountIdentities).where(eq(accountIdentities.id, input.identityId));
+    await this.links.deleteById(input.identityId);
     await this.audit.add({
       action: 'identity.unlinked',
       resourceType: 'account_identity',
@@ -187,7 +172,7 @@ export class SocialAccountService {
   }
 
   /** The one-way rule: federated-origin accounts never grow a password (doc-06 Δ1). */
-  federatedOrigin(account: typeof accounts.$inferSelect): boolean {
+  federatedOrigin(account: Account): boolean {
     return account.createdVia.startsWith('social:');
   }
 }

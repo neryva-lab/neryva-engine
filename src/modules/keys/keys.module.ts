@@ -6,6 +6,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { KeysController } from './keys.controller';
 import { KeysWorker } from './keys.worker';
 import { KeysService } from './keys.service';
+import { KeysRepositoriesModule } from './repositories/keys-repositories.module';
 
 /**
  * The keys module — engine side of handover A-1 (key/token authority):
@@ -16,10 +17,10 @@ import { KeysService } from './keys.service';
  * Flag: MODULES__KEYS_ENABLED (requires organizations for the org guards).
  */
 @Module({
-  imports: [OrganizationsModule, NotificationsModule],
+  imports: [KeysRepositoriesModule, OrganizationsModule, NotificationsModule],
   controllers: [KeysController],
   providers: [KeysService, KeysWorker],
-  exports: [KeysService],
+  exports: [KeysService, KeysRepositoriesModule],
 })
 export class KeysModule {
   constructor(db: DbService, healthRegistry: HealthRegistry) {

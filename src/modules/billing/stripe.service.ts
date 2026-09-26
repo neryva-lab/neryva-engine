@@ -1,12 +1,11 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { env } from '../../common/config/env';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
-import { DbService } from '../../common/infra/db/db.service';
 import { ApiError } from '../../common/http/api-error';
-import { billingInvoices } from './schema';
+import { STRIPE_PAYMENT_REPOSITORY } from './repositories/repository-tokens';
+import type { IStripePaymentRepository } from './repositories/stripe-payment.repository';
 
 /**
  * The minimal Stripe payment rail (H-1). No SDK dependency: Checkout
@@ -47,7 +46,7 @@ export class StripeService {
   private static readonly logger = new Logger(StripeService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(STRIPE_PAYMENT_REPOSITORY) private readonly payments: IStripePaymentRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
   ) {}
@@ -173,19 +172,9 @@ export class StripeService {
     }
 
     const now = new Date().toISOString();
-    const updated = await this.db.withBypass((tx) =>
-      tx
-        .update(billingInvoices)
-        .set({
-          status: 'paid',
-          issuedAt: sql`coalesce(${billingInvoices.issuedAt}, ${now}::timestamptz)`,
-          paidAt: now,
-          updatedAt: now,
-        })
-        .where(and(eq(billingInvoices.id, invoiceId), inArray(billingInvoices.status, ['draft', 'issued'])))
-        .returning(),
-    );
-    const invoice = updated[0];
+    // Idempotent settlement: only a draft/issued row transitions, so
+    // Stripe's retries (or an already-paid invoice) are non-transitions.
+    const invoice = await this.payments.settleInvoiceAsPaid(invoiceId, now);
     if (!invoice) {
       // Already paid (retry) or unknown id — both are non-transitions.
       return { handled: false, invoiceId };

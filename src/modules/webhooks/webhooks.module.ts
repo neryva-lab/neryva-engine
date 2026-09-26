@@ -5,6 +5,7 @@ import { OrganizationsModule } from '../organizations/organizations.module';
 import { WebhooksController } from './webhooks.controller';
 import { WebhooksService } from './webhooks.service';
 import { WebhookWorker } from './webhook.worker';
+import { WebhooksRepositoriesModule } from './repositories/webhooks-repositories.module';
 import { LifecycleWebhookConsumer } from '../../workers/lifecycle-webhook.consumer';
 
 /**
@@ -17,7 +18,7 @@ import { LifecycleWebhookConsumer } from '../../workers/lifecycle-webhook.consum
  * Flag: MODULES__WEBHOOKS_ENABLED (requires organizations).
  */
 @Module({
-  imports: [OrganizationsModule],
+  imports: [OrganizationsModule, WebhooksRepositoriesModule],
   controllers: [WebhooksController],
   // LifecycleWebhookConsumer lives here (not in WorkersModule): it needs
   // WebhooksService, and the dispatcher takes it @Optional() so a

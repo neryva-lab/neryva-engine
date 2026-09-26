@@ -1,18 +1,22 @@
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { uuidv7 } from '../../common/ids/uuidv7';
-import { memoryItems, MemoryItem } from './schema';
-import { legalHolds } from '../lifecycle/lifecycle.schema';
+import type { MemoryItem } from './schema';
 import { EmbeddingService } from './embedding.service';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
-import { memoryProposals } from '../conversations/mcp.schema';
-import { orgSettings } from '../organizations/schema';
 import { redactPii } from '../../common/guardrails/pii';
 import { hashedAttr } from '../../common/observability/spans';
 import { assertUuid } from './assert';
+import {
+  MEMORY_DECISION_REPOSITORY,
+  MEMORY_ITEM_REPOSITORY,
+} from './repositories/repository-tokens';
+import type { IMemoryDecisionRepository } from './repositories/memory-decision.repository';
+import type { IMemoryItemRepository } from './repositories/memory-item.repository';
+import type {
+  MemoryItemDraft,
+  MemoryPolicySettings,
+} from './repositories/repository-types';
 
 /**
  * Memory — Phase 7.8 (pinned here). A memory proposal (MCP
@@ -20,13 +24,24 @@ import { assertUuid } from './assert';
  * only through an explicit Engine decision (`decide`), with provenance
  * preserved. Retrieval is scope-authorized in RetrievalService; items
  * expire and soft-delete — never hard-deleted from the API path.
+ *
+ * Persistence (P3): all `memory_items` / `memory_proposals` access goes
+ * through the memory ports. `IMemoryDecisionRepository` owns the atomic
+ * approval transition — including the conversations-owned `memory_proposals`
+ * write, a deliberate documented cross-module exception.
+ * `IMemoryItemRepository` owns the items aggregate plus the two documented
+ * cross-module reads (org memory policy, legal holds). Embeddings,
+ * scrubbing, TTL defaults and audits stay service-side.
  */
 @Injectable()
 export class MemoryService {
   private static readonly logger = new Logger(MemoryService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(MEMORY_DECISION_REPOSITORY)
+    private readonly decisions: IMemoryDecisionRepository,
+    @Inject(MEMORY_ITEM_REPOSITORY)
+    private readonly items: IMemoryItemRepository,
     private readonly audit: AuditService,
     private readonly embedding: EmbeddingService,
     private readonly configPublish: ConfigPublishService,
@@ -62,31 +77,16 @@ export class MemoryService {
    * Absent row/keys = legacy posture (scrub off, no default TTL). Malformed
    * values fail OPEN to legacy (settings are validator-written; a corrupt
    * row must never block memory writes — the settings surface owns repair).
+   * The fail-open parse lives in the port; a null policy or a read failure
+   * falls back here, preserving the legacy catch behavior.
    */
   private async readMemoryPolicy(
     orgId: string,
   ): Promise<{ scrub: 'off' | 'redact' | 'block'; ttlSeconds: number | null }> {
     const fallback = { scrub: 'off' as const, ttlSeconds: null as number | null };
     try {
-      const rows = await this.db.withOrg(orgId, (tx) =>
-        tx
-          .select({ preferences: orgSettings.preferences })
-          .from(orgSettings)
-          .where(eq(orgSettings.orgId, orgId))
-          .limit(1),
-      );
-      const prefs = (rows[0]?.preferences ?? {}) as Record<string, unknown>;
-      const scrubRaw = prefs.memory_pii_scrubbing;
-      const scrub = scrubRaw === 'redact' || scrubRaw === 'block' ? scrubRaw : 'off';
-      const ttlRaw = prefs.memory_ttl_default_seconds;
-      const ttlSeconds =
-        typeof ttlRaw === 'number' &&
-        Number.isInteger(ttlRaw) &&
-        ttlRaw >= 3600 &&
-        ttlRaw <= 315_360_000
-          ? ttlRaw
-          : null;
-      return { scrub, ttlSeconds };
+      const policy: MemoryPolicySettings | null = await this.items.readMemoryPolicy(orgId);
+      return policy ?? fallback;
     } catch {
       return fallback;
     }
@@ -145,96 +145,104 @@ export class MemoryService {
   }): Promise<{ proposalDecision: string; memoryItem: MemoryItem | null }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.proposalId, 'proposalId');
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .select()
-        .from(memoryProposals)
-        .where(eq(memoryProposals.id, input.proposalId))
-        .limit(1);
-      if (rows.length === 0) {
-        throw ApiError.notFound('memory proposal');
-      }
-      const proposal = rows[0];
-      if (proposal.decision !== 'PENDING') {
-        throw ApiError.conflict('memory proposal already decided', { decision: proposal.decision });
-      }
-      await tx
-        .update(memoryProposals)
-        .set({ decision: input.decision })
-        .where(eq(memoryProposals.id, proposal.id));
+    // Advisory pre-read: the proposal fields the service needs to build the
+    // item draft. Null → 404, mirroring the old in-transaction notFound.
+    const proposal = await this.decisions.getProposal(input.orgId, input.proposalId);
+    if (!proposal) {
+      throw ApiError.notFound('memory proposal');
+    }
+    // Preserve the current PENDING validation. The repository rechecks the
+    // guard inside its own transaction too — the documented lost-update race
+    // is unchanged (no FOR UPDATE, by design).
+    if (proposal.decision !== 'PENDING') {
+      throw ApiError.conflict('memory proposal already decided', { decision: proposal.decision });
+    }
 
-      if (input.decision === 'REJECTED') {
-        await this.audit.add({
-          action: 'memory.proposal_rejected',
-          resourceType: 'memory_proposal',
-          resourceId: proposal.id,
-          actorType: 'account',
-          actorId: input.actor,
-          tenantId: input.orgId,
-          details: { run_id: proposal.runId },
-        });
-        return { proposalDecision: 'REJECTED', memoryItem: null };
-      }
-
-      const scopeType = input.scopeType ?? 'organization';
-      // A4-21: a user-scoped item with no explicit scope_id is bound to the
-      // deciding actor's account — run-time retrieval keys user memories on
-      // scope_id = the run actor's account id, so a NULL scope_id would be a
-      // write-void (stored, listed, never served to any run).
-      const scopeId =
-        scopeType === 'user' && !input.scopeId ? input.actor : (input.scopeId ?? null);
-      // P3: scrub BEFORE embed (the vector must match the STORED text, never
-      // the pre-redaction original) and before the TTL default resolves.
-      const scrubbed = await this.applyScrubPolicy(input.orgId, proposal.value);
-      const policy = await this.readMemoryPolicy(input.orgId);
-      // FL-2.4 — embed at approval: the semantic-memory index is filled the
-      // moment an item becomes durable truth (never at query time).
-      // P0: stamp the producing model (see resolveWriteEmbeddingModel).
-      const [embedding] = await this.embedding.embed([scrubbed.text]);
-      const embeddingModel = await this.resolveWriteEmbeddingModel(input.orgId);
-      const itemRows = await tx
-        .insert(memoryItems)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          scopeType,
-          scopeId,
-          content: scrubbed.text,
-          sourceRef: { proposal_id: proposal.id, run_id: proposal.runId },
-          provenance: proposal.provenance ?? 'memory_proposal',
-          confidence: proposal.confidence,
-          visibility: proposal.visibility === 'private' ? 'private' : 'organization',
-          expiresAt: this.ttlOrDefault(
-            policy,
-            input.expiresAt?.toISOString() ?? proposal.expiresAt,
-          ),
-          embedding,
-          embeddingModel,
-        })
-        .returning();
+    if (input.decision === 'REJECTED') {
+      const rejected = await this.decisions.decideProposal(
+        input.orgId,
+        input.proposalId,
+        'REJECTED',
+        null,
+        null,
+      );
       await this.audit.add({
-        action: 'memory.proposal_approved',
-        resourceType: 'memory_item',
-        resourceId: itemRows[0].id,
+        action: 'memory.proposal_rejected',
+        resourceType: 'memory_proposal',
+        resourceId: proposal.id,
         actorType: 'account',
         actorId: input.actor,
         tenantId: input.orgId,
-        details: { proposal_id: proposal.id, run_id: proposal.runId, scope_type: scopeType },
+        details: { run_id: proposal.runId },
       });
-      if (scrubbed.redacted) {
-        await this.audit.add({
-          action: 'memory.pii_redacted',
-          resourceType: 'memory_item',
-          resourceId: itemRows[0].id,
-          actorType: 'account',
-          actorId: input.actor,
-          tenantId: input.orgId,
-          details: { match_count: scrubbed.matchCount },
-        });
-      }
-      MemoryService.logger.log(`memory proposal ${proposal.id} approved for org ${input.orgId}`);
-      return { proposalDecision: 'APPROVED', memoryItem: itemRows[0] };
+      return { proposalDecision: rejected.decision, memoryItem: rejected.memoryItem };
+    }
+
+    const scopeType = input.scopeType ?? 'organization';
+    // A4-21: a user-scoped item with no explicit scope_id is bound to the
+    // deciding actor's account — run-time retrieval keys user memories on
+    // scope_id = the run actor's account id, so a NULL scope_id would be a
+    // write-void (stored, listed, never served to any run).
+    const scopeId =
+      scopeType === 'user' && !input.scopeId ? input.actor : (input.scopeId ?? null);
+    // P3: scrub BEFORE embed (the vector must match the STORED text, never
+    // the pre-redaction original) and before the TTL default resolves.
+    const scrubbed = await this.applyScrubPolicy(input.orgId, proposal.value);
+    const policy = await this.readMemoryPolicy(input.orgId);
+    // FL-2.4 — embed at approval: the semantic-memory index is filled the
+    // moment an item becomes durable truth (never at query time).
+    // P0: stamp the producing model (see resolveWriteEmbeddingModel).
+    const [vector] = await this.embedding.embed([scrubbed.text]);
+    const embeddingModel = await this.resolveWriteEmbeddingModel(input.orgId);
+    // The draft carries no ids, no org id, no timestamps and no tombstone
+    // fields — the repository applies those. The embedding arrives as the
+    // separate pre-computed pair (the repository never embeds).
+    const draft: MemoryItemDraft = {
+      scopeType,
+      scopeId,
+      content: scrubbed.text,
+      sourceRef: { proposal_id: proposal.id, run_id: proposal.runId },
+      provenance: proposal.provenance ?? 'memory_proposal',
+      confidence: proposal.confidence,
+      visibility: proposal.visibility === 'private' ? 'private' : 'organization',
+      expiresAt: this.ttlOrDefault(
+        policy,
+        input.expiresAt?.toISOString() ?? proposal.expiresAt,
+      ),
+    };
+    const approved = await this.decisions.decideProposal(
+      input.orgId,
+      input.proposalId,
+      'APPROVED',
+      draft,
+      { vector, model: embeddingModel },
+    );
+    const memoryItem = approved.memoryItem;
+    if (!memoryItem) {
+      throw ApiError.conflict('memory proposal approval did not materialize an item');
+    }
+    await this.audit.add({
+      action: 'memory.proposal_approved',
+      resourceType: 'memory_item',
+      resourceId: memoryItem.id,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { proposal_id: proposal.id, run_id: proposal.runId, scope_type: scopeType },
     });
+    if (scrubbed.redacted) {
+      await this.audit.add({
+        action: 'memory.pii_redacted',
+        resourceType: 'memory_item',
+        resourceId: memoryItem.id,
+        actorType: 'account',
+        actorId: input.actor,
+        tenantId: input.orgId,
+        details: { match_count: scrubbed.matchCount },
+      });
+    }
+    MemoryService.logger.log(`memory proposal ${proposal.id} approved for org ${input.orgId}`);
+    return { proposalDecision: approved.decision, memoryItem };
   }
 
   async list(
@@ -242,32 +250,24 @@ export class MemoryService {
     opts?: { scopeType?: string; scopeId?: string; limit?: number; callerId?: string },
   ): Promise<MemoryItem[]> {
     assertUuid(orgId, 'orgId');
-    // A4-27: clamp defensively — a non-numeric ?limit= must not reach drizzle.
+    // A4-27: clamp defensively — a non-numeric ?limit= must not reach the
+    // repository.
     const rawLimit = typeof opts?.limit === 'number' && Number.isFinite(opts.limit) ? opts.limit : 50;
     const limit = Math.min(Math.max(1, rawLimit), 100);
-    const conditions = [eq(memoryItems.organizationId, orgId), isNull(memoryItems.deletedAt)];
-    if (opts?.scopeType) {
-      conditions.push(eq(memoryItems.scopeType, opts.scopeType));
-    }
     if (opts?.scopeId) {
       assertUuid(opts.scopeId, 'scopeId');
-      conditions.push(eq(memoryItems.scopeId, opts.scopeId));
     }
     // A4-22: user-scoped rows are account-private by contract ("visible only
     // to that account"). The library read must not return another account's
     // user rows, so a user-scope read without an explicit scope_id is
-    // constrained to the caller.
-    if (opts?.scopeType === 'user' && opts?.callerId) {
-      conditions.push(eq(memoryItems.scopeId, opts.callerId));
-    }
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(memoryItems)
-        .where(and(...conditions))
-        .orderBy(desc(memoryItems.updatedAt))
-        .limit(limit),
-    );
+    // constrained to the caller. The scope-type/id/caller predicates live in
+    // the port; the service only validates and clamps.
+    return this.items.listItems(orgId, {
+      scopeType: opts?.scopeType,
+      scopeId: opts?.scopeId,
+      userCallerId: opts?.scopeType === 'user' ? opts?.callerId : undefined,
+      limit,
+    });
   }
 
   /** FL-2.28 — user-authored memory (GDPR-friendly "what do you remember"). */
@@ -291,45 +291,39 @@ export class MemoryService {
     const [embedding] = await this.embedding.embed([scrubbed.text]);
     // P0: stamp the producing model (see resolveWriteEmbeddingModel).
     const embeddingModel = await this.resolveWriteEmbeddingModel(input.orgId);
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .insert(memoryItems)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          scopeType: input.scopeType,
-          scopeId,
-          content: scrubbed.text.slice(0, 8192),
-          sourceRef: { actor: input.actor },
-          provenance: 'user_authored',
-          visibility: input.scopeType === 'organization' ? 'organization' : 'private',
-          expiresAt: this.ttlOrDefault(policy, null),
-          embedding,
-          embeddingModel,
-        })
-        .returning();
+    const draft: MemoryItemDraft = {
+      scopeType: input.scopeType,
+      scopeId,
+      content: scrubbed.text.slice(0, 8192),
+      sourceRef: { actor: input.actor },
+      provenance: 'user_authored',
+      visibility: input.scopeType === 'organization' ? 'organization' : 'private',
+      expiresAt: this.ttlOrDefault(policy, null),
+      embedding,
+      embeddingModel,
+    };
+    const item = await this.items.insertItem(input.orgId, draft);
+    await this.audit.add({
+      action: 'memory.created',
+      resourceType: 'memory_item',
+      resourceId: item.id,
+      actorType: 'account',
+      actorId: input.actor,
+      tenantId: input.orgId,
+      details: { scope_type: input.scopeType },
+    });
+    if (scrubbed.redacted) {
       await this.audit.add({
-        action: 'memory.created',
+        action: 'memory.pii_redacted',
         resourceType: 'memory_item',
-        resourceId: rows[0].id,
+        resourceId: item.id,
         actorType: 'account',
         actorId: input.actor,
         tenantId: input.orgId,
-        details: { scope_type: input.scopeType },
+        details: { match_count: scrubbed.matchCount },
       });
-      if (scrubbed.redacted) {
-        await this.audit.add({
-          action: 'memory.pii_redacted',
-          resourceType: 'memory_item',
-          resourceId: rows[0].id,
-          actorType: 'account',
-          actorId: input.actor,
-          tenantId: input.orgId,
-          details: { match_count: scrubbed.matchCount },
-        });
-      }
-      return rows[0];
-    });
+    }
+    return item;
   }
 
   /**
@@ -357,27 +351,13 @@ export class MemoryService {
     const scrubbed = await this.applyScrubPolicy(input.orgId, text);
     const [embedding] = await this.embedding.embed([scrubbed.text]);
     const embeddingModel = await this.resolveWriteEmbeddingModel(input.orgId);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(memoryItems)
-        .set({
-          content: scrubbed.text.slice(0, 8192),
-          embedding,
-          embeddingModel,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(
-          and(
-            eq(memoryItems.id, input.memoryId),
-            eq(memoryItems.organizationId, input.orgId),
-            isNull(memoryItems.deletedAt),
-          ),
-        )
-        .returning(),
-    );
-    if (rows.length === 0) {
-      throw ApiError.notFound('memory item');
-    }
+    // The isNull(deletedAt) predicate is part of the update — the port
+    // throws notFound when the item is missing or already tombstoned.
+    const updated = await this.items.updateItemContent(input.orgId, input.memoryId, {
+      content: scrubbed.text.slice(0, 8192),
+      embedding,
+      embeddingModel,
+    });
     await this.audit.add({
       action: 'memory.updated',
       resourceType: 'memory_item',
@@ -398,7 +378,7 @@ export class MemoryService {
         details: { match_count: scrubbed.matchCount },
       });
     }
-    return rows[0];
+    return updated;
   }
 
   /**
@@ -426,45 +406,19 @@ export class MemoryService {
     }
     // A4-24: an active org-scope legal hold blocks the DSR purge, mirroring
     // the retention workflow's check_holds gate (retention-purge.service.ts).
-    const holds = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ id: legalHolds.id })
-        .from(legalHolds)
-        .where(
-          and(
-            eq(legalHolds.organizationId, input.orgId),
-            eq(legalHolds.status, 'active'),
-            or(isNull(legalHolds.expiresAt), sql`${legalHolds.expiresAt} > now()`),
-            eq(legalHolds.scopeType, 'organization'),
-          ),
-        )
-        .limit(1),
-    );
+    const holds = await this.items.listActiveLegalHolds(input.orgId);
     if (holds.length > 0) {
       throw ApiError.conflict('an active legal hold blocks memory purge', {
         legal_hold_id: holds[0].id,
       });
     }
-    // Escape LIKE wildcards so the match is literal, not a pattern. Single
-    // UPDATE...RETURNING (capped): exact count under concurrency, no
+    // Escape LIKE wildcards so the match is literal, not a pattern. The
+    // port wraps the escaped needle in %…% and runs a single
+    // UPDATE...RETURNING (capped at 1000): exact count under concurrency, no
     // select-then-update race — a concurrent purge of the same rows just
     // finds them already tombstoned via the isNull(deletedAt) predicate.
     const escaped = needle.replace(/[\\%_]/g, (c) => `\\${c}`);
-    const matched = await this.db.withOrg(input.orgId, async (tx) => {
-      const now = new Date().toISOString();
-      const updated = await tx.execute(sql`
-        update memory_items set deleted_at = ${now}, invalid_at = ${now}, updated_at = ${now}
-        where id in (
-          select id from memory_items
-          where organization_id = ${input.orgId}::uuid
-            and deleted_at is null
-            and content ilike ${`%${escaped}%`} escape '\\'
-          limit 1000
-        )
-        returning id
-      `);
-      return (updated.rows as Array<{ id: string }>).map((r) => ({ id: String(r.id) }));
-    });
+    const matchedIds = await this.items.purgeByContent(input.orgId, escaped);
     await this.audit.add({
       action: 'memory.purged',
       resourceType: 'memory_item',
@@ -474,39 +428,22 @@ export class MemoryService {
       tenantId: input.orgId,
       details: {
         query_hash: hashedAttr(`memory-purge:${needle}`),
-        purged_count: matched.length,
-        purged_ids: matched.slice(0, 100).map((r) => r.id),
+        purged_count: matchedIds.length,
+        purged_ids: matchedIds.slice(0, 100),
       },
     });
-    // A4-25: the subquery caps at 1000 — report it so the caller never
+    // A4-25: the port caps at 1000 — report it so the caller never
     // claims "nothing matched stays retrievable" when the cap was hit.
-    return { purged: matched.length, truncated: matched.length === 1000 };
+    return { purged: matchedIds.length, truncated: matchedIds.length === 1000 };
   }
 
   /** Soft delete — tombstone stays for provenance; purge is a Phase 9 workflow. */
   async softDelete(input: { orgId: string; memoryId: string; actor: string }): Promise<void> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.memoryId, 'memoryId');
-    await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .update(memoryItems)
-        .set({
-          deletedAt: new Date().toISOString(),
-          invalidAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(
-          and(
-            eq(memoryItems.id, input.memoryId),
-            eq(memoryItems.organizationId, input.orgId),
-            isNull(memoryItems.deletedAt),
-          ),
-        )
-        .returning({ id: memoryItems.id });
-      if (rows.length === 0) {
-        throw ApiError.notFound('memory item');
-      }
-    });
+    // The port throws notFound when the item is missing or already
+    // tombstoned, preserving the legacy 404.
+    await this.items.softDeleteItem(input.orgId, input.memoryId);
     await this.audit.add({
       action: 'memory.deleted',
       resourceType: 'memory_item',

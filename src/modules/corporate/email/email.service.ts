@@ -1,13 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { env } from '../../../common/config/env';
-import { DbService } from '../../../common/infra/db/db.service';
 import { RedisService } from '../../../common/infra/redis.service';
 import { AuditService } from '../../../common/audit/audit.service';
 import { EmailMessage, EmailTransport } from './email-transport.port';
 import { transportForKind } from './transports';
 import { renderTemplate } from './templates';
-import { emailDeliveries } from './schema';
+import { EMAIL_DELIVERY_REPOSITORY, SUPPRESSION_REPOSITORY } from '../repositories/repository-tokens';
+import type { IEmailDeliveryRepository } from '../repositories/email-delivery.repository';
+import type { ISuppressionRepository } from '../repositories/suppression.repository';
 
 /**
  * The email service (corporate E-1 — built FIRST because identity's
@@ -22,6 +22,10 @@ import { emailDeliveries } from './schema';
  *
  * Optional `unsubscribeUrl` adds List-Unsubscribe + RFC 8058 one-click
  * headers — the deliverability contract bulk mail must carry.
+ *
+ * Persistence-blind (P3): suppression lookups go through
+ * `ISuppressionRepository` and delivery-audit rows through
+ * `IEmailDeliveryRepository`. Corporate tables are global (non-tenant).
  */
 @Injectable()
 export class EmailService {
@@ -30,7 +34,8 @@ export class EmailService {
   private readonly suppressedCache = new Map<string, boolean>(); // 60s TTL; suppression is append-heavy
 
   constructor(
-    private readonly db: DbService,
+    @Inject(EMAIL_DELIVERY_REPOSITORY) private readonly deliveries: IEmailDeliveryRepository,
+    @Inject(SUPPRESSION_REPOSITORY) private readonly suppressions: ISuppressionRepository,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
   ) {
@@ -106,10 +111,7 @@ export class EmailService {
     if (cached !== undefined) {
       return cached;
     }
-    const rows = await this.db.root.execute<{ id: string }>(
-      sql`select id from email_suppressions where email = ${email} limit 1`,
-    );
-    const suppressed = rows.rows.length > 0;
+    const suppressed = await this.suppressions.isSuppressed(email);
     this.suppressedCache.set(email, suppressed);
     if (this.suppressedCache.size > 5000) {
       this.suppressedCache.clear(); // crude TTL: drop everything at 5k entries
@@ -128,7 +130,7 @@ export class EmailService {
     error: string | null,
     metadata?: Record<string, unknown>,
   ): Promise<void> {
-    await this.db.root.insert(emailDeliveries).values({
+    await this.deliveries.recordDelivery({
       template: message.template,
       recipient: message.to,
       subject: message.subject,

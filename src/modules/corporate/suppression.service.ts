@@ -1,11 +1,10 @@
-import { desc, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { constantTimeEquals } from '../../common/infra/crypto/envelope';
 import { env } from '../../common/config/env';
-import { emailSuppressions } from './public.schema';
+import { SUPPRESSION_REPOSITORY } from './repositories/repository-tokens';
+import type { EmailSuppressionRow, ISuppressionRepository } from './repositories/suppression.repository';
 
 /**
  * The email suppression list (E-1's reputation guard): hard bounces, spam
@@ -23,6 +22,9 @@ import { emailSuppressions } from './public.schema';
  * Postmark bounce webhooks carry the recipient in `Message` headers of
  * `OriginalRecipient`/`EmailAddress` depending on stream; every plausible
  * field is checked, and unknown shapes are logged, never crash).
+ *
+ * Persistence-blind (P3): all storage goes through `ISuppressionRepository`.
+ * Corporate tables are global (non-tenant).
  */
 export type SuppressionReason = 'hard_bounce' | 'complaint' | 'unsubscribe' | 'manual';
 
@@ -31,32 +33,19 @@ export class SuppressionService {
   private static readonly logger = new Logger(SuppressionService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(SUPPRESSION_REPOSITORY) private readonly suppressions: ISuppressionRepository,
     private readonly audit: AuditService,
   ) {}
 
   async isSuppressed(email: string): Promise<boolean> {
-    const rows = await this.db.root
-      .select({ id: emailSuppressions.id })
-      .from(emailSuppressions)
-      .where(eq(emailSuppressions.email, email.toLowerCase()))
-      .limit(1);
-    return !!rows[0];
+    return this.suppressions.isSuppressed(email);
   }
 
   async suppress(input: { email: string; reason: SuppressionReason; detail?: string; actorId?: string }): Promise<void> {
     const email = input.email.toLowerCase();
-    await this.db.root
-      .insert(emailSuppressions)
-      .values({ email, reason: input.reason, detail: input.detail?.slice(0, 512) })
-      .onConflictDoNothing({ target: emailSuppressions.email });
     // An unsubscribe also flips the subscriber row (kept consistent here,
-    // at the one chokepoint both flows share).
-    if (input.reason === 'unsubscribe') {
-      await this.db.root.execute(
-        sql`update newsletter_subs set status = 'unsubscribed', unsubscribed_at = now() where email = ${email} and status <> 'unsubscribed'`,
-      );
-    }
+    // at the one chokepoint both flows share — in the repository).
+    await this.suppressions.suppress({ email, reason: input.reason, detail: input.detail });
     await this.audit.add({
       action: 'email.suppressed',
       resourceType: 'email_suppression',
@@ -66,23 +55,16 @@ export class SuppressionService {
   }
 
   /** Staff: the list + resolve (a fixed address may mail again). */
-  async list(limit = 200): Promise<Array<typeof emailSuppressions.$inferSelect>> {
-    return this.db.root.select().from(emailSuppressions).orderBy(desc(emailSuppressions.createdAt)).limit(Math.min(limit, 1000));
+  async list(limit = 200): Promise<EmailSuppressionRow[]> {
+    return this.suppressions.listSuppressions(limit);
   }
 
   async resolve(email: string, actorId: string): Promise<void> {
-    const updated = await this.db.root
-      .update(emailSuppressions)
-      .set({ resolvedAt: new Date().toISOString() })
-      .where(eq(emailSuppressions.email, email.toLowerCase()))
-      .returning({ id: emailSuppressions.id });
-    if (!updated[0]) {
-      throw ApiError.notFound('suppression entry');
-    }
+    const id = await this.suppressions.resolveSuppression(email);
     await this.audit.add({
       action: 'email.suppression_resolved',
       resourceType: 'email_suppression',
-      resourceId: updated[0].id,
+      resourceId: id,
       actorType: 'account',
       actorId,
       details: {},

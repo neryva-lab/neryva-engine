@@ -1,13 +1,12 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
 import { RedisService } from '../../common/infra/redis.service';
 import { EmailService } from '../corporate/email/email.service';
 import { MembershipsService } from '../organizations/memberships.service';
 import { AccountsService } from '../identity/accounts.service';
-import { notifications } from './schema';
+import { NOTIFICATION_REPOSITORY } from './repositories/repository-tokens';
+import type { INotificationRepository, Notification } from './repositories/notification.repository';
 
 /**
  * The notification service (gap P-2): the one fan-out every alerting path
@@ -48,7 +47,7 @@ export class NotificationsService implements OnModuleInit {
   private static readonly LOGIN_FAILURE_ALERT_THRESHOLD = 5;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(NOTIFICATION_REPOSITORY) private readonly notificationsRepo: INotificationRepository,
     private readonly events: EventBus,
     private readonly redis: RedisService,
     private readonly email: EmailService,
@@ -314,7 +313,7 @@ export class NotificationsService implements OnModuleInit {
     input: { orgId?: string | null; kind: string; severity: 'info' | 'warn' | 'error'; title: string; body?: string; data?: Record<string, unknown>; email?: boolean },
   ): Promise<void> {
     try {
-      await this.db.root.insert(notifications).values({
+      await this.notificationsRepo.create({
         accountId,
         orgId: input.orgId ?? null,
         kind: input.kind,
@@ -438,35 +437,19 @@ export class NotificationsService implements OnModuleInit {
 
   // ── the account-facing feed ────────────────────────────────────────────────
 
-  async list(accountId: string, unreadOnly = false, limit = 50): Promise<Array<typeof notifications.$inferSelect>> {
-    return this.db.root
-      .select()
-      .from(notifications)
-      .where(unreadOnly ? and(eq(notifications.accountId, accountId), isNull(notifications.readAt)) : eq(notifications.accountId, accountId))
-      .orderBy(desc(notifications.createdAt))
-      .limit(Math.min(limit, 200));
+  async list(accountId: string, unreadOnly = false, limit = 50): Promise<Notification[]> {
+    return this.notificationsRepo.list(accountId, unreadOnly, limit);
   }
 
   async markRead(accountId: string, notificationId: string): Promise<void> {
-    await this.db.root
-      .update(notifications)
-      .set({ readAt: new Date().toISOString() })
-      .where(and(eq(notifications.id, notificationId), eq(notifications.accountId, accountId)));
+    await this.notificationsRepo.markRead(accountId, notificationId, new Date().toISOString());
   }
 
   async markAllRead(accountId: string): Promise<void> {
-    await this.db.root
-      .update(notifications)
-      .set({ readAt: new Date().toISOString() })
-      .where(and(eq(notifications.accountId, accountId), isNull(notifications.readAt)));
+    await this.notificationsRepo.markAllRead(accountId, new Date().toISOString());
   }
 
   async unreadCount(accountId: string): Promise<number> {
-    const rows = await this.db.root
-      .select({ id: notifications.id })
-      .from(notifications)
-      .where(and(eq(notifications.accountId, accountId), isNull(notifications.readAt)))
-      .limit(500);
-    return rows.length;
+    return this.notificationsRepo.unreadCount(accountId);
   }
 }

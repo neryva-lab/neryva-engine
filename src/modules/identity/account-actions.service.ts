@@ -1,10 +1,9 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { DbService } from '../../common/infra/db/db.service';
 import { RedisService } from '../../common/infra/redis.service';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
-import { accountActionTokens } from './schema';
+import { ACCOUNT_ACTION_TOKEN_REPOSITORY } from './repositories/repository-tokens';
+import type { IAccountActionTokenRepository } from './repositories/account-action-token.repository';
 
 /**
  * Single-use hashed action tokens for emailed account-lifecycle steps
@@ -17,6 +16,9 @@ import { accountActionTokens } from './schema';
  * that is never emailed (the caller checks existence first and ALWAYS
  * behaves identically to the caller); `consume` failure modes are uniform.
  * A per-account cooldown (60s) stops token-flood emails.
+ *
+ * Persistence goes through `IAccountActionTokenRepository`
+ * (provider-blind); the expiry / attempt-ceiling policy stays here.
  */
 export type ActionKind = 'email_verify' | 'password_reset';
 
@@ -29,7 +31,7 @@ export type ConsumeResult = { ok: true; accountId: string } | { ok: false; reaso
 @Injectable()
 export class AccountActionsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(ACCOUNT_ACTION_TOKEN_REPOSITORY) private readonly tokens: IAccountActionTokenRepository,
     private readonly redis: RedisService,
   ) {}
 
@@ -48,20 +50,16 @@ export class AccountActionsService {
       // bound abuse; the cooldown is a mail-flood guard, not a security bound.
     }
 
-    // Void previous unconsumed tokens of this kind for the account.
-    await this.db.root
-      .update(accountActionTokens)
-      .set({ usedAt: new Date().toISOString() })
-      .where(and(eq(accountActionTokens.accountId, accountId), eq(accountActionTokens.kind, kind), isNull(accountActionTokens.usedAt)));
-
     const token = randomBytes(32).toString('base64url');
-    await this.db.root.insert(accountActionTokens).values({
+    // Void previous unconsumed tokens of this kind for the account, then
+    // insert the new one — separate statements, not one transaction.
+    await this.tokens.issue(
       accountId,
       kind,
-      tokenHash: sha256Hex(token),
-      expiresAt: new Date(Date.now() + TOKEN_TTL_SECONDS * 1000).toISOString(),
-      requestIp: requestIp ?? null,
-    });
+      sha256Hex(token),
+      requestIp ?? null,
+      new Date(Date.now() + TOKEN_TTL_SECONDS * 1000).toISOString(),
+    );
     return { ok: true, token };
   }
 
@@ -86,36 +84,25 @@ export class AccountActionsService {
     if (!row) {
       return { ok: false, reason: 'invalid' };
     }
-    const updated = await this.db.root
-      .update(accountActionTokens)
-      .set({ usedAt: new Date().toISOString() })
-      .where(and(eq(accountActionTokens.id, row.id), isNull(accountActionTokens.usedAt)))
-      .returning({ accountId: accountActionTokens.accountId });
-    if (!updated[0]) {
+    // Atomic single-use compare-and-set by the previously read row id —
+    // exactly one concurrent consumer wins the race.
+    const consumed = await this.tokens.consume(row.id, new Date().toISOString());
+    if (!consumed) {
       return { ok: false, reason: 'invalid' }; // lost the single-use race
     }
-    return { ok: true, accountId: updated[0].accountId };
+    return { ok: true, accountId: consumed.accountId };
   }
 
   /** Record a failed presentation against the live token row. */
   async registerFailedAttempt(token: string, kind: ActionKind): Promise<void> {
-    await this.db.root
-      .update(accountActionTokens)
-      .set({ attempts: sql`${accountActionTokens.attempts} + 1` })
-      .where(and(eq(accountActionTokens.tokenHash, sha256Hex(token)), eq(accountActionTokens.kind, kind), isNull(accountActionTokens.usedAt)));
+    await this.tokens.registerFailedAttempt(sha256Hex(token), kind);
   }
 
-  private async findLive(token: string, kind: ActionKind) {
+  private findLive(token: string, kind: ActionKind) {
     if (token.length < 16 || token.length > 128) {
-      return null;
+      return Promise.resolve(null);
     }
-    const rows = await this.db.root
-      .select()
-      .from(accountActionTokens)
-      .where(and(eq(accountActionTokens.tokenHash, sha256Hex(token)), eq(accountActionTokens.kind, kind)))
-      .limit(1);
-    const row = rows[0];
-    return row && !row.usedAt ? row : null;
+    return this.tokens.peek(sha256Hex(token), kind);
   }
 }
 

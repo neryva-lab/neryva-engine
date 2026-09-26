@@ -8,7 +8,7 @@ import { Idempotent } from '../../common/http/idempotency';
 import { RateLimit } from '../../common/http/rate-limit';
 import { OrgRolesGuard, Roles } from '../../common/policy/org-roles.guard';
 import { assertFreshMfaProof } from '../../common/policy/step-up.guard';
-import { INVITABLE_ROLES } from './schema';
+import { INVITABLE_ROLES } from './roles';
 import { MembershipsService } from './memberships.service';
 import { InvitesService } from './invites.service';
 import { OrgAccessService } from './org-access.service';

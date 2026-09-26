@@ -1,12 +1,11 @@
-import { and, eq, lte, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
 import { EmailService } from '../corporate/email/email.service';
-import { accounts, oauthGrants } from './schema';
+import { ACCOUNT_REPOSITORY } from './repositories/repository-tokens';
+import type { IAccountRepository } from './repositories/account.repository';
 import { AccountsService } from './accounts.service';
 import { CredentialsService } from './credentials.service';
 import { MfaService } from './mfa.service';
@@ -27,13 +26,17 @@ import { MfaService } from './mfa.service';
  *    identities, codes and sessions with it). RETAINED: the audit chain
  *    (append-only by construction — same posture as org purge) and
  *    billing records (financial retention).
+ *
+ * Persistence goes through `IAccountRepository` (provider-blind); the
+ * grace-window policy, confirmation policy, audit writes, events, and
+ * notifications stay here.
  */
 @Injectable()
 export class AccountDeletionService {
   private static readonly logger = new Logger(AccountDeletionService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accountsRepo: IAccountRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly email: EmailService,
@@ -47,7 +50,7 @@ export class AccountDeletionService {
     if (!account || account.status !== 'active') {
       throw ApiError.notFound('account');
     }
-    const existing = await this.deletionRow(input.accountId);
+    const existing = await this.accountsRepo.findDeletionSchedule(input.accountId);
     if (existing?.deletedAt) {
       throw ApiError.conflict('deletion is already scheduled', { scheduled_purge_at: existing.deletedAt });
     }
@@ -73,10 +76,7 @@ export class AccountDeletionService {
     }
 
     const scheduledPurgeAt = new Date(Date.now() + env.ACCOUNT_DELETION_GRACE_DAYS * 86_400_000).toISOString();
-    await this.db.root
-      .update(accounts)
-      .set({ deletedAt: scheduledPurgeAt, updatedAt: new Date().toISOString() })
-      .where(eq(accounts.id, input.accountId));
+    await this.accountsRepo.setScheduledDeletion(input.accountId, scheduledPurgeAt);
     // Sessions/tokens die NOW — grace only protects the data, not access.
     await this.accountsService.revokeAllSessions(input.accountId);
     void this.events.emit('identity.revocation', { kind: 'account_all', subjectId: input.accountId }).catch(() => undefined);
@@ -102,14 +102,11 @@ export class AccountDeletionService {
   }
 
   async cancel(accountId: string): Promise<void> {
-    const row = await this.deletionRow(accountId);
+    const row = await this.accountsRepo.findDeletionSchedule(accountId);
     if (!row?.deletedAt) {
       throw ApiError.notFound('pending account deletion');
     }
-    await this.db.root
-      .update(accounts)
-      .set({ deletedAt: null, updatedAt: new Date().toISOString() })
-      .where(and(eq(accounts.id, accountId), eq(accounts.status, 'active')));
+    await this.accountsRepo.clearScheduledDeletion(accountId);
     await this.audit.add({
       action: 'account.deletion_cancelled',
       resourceType: 'account',
@@ -122,23 +119,22 @@ export class AccountDeletionService {
   }
 
   async status(accountId: string): Promise<{ scheduled_purge_at: string } | null> {
-    const row = await this.deletionRow(accountId);
+    const row = await this.accountsRepo.findDeletionSchedule(accountId);
     return row?.deletedAt ? { scheduled_purge_at: row.deletedAt } : null;
   }
 
   /** The daily purge pass: erase due accounts. Returns purged ids (ops evidence). */
   async purgeDue(): Promise<string[]> {
-    const due = await this.db.root
-      .select({ id: accounts.id })
-      .from(accounts)
-      .where(and(lte(accounts.deletedAt, new Date().toISOString())));
+    // The repository takes a limit; the previous implementation scanned the
+    // whole due set, so pass an effectively-unbounded one to preserve that.
+    const due = await this.accountsRepo.listPurgeDue(new Date().toISOString(), Number.MAX_SAFE_INTEGER);
     const purged: string[] = [];
-    for (const row of due) {
+    for (const accountId of due) {
       try {
-        await this.purge(row.id);
-        purged.push(row.id);
+        await this.purge(accountId);
+        purged.push(accountId);
       } catch (err) {
-        AccountDeletionService.logger.error(`purge failed for account ${row.id}: ${(err as Error).message}`);
+        AccountDeletionService.logger.error(`purge failed for account ${accountId}: ${(err as Error).message}`);
       }
     }
     return purged;
@@ -154,17 +150,7 @@ export class AccountDeletionService {
       details: {},
     });
 
-    // Grants carry no FK to accounts — explicit delete first (sessions and
-    // everything under the account row go with the final DELETE's cascade).
-    await this.db.root.delete(oauthGrants).where(eq(oauthGrants.accountId, accountId));
-    await this.db.root.execute(sql`delete from notifications where account_id = ${accountId}`);
-    // Justification (withBypass): the purge sweeps the account out of every
-    // org at once — an explicitly administrative, cross-tenant delete.
-    await this.db.withBypass(async (tx) => {
-      await tx.execute(sql`delete from org_group_members where account_id = ${accountId}`);
-      await tx.execute(sql`delete from org_memberships where account_id = ${accountId}`);
-    });
-    await this.db.root.delete(accounts).where(eq(accounts.id, accountId));
+    await this.accountsRepo.purgeAccount(accountId);
 
     await this.audit.add({
       action: 'account.purged',
@@ -177,10 +163,5 @@ export class AccountDeletionService {
       },
     });
     await this.events.emit(EngineEvents.AccountPurged, { accountId });
-  }
-
-  private async deletionRow(accountId: string) {
-    const rows = await this.db.root.select({ deletedAt: accounts.deletedAt }).from(accounts).where(eq(accounts.id, accountId)).limit(1);
-    return rows[0] ?? null;
   }
 }

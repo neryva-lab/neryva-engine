@@ -1,12 +1,10 @@
-import { and, eq } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Injectable, Inject } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { uuidv7 } from '../../common/ids/uuidv7';
-import { modelCatalogEntries, ModelCatalogEntry, MODEL_CATALOG_STATUSES, ModelCapabilities } from './model-catalog.schema';
+import { ModelCatalogEntry, MODEL_CATALOG_STATUSES, ModelCapabilities } from './model-catalog.schema';
 import { ProviderCredentialsService } from './provider-credentials.service';
-import { publishedConfigs } from '../config-publish/config-publish.schema';
+import { MODEL_CATALOG_REPOSITORY } from './repositories/repository-tokens';
+import type { IModelCatalogRepository } from './repositories/model-catalog.repository';
 
 /**
  * Platform model catalog — REL-1.6 (release_ledger.md). GLOBAL, staff-managed
@@ -80,7 +78,7 @@ export class ModelCatalogService {
   private static readonly LIST_CAP = 500;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(MODEL_CATALOG_REPOSITORY) private readonly catalog: IModelCatalogRepository,
     private readonly audit: AuditService,
     private readonly credentials: ProviderCredentialsService,
   ) {}
@@ -107,33 +105,15 @@ export class ModelCatalogService {
     if (displayName.length === 0 || displayName.length > 256) {
       throw ApiError.validation({ display_name: 'must be 1..256 chars' });
     }
-    const rows = await this.db.root
-      .insert(modelCatalogEntries)
-      .values({
-        id: uuidv7(),
-        provider: input.provider.trim(),
-        modelId,
-        displayName,
-        contextWindowTokens: input.contextWindowTokens ?? null,
-        maxOutputTokens: input.maxOutputTokens ?? null,
-        capabilities: input.capabilities ?? {},
-        residency: input.residency ?? null,
-        status: 'active',
-      })
-      .onConflictDoUpdate({
-        target: [modelCatalogEntries.provider, modelCatalogEntries.modelId],
-        set: {
-          displayName,
-          contextWindowTokens: input.contextWindowTokens ?? null,
-          maxOutputTokens: input.maxOutputTokens ?? null,
-          capabilities: input.capabilities ?? {},
-          residency: input.residency ?? null,
-          status: 'active',
-          updatedAt: new Date().toISOString(),
-        },
-      })
-      .returning();
-    const row = rows[0];
+    const row = await this.catalog.upsertEntry({
+      provider: input.provider.trim(),
+      modelId,
+      displayName,
+      contextWindowTokens: input.contextWindowTokens ?? null,
+      maxOutputTokens: input.maxOutputTokens ?? null,
+      capabilities: input.capabilities ?? {},
+      residency: input.residency ?? null,
+    });
     await this.audit.add({
       action: 'model_catalog.entry_upserted',
       resourceType: 'model_catalog_entry',
@@ -151,9 +131,9 @@ export class ModelCatalogService {
       if (!(MODEL_CATALOG_STATUSES as readonly string[]).includes(status)) {
         throw ApiError.validation({ status: `must be one of ${MODEL_CATALOG_STATUSES.join('|')}` });
       }
-      return this.db.root.select().from(modelCatalogEntries).where(eq(modelCatalogEntries.status, status)).limit(ModelCatalogService.LIST_CAP);
+      return this.catalog.listEntries(status);
     }
-    return this.db.root.select().from(modelCatalogEntries).limit(ModelCatalogService.LIST_CAP);
+    return this.catalog.listEntries();
   }
 
   async setEntryStatus(input: { entryId: string; status: string; actorId: string }): Promise<ModelCatalogEntry> {
@@ -163,24 +143,17 @@ export class ModelCatalogService {
     if (!(MODEL_CATALOG_STATUSES as readonly string[]).includes(input.status)) {
       throw ApiError.validation({ status: `must be one of ${MODEL_CATALOG_STATUSES.join('|')}` });
     }
-    const rows = await this.db.root
-      .update(modelCatalogEntries)
-      .set({ status: input.status, updatedAt: new Date().toISOString() })
-      .where(eq(modelCatalogEntries.id, input.entryId))
-      .returning();
-    if (rows.length === 0) {
-      throw ApiError.notFound('model catalog entry');
-    }
+    const row = await this.catalog.setEntryStatus({ entryId: input.entryId, status: input.status });
     await this.audit.add({
       action: 'model_catalog.entry_status_set',
       resourceType: 'model_catalog_entry',
-      resourceId: rows[0].id,
+      resourceId: row.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: null,
-      details: { provider: rows[0].provider, model_id: rows[0].modelId, status: input.status },
+      details: { provider: row.provider, model_id: row.modelId, status: input.status },
     });
-    return rows[0];
+    return row;
   }
 
   /**
@@ -197,20 +170,10 @@ export class ModelCatalogService {
     const [entries, facts] = await Promise.all([this.listEntries('active'), this.credentials.providerFacts(orgId)]);
     // REL-11.2: fetch org residency for the availability reasons. Reuse the
     // same pin as the publish gate (knowledge_config.residency) — no new
-    // table, no migration. Unset = default (permissive). Direct DB read
-    // keeps the catalog service's constructor stable.
-    let orgResidency: string = 'default';
-    try {
-      const rows = await this.db.root
-        .select({ payload: publishedConfigs.payload })
-        .from(publishedConfigs)
-        .where(and(eq(publishedConfigs.orgId, orgId), eq(publishedConfigs.scope, 'knowledge_config')))
-        .limit(1);
-      const raw = (rows[0]?.payload as { residency?: string } | undefined)?.residency;
-      if (raw) orgResidency = raw;
-    } catch {
-      // keep default — publish-time gate is the hard enforcement
-    }
+    // table, no migration. Unset = default (permissive). The pin read lives
+    // in the catalog repository (foreign-owned table) and keeps this
+    // service's constructor stable.
+    const orgResidency = await this.catalog.orgResidencyPin(orgId);
     const { modelServesResidency, normalizeResidency } = await import('./residency');
     let normalizedOrg: import('./residency').Residency = 'default';
     try {
@@ -259,15 +222,12 @@ export class ModelCatalogService {
     if (!UUID_RE.test(orgId)) {
       throw ApiError.validation({ orgId: 'must be a uuid' });
     }
-    const entries = await this.db.root
-      .select({ provider: modelCatalogEntries.provider, modelId: modelCatalogEntries.modelId })
-      .from(modelCatalogEntries)
-      .where(eq(modelCatalogEntries.status, 'active'));
-    if (entries.length === 0) {
+    const refs = await this.catalog.listActiveRefs();
+    if (refs.length === 0) {
       return null;
     }
     const facts = await this.credentials.providerFacts(orgId);
     const credentialProviders = new Set([...facts.entries()].filter(([, f]) => f.usable).map(([provider]) => provider));
-    return { models: new Set(entries.map((e) => `${e.provider}/${e.modelId}`)), credentialProviders };
+    return { models: new Set(refs.map((e) => `${e.provider}/${e.modelId}`)), credentialProviders };
   }
 }

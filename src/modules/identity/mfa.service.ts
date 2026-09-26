@@ -1,12 +1,12 @@
-import { and, eq, isNull } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { envelopeDecrypt, envelopeEncrypt, sha256Hex } from '../../common/infra/crypto/envelope';
 import { mintMfaProof } from '../../common/auth/mfa-proof';
-import { accountCredentials, accountRecoveryCodes, accounts } from './schema';
+import { MFA_REPOSITORY, ACCOUNT_REPOSITORY } from './repositories/repository-tokens';
+import type { IMfaRepository } from './repositories/mfa.repository';
+import type { IAccountRepository } from './repositories/account.repository';
 import { generateTotpSecret, otpauthUri, verifyTotp } from './totp';
 
 /**
@@ -21,6 +21,9 @@ import { generateTotpSecret, otpauthUri, verifyTotp } from './totp';
  *   kind 'totp'         — active; envelope = { secret }, verified_at set
  * accounts.mfa_level: none → totp (updated on activate/disable).
  *
+ * Persistence goes through `IMfaRepository` (provider-blind); all crypto,
+ * TOTP, and policy stays here.
+ *
  * Security: every state change is audited; disable requires a current TOTP
  * code (or a recovery code) AND revokes all sessions; recovery codes are
  * consumed atomically single-use.
@@ -30,32 +33,20 @@ const RECOVERY_CODE_COUNT = 10;
 @Injectable()
 export class MfaService {
   constructor(
-    private readonly db: DbService,
+    @Inject(MFA_REPOSITORY) private readonly mfa: IMfaRepository,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accounts: IAccountRepository,
     private readonly audit: AuditService,
   ) {}
 
   /** Step 1: generate + persist a pending secret. Returns the QR payload + secret once. */
   async enroll(accountId: string, email: string): Promise<{ secret: string; otpauth_url: string }> {
     // Refuse a second parallel enrollment; finish or disable the first.
-    const existing = await this.activeCredential(accountId);
+    const existing = await this.mfa.findActive(accountId);
     if (existing) {
       throw ApiError.conflict('TOTP is already enabled for this account');
     }
-    const pending = await this.pendingCredential(accountId);
     const { secretBase32 } = generateTotpSecret();
-    const envelope = { secret: envelopeEncrypt(secretBase32) };
-    if (pending) {
-      await this.db.root
-        .update(accountCredentials)
-        .set({ envelope, updatedAt: new Date().toISOString() })
-        .where(eq(accountCredentials.id, pending.id));
-    } else {
-      await this.db.root.insert(accountCredentials).values({
-        accountId,
-        kind: 'totp_pending',
-        envelope,
-      });
-    }
+    await this.mfa.enrollPending(accountId, envelopeEncrypt(secretBase32));
     await this.audit.add({
       action: 'mfa.enrollment_started',
       resourceType: 'account',
@@ -69,11 +60,11 @@ export class MfaService {
 
   /** Step 2: verify a code against the pending secret → activate + mint recovery codes. */
   async activate(accountId: string, code: string): Promise<{ recovery_codes: string[] }> {
-    const pending = await this.pendingCredential(accountId);
-    if (!pending || !pending.envelope) {
+    const pending = await this.mfa.findPending(accountId);
+    if (!pending || !pending.totpSecretEnvelope) {
       throw ApiError.conflict('no pending TOTP enrollment — start one first');
     }
-    const secret = this.pendingSecret(pending.envelope);
+    const secret = envelopeDecrypt(pending.totpSecretEnvelope);
     if (!verifyTotp(secret, code)) {
       await this.audit.add({
         action: 'mfa.activate_failed',
@@ -88,21 +79,7 @@ export class MfaService {
 
     const now = new Date().toISOString();
     // Promote: delete pending kind row, upsert active 'totp' credential.
-    await this.db.root.transaction(async (tx) => {
-      await tx.delete(accountCredentials).where(and(eq(accountCredentials.accountId, accountId), eq(accountCredentials.kind, 'totp_pending')));
-      await tx
-        .insert(accountCredentials)
-        .values({ accountId, kind: 'totp', envelope: pending.envelope, verifiedAt: now })
-        .onConflictDoUpdate({
-          // AUTH-3.1: the (account, kind) unique index is now PARTIAL
-          // (WHERE kind <> 'webauthn') — the conflict target must carry the
-          // implying predicate or inference fails.
-          target: [accountCredentials.accountId, accountCredentials.kind],
-          targetWhere: eq(accountCredentials.kind, 'totp'),
-          set: { envelope: pending.envelope, verifiedAt: now, revokedAt: null, updatedAt: now },
-        });
-      await tx.update(accounts).set({ mfaLevel: 'totp', updatedAt: now }).where(eq(accounts.id, accountId));
-    });
+    await this.mfa.activate(accountId, pending.totpSecretEnvelope, now);
 
     const recoveryCodes = await this.regenerateRecoveryCodes(accountId);
     await this.audit.add({
@@ -118,7 +95,7 @@ export class MfaService {
 
   /** Disable requires a live second factor (TOTP or recovery code). */
   async disable(accountId: string, factor: string): Promise<void> {
-    const active = await this.activeCredential(accountId);
+    const active = await this.mfa.findActive(accountId);
     if (!active) {
       throw ApiError.conflict('TOTP is not enabled');
     }
@@ -135,13 +112,11 @@ export class MfaService {
       throw ApiError.unauthenticated('Invalid code');
     }
 
-    const now = new Date().toISOString();
-    await this.db.root.transaction(async (tx) => {
-      await tx.delete(accountCredentials).where(and(eq(accountCredentials.accountId, accountId), eq(accountCredentials.kind, 'totp')));
-      await tx.delete(accountCredentials).where(and(eq(accountCredentials.accountId, accountId), eq(accountCredentials.kind, 'totp_pending')));
-      await tx.delete(accountRecoveryCodes).where(and(eq(accountRecoveryCodes.accountId, accountId), isNull(accountRecoveryCodes.usedAt)));
-      await tx.update(accounts).set({ mfaLevel: 'none', updatedAt: now }).where(eq(accounts.id, accountId));
-    });
+    await this.mfa.disable(accountId, new Date().toISOString());
+    // Disabling the second factor drops the account to single-factor —
+    // all existing sessions must die (the kill-switch). This was
+    // documented but never implemented.
+    await this.accounts.revokeAllSessions(accountId, new Date().toISOString());
     await this.audit.add({
       action: 'mfa.disabled',
       resourceType: 'account',
@@ -154,7 +129,7 @@ export class MfaService {
 
   /** Mint a step-up proof after verifying a live second factor (the producer side). */
   async mintProof(accountId: string, factor: string): Promise<{ proof: string; expires_in_seconds: number }> {
-    const active = await this.activeCredential(accountId);
+    const active = await this.mfa.findActive(accountId);
     if (!active) {
       throw ApiError.conflict('TOTP is not enabled — enroll first');
     }
@@ -170,13 +145,7 @@ export class MfaService {
       });
       throw ApiError.unauthenticated('Invalid code');
     }
-    if (active.envelope) {
-      const now = new Date().toISOString();
-      await this.db.root
-        .update(accountCredentials)
-        .set({ lastUsedAt: now, updatedAt: now })
-        .where(eq(accountCredentials.id, active.id));
-    }
+    await this.mfa.touchLastUsed(active.id, new Date().toISOString());
     const proof = mintMfaProof(accountId);
     return { proof, expires_in_seconds: 300 };
   }
@@ -184,16 +153,13 @@ export class MfaService {
   /** Fresh set of single-use recovery codes (invalidates all previous). Shown ONCE. */
   async regenerateRecoveryCodes(accountId: string): Promise<string[]> {
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, () => randomBytes(8).toString('base64url').slice(0, 10));
-    await this.db.root.transaction(async (tx) => {
-      await tx.delete(accountRecoveryCodes).where(eq(accountRecoveryCodes.accountId, accountId));
-      await tx.insert(accountRecoveryCodes).values(codes.map((code) => ({ accountId, codeHash: sha256Hex(code) })));
-    });
+    await this.mfa.regenerateRecoveryCodes(accountId, codes.map((c) => sha256Hex(c)), new Date().toISOString());
     return codes;
   }
 
   /** Regenerate requires a live factor (proof from caller is step-up's business). */
   async rotateRecoveryCodes(accountId: string, factor: string): Promise<{ recovery_codes: string[] }> {
-    const active = await this.activeCredential(accountId);
+    const active = await this.mfa.findActive(accountId);
     if (!active) {
       throw ApiError.conflict('TOTP is not enabled');
     }
@@ -220,7 +186,7 @@ export class MfaService {
    * they are accepted AS the factor below.
    */
   async requiresSecondFactor(accountId: string): Promise<boolean> {
-    return (await this.activeCredential(accountId)) !== null;
+    return (await this.mfa.findActive(accountId)) !== null;
   }
 
   /**
@@ -229,7 +195,7 @@ export class MfaService {
    * owns rate limiting, auditing, and the failure UX.
    */
   async verifyLoginFactor(accountId: string, presented: string): Promise<boolean> {
-    const active = await this.activeCredential(accountId);
+    const active = await this.mfa.findActive(accountId);
     if (!active) {
       return false;
     }
@@ -240,64 +206,32 @@ export class MfaService {
     if (!verifyTotp(this.activeSecret(active), presented)) {
       return false;
     }
-    const now = new Date().toISOString();
-    await this.db.root
-      .update(accountCredentials)
-      .set({ lastUsedAt: now, updatedAt: now })
-      .where(eq(accountCredentials.id, active.id));
+    await this.mfa.touchLastUsed(active.id, new Date().toISOString());
     return true;
   }
 
   async status(accountId: string): Promise<{ mfa_level: string; totp_enabled: boolean; pending_enrollment: boolean; unused_recovery_codes: number }> {
-    const [accountRow] = await this.db.root.select({ mfaLevel: accounts.mfaLevel }).from(accounts).where(eq(accounts.id, accountId)).limit(1);
-    const active = await this.activeCredential(accountId);
-    const pending = await this.pendingCredential(accountId);
-    const unused = await this.db.root
-      .select({ id: accountRecoveryCodes.id })
-      .from(accountRecoveryCodes)
-      .where(and(eq(accountRecoveryCodes.accountId, accountId), isNull(accountRecoveryCodes.usedAt)));
+    const [mfaLevel, active, pending, unused] = await Promise.all([
+      this.mfa.mfaLevel(accountId),
+      this.mfa.findActive(accountId),
+      this.mfa.findPending(accountId),
+      this.mfa.countUnusedRecoveryCodes(accountId),
+    ]);
     return {
-      mfa_level: accountRow?.mfaLevel ?? 'none',
+      mfa_level: mfaLevel,
       totp_enabled: !!active,
       pending_enrollment: !!pending,
-      unused_recovery_codes: unused.length,
+      unused_recovery_codes: unused,
     };
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
 
-  private async activeCredential(accountId: string) {
-    const rows = await this.db.root
-      .select()
-      .from(accountCredentials)
-      .where(and(eq(accountCredentials.accountId, accountId), eq(accountCredentials.kind, 'totp'), isNull(accountCredentials.revokedAt)))
-      .limit(1);
-    return rows[0] ?? null;
-  }
-
-  private async pendingCredential(accountId: string) {
-    const rows = await this.db.root
-      .select()
-      .from(accountCredentials)
-      .where(and(eq(accountCredentials.accountId, accountId), eq(accountCredentials.kind, 'totp_pending')))
-      .limit(1);
-    return rows[0] ?? null;
-  }
-
-  private activeSecret(row: typeof accountCredentials.$inferSelect): string {
-    const envelope = row.envelope as { secret?: string } | null;
-    if (!envelope?.secret) {
+  private activeSecret(credential: { totpSecretEnvelope: string | null }): string {
+    if (!credential.totpSecretEnvelope) {
       throw ApiError.internal();
     }
-    return envelopeDecrypt(envelope.secret);
-  }
-
-  private pendingSecret(envelope: unknown): string {
-    const env_ = envelope as { secret?: string } | null;
-    if (!env_?.secret) {
-      throw ApiError.internal();
-    }
-    return envelopeDecrypt(env_.secret);
+    return envelopeDecrypt(credential.totpSecretEnvelope);
   }
 
   /** Atomically consume one recovery code; false when none matches / already used. */
@@ -305,11 +239,6 @@ export class MfaService {
     if (presented.length !== 10) {
       return false;
     }
-    const updated = await this.db.root
-      .update(accountRecoveryCodes)
-      .set({ usedAt: new Date().toISOString() })
-      .where(and(eq(accountRecoveryCodes.accountId, accountId), eq(accountRecoveryCodes.codeHash, sha256Hex(presented)), isNull(accountRecoveryCodes.usedAt)))
-      .returning({ id: accountRecoveryCodes.id });
-    return updated.length === 1;
+    return this.mfa.consumeRecoveryCode(accountId, sha256Hex(presented), new Date().toISOString());
   }
 }

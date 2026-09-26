@@ -1,12 +1,9 @@
-import { and, asc, count, eq } from 'drizzle-orm';
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { pgViolation } from '../../common/infra/db/pg-types';
-import { accounts } from '../identity/schema';
 import { MembershipsService } from './memberships.service';
-import { orgGroupMembers, orgGroups, orgMemberships } from './schema';
+import { GROUP_REPOSITORY } from './repositories/repository-tokens';
+import type { IGroupRepository } from './repositories/group.repository';
 
 export interface GroupView {
   id: string;
@@ -34,42 +31,23 @@ export interface GroupMemberView {
 @Injectable()
 export class OrgGroupsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(GROUP_REPOSITORY) private readonly groups: IGroupRepository,
     private readonly audit: AuditService,
     private readonly memberships: MembershipsService,
   ) {}
 
   async list(orgId: string): Promise<GroupView[]> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          id: orgGroups.id,
-          name: orgGroups.name,
-          description: orgGroups.description,
-          createdAt: orgGroups.createdAt,
-          updatedAt: orgGroups.updatedAt,
-          memberCount: count(orgGroupMembers.accountId),
-        })
-        .from(orgGroups)
-        .leftJoin(orgGroupMembers, eq(orgGroupMembers.groupId, orgGroups.id))
-        .where(eq(orgGroups.orgId, orgId))
-        .groupBy(orgGroups.id)
-        .orderBy(asc(orgGroups.name)),
-    );
-    return rows.map((row) => ({ ...row, memberCount: Number(row.memberCount) }));
+    // The repository returns entries shaped exactly like GroupView
+    // (name-ordered, member counts attached).
+    return this.groups.listGroups(orgId);
   }
 
   async get(orgId: string, groupId: string): Promise<GroupView> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(orgGroups).where(and(eq(orgGroups.id, groupId), eq(orgGroups.orgId, orgId))).limit(1),
-    );
-    if (!rows[0]) {
+    const entry = await this.groups.getGroup(orgId, groupId);
+    if (!entry) {
       throw new NotFoundException('group');
     }
-    const members = await this.db.withOrg(orgId, (tx) =>
-      tx.select({ n: count() }).from(orgGroupMembers).where(eq(orgGroupMembers.groupId, groupId)),
-    );
-    return { id: rows[0].id, name: rows[0].name, description: rows[0].description, memberCount: Number(members[0]?.n ?? 0), createdAt: rows[0].createdAt, updatedAt: rows[0].updatedAt };
+    return entry;
   }
 
   async create(input: { orgId: string; name: string; description?: string; actorId: string }): Promise<GroupView> {
@@ -77,31 +55,34 @@ export class OrgGroupsService {
     if (name.length < 1) {
       throw ApiError.validation({ name: 'a group name is required' });
     }
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(orgGroups)
-        .values({ orgId: input.orgId, name, description: input.description?.slice(0, 512) ?? null, createdBy: input.actorId })
-        .onConflictDoNothing({ target: [orgGroups.orgId, orgGroups.name] })
-        .returning(),
-    );
-    if (!inserted[0]) {
+    // The repository returns null on a name collision — the service maps it
+    // to the 409 exactly like the pg onConflictDoNothing path did.
+    const inserted = await this.groups.createGroup({
+      orgId: input.orgId,
+      name,
+      description: input.description?.slice(0, 512) ?? null,
+      createdBy: input.actorId,
+    });
+    if (!inserted) {
       throw ApiError.conflict('a group with that name exists in this organization');
     }
     await this.audit.add({
       action: 'org.group_created',
       resourceType: 'org_group',
-      resourceId: inserted[0].id,
+      resourceId: inserted.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
       details: { name },
     });
-    return { id: inserted[0].id, name: inserted[0].name, description: inserted[0].description, memberCount: 0, createdAt: inserted[0].createdAt, updatedAt: inserted[0].updatedAt };
+    return { id: inserted.id, name: inserted.name, description: inserted.description, memberCount: 0, createdAt: inserted.createdAt, updatedAt: inserted.updatedAt };
   }
 
   async update(input: { orgId: string; groupId: string; name?: string; description?: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.groupId);
-    const updates: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+    const updates: { name?: string; description?: string | null; updatedAt: string } = {
+      updatedAt: new Date().toISOString(),
+    };
     if (input.name !== undefined) {
       const name = input.name.trim().slice(0, 128);
       if (name.length < 1) {
@@ -112,25 +93,14 @@ export class OrgGroupsService {
     if (input.description !== undefined) {
       updates.description = input.description?.slice(0, 512) ?? null;
     }
-    let updated: { id: string }[];
-    try {
-      updated = await this.db.withOrg(input.orgId, (tx) =>
-        tx
-          .update(orgGroups)
-          .set(updates as never)
-          .where(and(eq(orgGroups.id, input.groupId), eq(orgGroups.orgId, input.orgId)))
-          .returning({ id: orgGroups.id }),
-      );
-    } catch (err) {
-      // A rename onto an existing group name trips the (org_id, name) unique
-      // index — translate it to the same stable 409 the create path returns
-      // instead of leaking a raw 23505 as a 500.
-      if (pgViolation(err).code === '23505') {
-        throw ApiError.conflict('a group with that name exists in this organization');
-      }
-      throw err;
-    }
-    if (!updated[0]) {
+    // Null means the rename hit an existing group name — the 409 the
+    // original translated from the pg 23505 path.
+    const updated = await this.groups.updateGroup({
+      orgId: input.orgId,
+      groupId: input.groupId,
+      ...updates,
+    });
+    if (!updated) {
       throw ApiError.conflict('a group with that name exists in this organization');
     }
     await this.audit.add({
@@ -140,16 +110,13 @@ export class OrgGroupsService {
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
-      details: { ...(updates.name ? { name: updates.name as string } : {}) },
+      details: { ...(updates.name ? { name: updates.name } : {}) },
     });
   }
 
   async remove(input: { orgId: string; groupId: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.groupId);
-    await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.delete(orgGroupMembers).where(eq(orgGroupMembers.groupId, input.groupId));
-      await tx.delete(orgGroups).where(and(eq(orgGroups.id, input.groupId), eq(orgGroups.orgId, input.orgId)));
-    });
+    await this.groups.removeGroup(input.orgId, input.groupId);
     await this.audit.add({
       action: 'org.group_deleted',
       resourceType: 'org_group',
@@ -162,36 +129,24 @@ export class OrgGroupsService {
 
   async listMembers(orgId: string, groupId: string): Promise<GroupMemberView[]> {
     await this.get(orgId, groupId);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          accountId: orgGroupMembers.accountId,
-          addedAt: orgGroupMembers.addedAt,
-          email: accounts.email,
-          displayName: accounts.displayName,
-          role: orgMemberships.role,
-        })
-        .from(orgGroupMembers)
-        .innerJoin(accounts, eq(accounts.id, orgGroupMembers.accountId))
-        .innerJoin(orgMemberships, and(eq(orgMemberships.accountId, orgGroupMembers.accountId), eq(orgMemberships.orgId, orgGroupMembers.orgId)))
-        .where(eq(orgGroupMembers.groupId, groupId))
-        .orderBy(asc(orgGroupMembers.addedAt)),
-    );
-    return rows.map((row) => ({ accountId: row.accountId, email: row.email, displayName: row.displayName, role: row.role, addedAt: row.addedAt }));
+    // The repository returns details shaped exactly like GroupMemberView
+    // (added_at-ordered, email + role joined).
+    return this.groups.listGroupMembers(orgId, groupId);
   }
 
   async addMember(input: { orgId: string; groupId: string; accountId: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.groupId);
     // Group members must be active members of the org — the role matrix stays authoritative.
     await this.memberships.getMember(input.orgId, input.accountId);
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(orgGroupMembers)
-        .values({ groupId: input.groupId, accountId: input.accountId, orgId: input.orgId, addedBy: input.actorId })
-        .onConflictDoNothing({ target: [orgGroupMembers.groupId, orgGroupMembers.accountId] })
-        .returning({ accountId: orgGroupMembers.accountId }),
-    );
-    if (!inserted[0]) {
+    // False means the (group, account) pair already exists — replay stays a
+    // conflict, not idempotent.
+    const added = await this.groups.addGroupMember({
+      orgId: input.orgId,
+      groupId: input.groupId,
+      accountId: input.accountId,
+      addedBy: input.actorId,
+    });
+    if (!added) {
       throw ApiError.conflict('member is already in this group');
     }
     await this.audit.add({
@@ -207,13 +162,12 @@ export class OrgGroupsService {
 
   async removeMember(input: { orgId: string; groupId: string; accountId: string; actorId: string }): Promise<void> {
     await this.get(input.orgId, input.groupId);
-    const removed = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .delete(orgGroupMembers)
-        .where(and(eq(orgGroupMembers.groupId, input.groupId), eq(orgGroupMembers.accountId, input.accountId)))
-        .returning({ accountId: orgGroupMembers.accountId }),
-    );
-    if (!removed[0]) {
+    const removed = await this.groups.removeGroupMember({
+      orgId: input.orgId,
+      groupId: input.groupId,
+      accountId: input.accountId,
+    });
+    if (!removed) {
       throw ApiError.notFound('group member');
     }
     await this.audit.add({

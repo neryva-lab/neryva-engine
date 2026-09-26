@@ -1,42 +1,47 @@
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Injectable, Logger } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
 import { StorageService } from '../../common/infra/storage/storage.service';
-import { artifacts } from '../knowledge/schema';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { withSpan, setSpanAttributes, hashedAttr } from '../../common/observability/spans';
-import { runEvents, runs, messages, conversations, conversationSummaries, Run } from './schema';
-import {
-  policySnapshots,
-  assistants,
-  assistantVersions,
-  controlBlocks,
-} from '../assistants/schema';
-import { toolCatalog } from '../assistants/tool-catalog.schema';
-import { BUILT_IN_TOOLS } from '../assistants/tool-catalog.service';
-import {
-  providerCredentials,
-  providerEnablements,
-  isModelProvider,
-} from '../assistants/provider-credentials.schema';
-import { ControlBlocksService } from '../assistants/control-blocks.service';
-import { RetrievalService } from '../knowledge/retrieval.service';
-import { spotlight, redactPii } from '../../common/guardrails';
-import { envelopeDecrypt } from '../../common/infra/crypto/envelope';
-import { memoryItems } from '../knowledge/schema';
-import { modelCatalogEntries } from '../assistants/model-catalog.schema';
-import { approvals, checkpoints, memoryProposals, toolEffects, runIdempotency } from './mcp.schema';
-import { assertRunTransition, isRunState, isTerminalRun } from './state-machine';
+import type { Run } from './schema';
+import { isRunState, isTerminalRun } from './state-machine';
 import { RetentionPurgeService } from '../lifecycle/retention-purge.service';
 import { QuotaService } from '../billing/quota.service';
 import { EscalationsService } from './escalations.service';
 import { issueCapability } from '../../common/auth/capability-token';
 import { qualifyModelAliases } from '../../common/model-aliases';
+import { isModelProvider } from '../assistants/provider-credentials.schema';
+import { modelCatalogEntries } from '../assistants/model-catalog.schema';
+import { ControlBlocksService } from '../assistants/control-blocks.service';
+import { RetrievalService } from '../knowledge/retrieval.service';
+import { spotlight, redactPii } from '../../common/guardrails';
+import { envelopeDecrypt } from '../../common/infra/crypto/envelope';
+import {
+  RUN_LEASE_REPOSITORY,
+  RUN_EVENTS_REPOSITORY,
+  APPROVAL_REPOSITORY,
+  TOOL_AUTHORITY_REPOSITORY,
+  CHECKPOINT_REPOSITORY,
+  ARTIFACT_REPOSITORY,
+  RUN_CONTEXT_REPOSITORY,
+  MEMORY_REPOSITORY,
+  RUN_TERMINAL_REPOSITORY,
+  CONVERSATION_REPOSITORY,
+} from './repositories/repository-tokens';
+import type { IRunLeaseRepository } from './repositories/run-lease.repository';
+import type { IRunEventsRepository } from './repositories/run-events.repository';
+import type { IApprovalRepository } from './repositories/approval.repository';
+import type { IToolAuthorityRepository } from './repositories/tool-authority.repository';
+import type { ICheckpointRepository } from './repositories/checkpoint.repository';
+import type { IArtifactRepository } from './repositories/artifact.repository';
+import type { IRunContextRepository } from './repositories/run-context.repository';
+import type { IMemoryRepository } from './repositories/memory.repository';
+import type { IRunTerminalRepository } from './repositories/run-terminal.repository';
+import type { IConversationRepository } from './repositories/conversation.repository';
 
 /**
  * Engine authority side of neryva.mcp.v1 — Phase 5 (imp/ledger.md 5.4-5.11).
@@ -55,13 +60,33 @@ export class McpAuthorityService {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   constructor(
-    private readonly db: DbService,
+    private readonly db: DbService, // Retained for model-catalog global read (outside conversations repository scope)
     private readonly audit: AuditService,
     private readonly storage: StorageService,
     private readonly purge: RetentionPurgeService,
     private readonly retrieval: RetrievalService,
     private readonly escalations: EscalationsService,
     private readonly quota: QuotaService,
+    @Inject(RUN_LEASE_REPOSITORY)
+    private readonly runLease: IRunLeaseRepository,
+    @Inject(RUN_EVENTS_REPOSITORY)
+    private readonly runEventsRepo: IRunEventsRepository,
+    @Inject(APPROVAL_REPOSITORY)
+    private readonly approvalsRepo: IApprovalRepository,
+    @Inject(TOOL_AUTHORITY_REPOSITORY)
+    private readonly toolAuthority: IToolAuthorityRepository,
+    @Inject(CHECKPOINT_REPOSITORY)
+    private readonly checkpointsRepo: ICheckpointRepository,
+    @Inject(ARTIFACT_REPOSITORY)
+    private readonly artifactsRepo: IArtifactRepository,
+    @Inject(RUN_CONTEXT_REPOSITORY)
+    private readonly runContext: IRunContextRepository,
+    @Inject(MEMORY_REPOSITORY)
+    private readonly memory: IMemoryRepository,
+    @Inject(RUN_TERMINAL_REPOSITORY)
+    private readonly terminalRuns: IRunTerminalRepository,
+    @Inject(CONVERSATION_REPOSITORY)
+    private readonly conversationsRepo: IConversationRepository,
   ) {}
 
   /**
@@ -104,93 +129,23 @@ export class McpAuthorityService {
     expectedEpoch: number;
     renewUntil: Date;
   }): Promise<{ run: Run; acquired: boolean; leaseEpoch: number }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (isTerminalRun(run.state)) {
-        throw ApiError.conflict('run is terminal; lease cannot be acquired', { state: run.state });
-      }
-      // CAS: caller's epoch must match; first acquire matches the NULL owner.
-      const epochMatches = run.leaseEpoch === input.expectedEpoch;
-      const ownerMatches = run.leaseOwner === null || run.leaseOwner === input.expectedOwner;
-      if (!epochMatches || !ownerMatches) {
-        throw ApiError.conflict('stale lease epoch', {
-          expected_epoch: input.expectedEpoch,
-          actual_epoch: run.leaseEpoch,
-          lease_owner: run.leaseOwner ?? null,
-        });
-      }
-      const newEpoch = run.leaseEpoch + 1;
-      // Lease state is FENCING, not business state — `runs.version` (the
-      // expected_version CAS domain) is deliberately NOT bumped here; the
-      // epoch increment is the fencing counter (state-machine.ts pinned note).
-      const updated = await tx
-        .update(runs)
-        .set({
-          leaseOwner: input.callerScope,
-          leaseEpoch: newEpoch,
-          leaseExpiresAt: input.renewUntil.toISOString(),
-          heartbeatAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(runs.id, run.id))
-        .returning();
-      return { run: updated[0], acquired: run.leaseOwner === null, leaseEpoch: newEpoch };
-    });
+    return this.runLease.acquireOrRenewRunLease(input);
   }
 
   async releaseRunLease(input: { orgId: string; runId: string; leaseEpoch: number }): Promise<Run> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (run.leaseEpoch !== input.leaseEpoch) {
-        throw ApiError.conflict('stale lease epoch on release', {
-          expected: input.leaseEpoch,
-          actual: run.leaseEpoch,
-        });
-      }
-      const updated = await tx
-        .update(runs)
-        .set({
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          heartbeatAt: null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(runs.id, run.id))
-        .returning();
-      return updated[0];
-    });
+    return this.runLease.releaseRunLease(input);
   }
 
   async getRun(orgId: string, runId: string): Promise<Run> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(runs).where(eq(runs.id, runId)).limit(1),
-    );
-    if (rows.length === 0) {
+    const run = await this.terminalRuns.getRun(orgId, runId);
+    if (!run) {
       // Distinguish a purged conversation from an unknown run (typed 410,
       // ledger 9.8 — CommitRunResult/GetRunContext fail closed on purged IDs).
       await this.purge.assertNotTombstoned('conversation', runId);
       await this.purge.assertNotTombstoned('run', runId);
       throw ApiError.notFound('run');
     }
-    return rows[0];
+    return run;
   }
 
   // ── Terminal transitions (5.11) — reuse the Phase 4 atomic paths ────────
@@ -246,90 +201,7 @@ export class McpAuthorityService {
     expectedVersion?: number;
     leaseEpoch?: number;
   }): Promise<Run> {
-    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (run.state === 'FAILED') {
-        return { run, flipped: false }; // idempotent replay
-      }
-      this.assertLeaseFencing(run, input.leaseEpoch);
-      if (input.expectedVersion !== undefined && input.expectedVersion !== run.version) {
-        throw ApiError.conflict('stale run version', {
-          expected: input.expectedVersion,
-          actual: run.version,
-        });
-      }
-      if (!isRunState(run.state)) {
-        throw ApiError.internal();
-      }
-      assertRunTransition(run.state, 'FAILED');
-
-      const insertedEvent = await tx
-        .insert(runEvents)
-        .values(
-          (() => {
-            const rowId = uuidv7();
-            return {
-              id: rowId,
-              eventId: rowId,
-              runId: run.id,
-              organizationId: input.orgId,
-              eventType: 'run.failed',
-              payload: {
-                case: 'terminal',
-                value: { code: input.errorCode, message: input.errorMessage },
-              },
-              producerIdentity: 'engine:mcp-authority',
-            };
-          })(),
-        )
-        .returning({ engineSequence: runEvents.engineSequence });
-
-      const updated = await tx
-        .update(runs)
-        .set({
-          state: 'FAILED',
-          terminalReason: input.errorCode.slice(0, 64),
-          finishedAt: new Date().toISOString(),
-          lastEventSequence: Math.max(run.lastEventSequence, insertedEvent[0].engineSequence),
-          version: run.version + 1,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(runs.id, run.id))
-        .returning();
-
-      // REL-4.4 — a failed run releases its durable quota reservation in the
-      // SAME transaction (the wall must not count a run that never ran).
-      if (run.runKind === 'standard') {
-        await tx.execute(sql`
-          update quota_reservations
-          set state = 'RELEASED', released_at = now()
-          where run_id = ${run.id}::uuid and state = 'RESERVED'
-        `);
-      }
-
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: run.id,
-        organizationId: input.orgId,
-        eventType: 'run.failed',
-        partitionKey: run.conversationId,
-        payload: {
-          run_id: run.id,
-          conversation_id: run.conversationId,
-          error_code: input.errorCode,
-        },
-      });
-      return { run: updated[0], flipped: true };
-    });
+    const outcome = await this.terminalRuns.failRun(input);
     // W2.4 — the durable reservation released in-TX (REL-4.4); the advisory
     // Redis hold was never released here (proved by wave-4 failure injection:
     // the org events counter leaked +1 per FAILED run). Release after commit,
@@ -375,122 +247,7 @@ export class McpAuthorityService {
         throw ApiError.validation({ events: 'event_id must be 1..64 chars' });
       }
     }
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = found[0];
-      if (isTerminalRun(run.state)) {
-        throw ApiError.conflict('run is terminal; events rejected', { state: run.state });
-      }
-      this.assertLeaseFencing(run, input.leaseEpoch);
-      if (input.expectedRunVersion !== undefined && input.expectedRunVersion !== run.version) {
-        throw ApiError.conflict('stale run version for event batch', {
-          expected: input.expectedRunVersion,
-          actual: run.version,
-        });
-      }
-      // Request-level idempotency BEFORE any insert: same key + same digest
-      // replays, same key + different digest is a typed conflict (ledger 5.6
-      // failure case; common.proto RequestContext.idempotency_key contract).
-      if (input.idempotency) {
-        const claim = await this.claimRunIdempotency(tx, {
-          orgId: input.orgId,
-          runId: input.runId,
-          callerScope: input.idempotency.callerScope,
-          idempotencyKey: input.idempotency.idempotencyKey,
-          requestHash: input.idempotency.requestHash,
-        });
-        if (claim === 'duplicate') {
-          // Exact retry of an already-applied batch: echo the stored rows.
-          const stored = await tx
-            .select({ eventId: runEvents.eventId, engineSequence: runEvents.engineSequence })
-            .from(runEvents)
-            .where(
-              and(
-                eq(runEvents.runId, input.runId),
-                inArray(
-                  runEvents.eventId,
-                  input.events.map((e) => e.eventId),
-                ),
-              ),
-            );
-          const seqById = new Map(stored.map((s) => [s.eventId, s.engineSequence]));
-          return {
-            accepted: input.events.map((e) => ({
-              eventId: e.eventId,
-              engineSequence: seqById.get(e.eventId) ?? 0,
-              duplicate: true,
-            })),
-            duplicateCount: input.events.length,
-          };
-        }
-      }
-
-      const accepted: Array<{ eventId: string; engineSequence: number; duplicate: boolean }> = [];
-      let duplicateCount = 0;
-      for (const event of input.events) {
-        const inserted = await tx
-          .insert(runEvents)
-          .values({
-            id: uuidv7(),
-            eventId: event.eventId,
-            runId: input.runId,
-            organizationId: input.orgId,
-            eventType: event.eventType,
-            schemaVersion: event.schemaVersion,
-            producerIdentity: input.producerIdentity,
-            producerSequence: event.producerSequence ?? null,
-            payload: event.payload as never,
-            artifactId: event.artifactId ?? null,
-          })
-          .onConflictDoNothing({ target: [runEvents.runId, runEvents.eventId] })
-          .returning({ engineSequence: runEvents.engineSequence });
-        if (inserted.length === 0) {
-          // (run_id, event_id) already exists — echo the ORIGINAL engine
-          // sequence so the response reflects stored reality, not a
-          // fabricated zero. The same event_id on a DIFFERENT run is a
-          // separate row, never swallowed.
-          duplicateCount += 1;
-          const existing = await tx
-            .select({ engineSequence: runEvents.engineSequence })
-            .from(runEvents)
-            .where(and(eq(runEvents.runId, input.runId), eq(runEvents.eventId, event.eventId)))
-            .limit(1);
-          accepted.push({
-            eventId: event.eventId,
-            engineSequence: existing[0]?.engineSequence ?? 0,
-            duplicate: true,
-          });
-          continue;
-        }
-        accepted.push({
-          eventId: event.eventId,
-          engineSequence: inserted[0].engineSequence,
-          duplicate: false,
-        });
-      }
-
-      if (accepted.some((a) => !a.duplicate)) {
-        const maxSeq = Math.max(
-          ...accepted.filter((a) => !a.duplicate).map((a) => a.engineSequence),
-        );
-        await tx
-          .update(runs)
-          .set({
-            lastEventSequence: Math.max(run.lastEventSequence, maxSeq),
-            updatedAt: new Date().toISOString(),
-          })
-          .where(eq(runs.id, input.runId));
-      }
-      return { accepted, duplicateCount };
-    });
+    return this.runEventsRepo.appendRunEvents(input);
   }
 
   async listRunEvents(
@@ -498,16 +255,7 @@ export class McpAuthorityService {
     runId: string,
     opts?: { afterSequence?: number; limit?: number },
   ) {
-    const limit = Math.min(Math.max(1, opts?.limit ?? 50), 100);
-    const after = opts?.afterSequence ?? 0;
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(runEvents)
-        .where(and(eq(runEvents.runId, runId), gt(runEvents.engineSequence, after)))
-        .orderBy(asc(runEvents.engineSequence))
-        .limit(limit),
-    );
+    return this.runEventsRepo.listRunEvents(orgId, runId, opts);
   }
 
   // ── Approvals (5.7) ─────────────────────────────────────────────────────
@@ -526,95 +274,7 @@ export class McpAuthorityService {
     /** REL-11.4: 1 = single approver (legacy), 2..5 = multi-approver chain. */
     requiredApprovals?: number;
   }): Promise<{ approvalId: string; replay: boolean; run: Run }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const existing = await tx
-        .select()
-        .from(approvals)
-        .where(
-          and(
-            eq(approvals.organizationId, input.orgId),
-            eq(approvals.approvalRef, input.approvalRef),
-          ),
-        )
-        .limit(1);
-      const found = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (found.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      let run = found[0];
-
-      if (existing.length > 0) {
-        if (existing[0].summary !== input.summary) {
-          throw ApiError.conflict('approval_ref reuse with different payload', {
-            approval_ref: input.approvalRef,
-          });
-        }
-        return { approvalId: existing[0].id, replay: true, run };
-      }
-      if (isTerminalRun(run.state)) {
-        throw ApiError.conflict('run is terminal; approval rejected', { state: run.state });
-      }
-
-      const approvalId = uuidv7();
-      // REL-11.4: resolve author for approver≠author. Prefer explicit createdBy
-      // (Studio may pass the end-user id), else fall back to the run's input
-      // message author (the human who sent the message that triggered the run).
-      let createdBy: string | null = input.createdBy ?? null;
-      if (!createdBy) {
-        const msgRows = await tx
-          .select({ createdBy: messages.createdBy })
-          .from(messages)
-          .where(eq(messages.id, run.inputMessageId))
-          .limit(1);
-        createdBy = msgRows[0]?.createdBy ?? null;
-      }
-      const requiredApprovals = Math.min(5, Math.max(1, Math.floor(input.requiredApprovals ?? 1)));
-      await tx.insert(approvals).values({
-        id: approvalId,
-        organizationId: input.orgId,
-        runId: input.runId,
-        approvalRef: input.approvalRef,
-        summary: input.summary,
-        actionType: input.actionType ?? null,
-        policyVersion: input.policyVersion ?? null,
-        expiresAt: input.expiresAt.toISOString(),
-        createdBy,
-        requiredApprovals,
-        approvalsReceived: [],
-      });
-
-      // Persist WAITING_APPROVAL when the run is executing (contract doc: 172).
-      // DISPATCHED is included: the worker may park for approval before the
-      // run row transitions to RUNNING (approval must not leave the run stuck).
-      if (run.state === 'RUNNING' || run.state === 'DISPATCHED') {
-        assertRunTransition(run.state, 'WAITING_APPROVAL');
-        const updated = await tx
-          .update(runs)
-          .set({
-            state: 'WAITING_APPROVAL',
-            version: run.version + 1,
-            updatedAt: new Date().toISOString(),
-          })
-          .where(eq(runs.id, run.id))
-          .returning();
-        run = updated[0];
-      }
-
-      await recordOutboxEvent(tx, {
-        aggregateType: 'approval',
-        aggregateId: approvalId,
-        organizationId: input.orgId,
-        eventType: 'approval.requested',
-        partitionKey: run.conversationId,
-        payload: { run_id: input.runId, approval_ref: input.approvalRef, summary: input.summary },
-      });
-      return { approvalId, replay: false, run };
-    });
+    return this.approvalsRepo.createApprovalRequest(input);
   }
 
   /**
@@ -629,13 +289,10 @@ export class McpAuthorityService {
     reason: string;
     note?: string;
   }): Promise<{ escalationId: string; state: string; conversationStatus: string }> {
-    const found = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
-      if (rows.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      return rows[0];
-    });
+    const found = await this.terminalRuns.getRun(input.orgId, input.runId);
+    if (!found) {
+      throw ApiError.notFound('run');
+    }
     if (isTerminalRun(found.state)) {
       throw ApiError.conflict('run is terminal; escalation rejected', { state: found.state });
     }
@@ -646,13 +303,7 @@ export class McpAuthorityService {
       reason: input.reason.startsWith('tool:') ? input.reason : `tool:request_human_handoff`,
       actor: 'agent-studio-runtime',
     });
-    const conv = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ status: conversations.status })
-        .from(conversations)
-        .where(eq(conversations.id, found.conversationId))
-        .limit(1),
-    );
+    const conv = await this.conversationsRepo.getConversation(input.orgId, found.conversationId);
     await this.auditSafe({
       action: 'mcp.human_handoff_requested',
       resourceType: 'escalation',
@@ -667,7 +318,7 @@ export class McpAuthorityService {
     return {
       escalationId: escalation.id,
       state: escalation.state,
-      conversationStatus: conv[0]?.status ?? 'unknown',
+      conversationStatus: conv?.status ?? 'unknown',
     };
   }
 
@@ -720,20 +371,14 @@ export class McpAuthorityService {
       body: input.data,
     });
     const sha256 = createHash('sha256').update(input.data).digest();
-    await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.insert(artifacts).values({
-        id: artifactId,
-        organizationId: input.orgId,
-        purpose: input.purpose,
-        objectKey,
-        contentTypeDeclared: input.mediaType,
-        contentTypeDetected: input.mediaType,
-        byteLength: input.data.byteLength,
-        sha256,
-        scanStatus: 'skipped',
-        state: 'active',
-        createdBy: 'agent-studio-runtime',
-      });
+    await this.artifactsRepo.registerArtifact({
+      orgId: input.orgId,
+      artifactId,
+      purpose: input.purpose,
+      objectKey,
+      mediaType: input.mediaType,
+      byteLength: input.data.byteLength,
+      sha256,
     });
     return { artifactId, sha256, byteLength: input.data.byteLength };
   }
@@ -751,86 +396,33 @@ export class McpAuthorityService {
   }): Promise<{ credential: string; credentialHeader: string }> {
     // REL-1.4 (release_ledger.md): model-provider keys ride the SAME audited
     // disclosure rail as tool credentials — the gateway asks for the
-    // pseudo-tool `model:<provider>`. No contract change: GetToolCredential
-    // already carries (credential, credential_header) and the capability
-    // scope check happened at the transport boundary.
+    // pseudo-tool `model:<provider>`. The repository handles the
+    // `model:<provider>` branch (gating on the run's model manifest,
+    // capability kill-switch, org enablement, and active credential).
+    // No contract change: GetToolCredential already carries (credential,
+    // credential_header) and the capability scope check happened at the
+    // transport boundary.
     if (input.toolName.startsWith('model:')) {
       const provider = input.toolName.slice('model:'.length);
       if (!isModelProvider(provider)) {
         throw ApiError.validation({ tool_name: `unknown model provider: ${provider}` });
       }
-      return this.getModelCredential({ orgId: input.orgId, runId: input.runId, provider });
     }
-    const found = await this.db.withOrg(input.orgId, async (tx) => {
-      const runRows = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
-      if (runRows.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = runRows[0];
-      const snapshotRows = await tx
-        .select()
-        .from(policySnapshots)
-        .where(eq(policySnapshots.id, run.policySnapshotId))
-        .limit(1);
-      const toolPolicy = (snapshotRows[0]?.toolPolicy as {
-        tools?: Array<{ name: string }>;
-      } | null) ?? { tools: [] };
-      const pinned = (toolPolicy.tools ?? []).some((t) => t.name === input.toolName);
-      if (!pinned) {
-        throw ApiError.validation({ tool_name: 'tool is not pinned on this run' });
-      }
-      const catalogRows = await tx
-        .select()
-        .from(toolCatalog)
-        .where(
-          and(eq(toolCatalog.organizationId, input.orgId), eq(toolCatalog.name, input.toolName)),
-        )
-        .limit(1);
-      const row = catalogRows[0] ?? null;
-      // TPL-6.3 — same gates as authorize, adapted to the disclosure shape:
-      // an operator block or a disabled flag denies loudly (audited throw),
-      // while a missing row keeps the legacy empty-credential behavior
-      // (platform built-ins carry no row and need no credential).
-      if (row) {
-        const toolBlock = await ControlBlocksService.findActiveBlock(
-          tx,
-          input.orgId,
-          'tool',
-          input.toolName,
-        );
-        if (toolBlock || !row.enabled) {
-          const reason = toolBlock
-            ? `tool ${input.toolName} is blocked (${toolBlock.reason})`
-            : `tool ${input.toolName} is disabled at this org`;
-          await this.auditSafe({
-            action: 'mcp.tool_credential_denied',
-            resourceType: 'tool_catalog',
-            resourceId: row.id,
-            tenantId: input.orgId,
-            details: { run_id: input.runId, tool: input.toolName, reason },
-          });
-          // Policy denial, not a malformed request — forbidden (403), the
-          // same semantics an authorize denial would produce.
-          throw ApiError.forbidden(reason, { tool_name: input.toolName });
-        }
-      }
-      return row;
-    });
-    const entry = found;
-    if (!entry || !entry.credentialSealed) {
+    const outcome = await this.toolAuthority.getToolCredential(input);
+    // Replay the repository's audit trail (best-effort — audit failures
+    // must not fail the credential disclosure).
+    for (const event of outcome.auditTrail) {
+      await this.auditSafe(event);
+    }
+    if (outcome.outcome === 'denied') {
+      throw ApiError.forbidden(outcome.reason, { tool_name: input.toolName });
+    }
+    if (outcome.outcome === 'empty') {
       return { credential: '', credentialHeader: 'authorization' };
     }
-    const binding = (entry.httpBinding ?? {}) as { header_name?: string };
-    await this.auditSafe({
-      action: 'mcp.tool_credential_disclosed',
-      resourceType: 'tool_catalog',
-      resourceId: entry.id,
-      tenantId: input.orgId,
-      details: { run_id: input.runId, tool: input.toolName },
-    });
     return {
-      credential: envelopeDecrypt(entry.credentialSealed),
-      credentialHeader: binding.header_name ?? 'authorization',
+      credential: envelopeDecrypt(outcome.credentialSealed),
+      credentialHeader: outcome.credentialHeader,
     };
   }
 
@@ -843,123 +435,6 @@ export class McpAuthorityService {
    * exist. Every outcome — denial or disclosure — is audited. The plaintext
    * exists only inside envelopeDecrypt for the length of this call.
    */
-  private async getModelCredential(input: {
-    orgId: string;
-    runId: string;
-    provider: string;
-  }): Promise<{ credential: string; credentialHeader: string }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const runRows = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
-      if (runRows.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const snapshotRows = await tx
-        .select()
-        .from(policySnapshots)
-        .where(eq(policySnapshots.id, runRows[0].policySnapshotId))
-        .limit(1);
-      const modelRef = (snapshotRows[0]?.modelRef ?? null) as {
-        models?: Array<{ provider?: string }>;
-      } | null;
-      const providersOnRun = new Set(
-        (modelRef?.models ?? [])
-          .map((m) => m?.provider)
-          .filter((p): p is string => typeof p === 'string'),
-      );
-      if (!providersOnRun.has(input.provider)) {
-        throw ApiError.forbidden(`provider ${input.provider} is not on this run's model manifest`, {
-          provider: input.provider,
-        });
-      }
-      const block = await ControlBlocksService.findActiveBlock(
-        tx,
-        input.orgId,
-        'capability',
-        `model:${input.provider}`,
-      );
-      if (block) {
-        await this.auditSafe({
-          action: 'mcp.model_credential_denied',
-          resourceType: 'provider_credential',
-          resourceId: null,
-          tenantId: input.orgId,
-          details: {
-            run_id: input.runId,
-            provider: input.provider,
-            reason: `blocked (${block.reason})`,
-          },
-        });
-        throw ApiError.forbidden(
-          `model capability ${input.provider} is blocked (${block.reason})`,
-          { provider: input.provider },
-        );
-      }
-      const enableRows = await tx
-        .select()
-        .from(providerEnablements)
-        .where(
-          and(
-            eq(providerEnablements.organizationId, input.orgId),
-            eq(providerEnablements.provider, input.provider),
-          ),
-        )
-        .limit(1);
-      if (enableRows[0] && !enableRows[0].enabled) {
-        await this.auditSafe({
-          action: 'mcp.model_credential_denied',
-          resourceType: 'provider_credential',
-          resourceId: null,
-          tenantId: input.orgId,
-          details: {
-            run_id: input.runId,
-            provider: input.provider,
-            reason: 'provider disabled at this org',
-          },
-        });
-        throw ApiError.forbidden(`provider ${input.provider} is disabled at this org`, {
-          provider: input.provider,
-        });
-      }
-      const credRows = await tx
-        .select()
-        .from(providerCredentials)
-        .where(
-          and(
-            eq(providerCredentials.organizationId, input.orgId),
-            eq(providerCredentials.provider, input.provider),
-            eq(providerCredentials.status, 'active'),
-          ),
-        )
-        .orderBy(desc(providerCredentials.createdAt))
-        .limit(1);
-      const cred = credRows[0] ?? null;
-      if (!cred) {
-        await this.auditSafe({
-          action: 'mcp.model_credential_denied',
-          resourceType: 'provider_credential',
-          resourceId: null,
-          tenantId: input.orgId,
-          details: {
-            run_id: input.runId,
-            provider: input.provider,
-            reason: 'no active credential',
-          },
-        });
-        throw ApiError.forbidden(`no active ${input.provider} credential at this org`, {
-          provider: input.provider,
-        });
-      }
-      await this.auditSafe({
-        action: 'mcp.model_credential_disclosed',
-        resourceType: 'provider_credential',
-        resourceId: cred.id,
-        tenantId: input.orgId,
-        details: { run_id: input.runId, provider: input.provider },
-      });
-      return { credential: envelopeDecrypt(cred.secretSealed), credentialHeader: 'authorization' };
-    });
-  }
-
   /** GetLatestCheckpoint (contract v1.3, FL-2.17) — newest run checkpoint. */
   async getLatestCheckpoint(input: { orgId: string; runId: string }): Promise<{
     checkpointRef: string;
@@ -972,58 +447,9 @@ export class McpAuthorityService {
       purpose: string;
     };
   } | null> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .select()
-        .from(checkpoints)
-        .where(and(eq(checkpoints.organizationId, input.orgId), eq(checkpoints.runId, input.runId)))
-        .orderBy(desc(checkpoints.checkpointVersion))
-        .limit(1);
-      const row = rows[0];
-      if (!row) {
-        return null;
-      }
-      let artifact:
-        | {
-            artifactId: string;
-            mediaType: string;
-            byteLength: number;
-            sha256: Buffer;
-            purpose: string;
-          }
-        | undefined;
-      if (row.artifactId) {
-        const artRows = await tx
-          .select()
-          .from(artifacts)
-          .where(eq(artifacts.id, row.artifactId))
-          .limit(1);
-        const art = artRows[0];
-        if (art) {
-          artifact = {
-            artifactId: art.id,
-            mediaType: art.contentTypeDetected ?? art.contentTypeDeclared,
-            byteLength: art.byteLength,
-            sha256: Buffer.from(art.sha256),
-            purpose: art.purpose,
-          };
-        }
-      }
-      return {
-        checkpointRef: row.checkpointRef,
-        checkpointVersion: row.checkpointVersion,
-        artifact,
-      };
-    });
+    return this.checkpointsRepo.getLatestCheckpoint(input);
   }
 
-  // ── Memory proposals (5.9) — proposals are NOT truth ────────────────────
-
-  /**
-   * GetApprovalState (contract v1.2) — Studio observes the durable decision
-   * for an approval it proposed. Run-bound safe read: the approval row must
-   * belong to the ctx run, otherwise NOT_FOUND (never leaks other runs').
-   */
   async getApprovalState(input: { orgId: string; runId: string; approvalRef: string }): Promise<{
     found: boolean;
     approvalId?: string;
@@ -1032,40 +458,9 @@ export class McpAuthorityService {
     decidedBy?: string;
     decidedAt?: string;
   }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .select()
-        .from(approvals)
-        .where(
-          and(
-            eq(approvals.organizationId, input.orgId),
-            eq(approvals.approvalRef, input.approvalRef),
-          ),
-        )
-        .limit(1);
-      const approval = rows[0];
-      if (!approval || approval.runId !== input.runId) {
-        return { found: false, state: 'NOT_FOUND' as const };
-      }
-      return {
-        found: true,
-        approvalId: approval.id,
-        state: (approval.state as 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED') ?? 'PENDING',
-        decisionId: approval.decisionId ?? undefined,
-        decidedBy: approval.decisionActorId ?? undefined,
-        decidedAt: approval.decidedAt ?? undefined,
-      };
-    });
+    return this.approvalsRepo.getApprovalState(input);
   }
 
-  /**
-   * decideApproval — console decision API closing the park/resume loop.
-   * APPROVED: approval row → APPROVED, run WAITING_APPROVAL → RUNNING, and a
-   * `run.resume_requested` outbox event re-drives the run on Studio. DENIED:
-   * approval row → DENIED, run → CANCELED (WAITING_APPROVAL → CANCELED is the
-   * only non-resume transition) with the standard `run.canceled` event. Both
-   * paths are one transaction; the outbox row rides the same TX (invariant 7).
-   */
   async decideApproval(input: {
     orgId: string;
     runId: string;
@@ -1079,269 +474,11 @@ export class McpAuthorityService {
     runState: string;
     replay: boolean;
   }> {
-    const outcome = await this.db.withOrg(input.orgId, async (tx) => {
-      const foundApproval = await tx
-        .select()
-        .from(approvals)
-        .where(and(eq(approvals.organizationId, input.orgId), eq(approvals.id, input.approvalId)))
-        .for('update')
-        .limit(1);
-      const approval = foundApproval[0];
-      if (!approval || approval.runId !== input.runId) {
-        throw ApiError.notFound('approval');
-      }
-      // REL-11.4: approver≠author — the author who triggered the run (via the
-      // input message) may not approve its own side effect. This was opt-in
-      // (TPL-6.5) and is now enforced when `createdBy` is set. Self-approval
-      // is a 403, not a 422, because the caller is authenticated but not
-      // authorized for this action.
-      if (approval.createdBy && approval.createdBy === input.actor) {
-        throw ApiError.forbidden('approver must differ from author', {
-          approval_id: approval.id,
-          author: approval.createdBy,
-        });
-      }
-
-      // REL-11.4: multi-approver chain — when `requiredApprovals` > 1 we
-      // collect individual approvals in `approvalsReceived` and only transition
-      // the approval/run when the threshold is reached. Any DENIED short-circuits
-      // to DENIED/CANCELED. Duplicate actor votes are conflicts.
-      const required = Math.min(5, Math.max(1, approval.requiredApprovals ?? 1));
-      const received = Array.isArray(approval.approvalsReceived)
-        ? (approval.approvalsReceived as Array<{ actor: string; decision: string }>)
-        : [];
-      if (required > 1) {
-        if (received.some((r) => r.actor === input.actor)) {
-          throw ApiError.conflict('actor has already voted on this approval', {
-            approval_id: approval.id,
-            actor: input.actor,
-          });
-        }
-      }
-
-      if (approval.state !== 'PENDING') {
-        // Replay of an already-decided approval with the SAME decision is
-        // idempotent; a conflicting decision is a loud conflict.
-        if (
-          (approval.state === 'APPROVED' && input.decision === 'APPROVED') ||
-          (approval.state === 'DENIED' && input.decision === 'DENIED')
-        ) {
-          const runRows = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
-          return {
-            approvalId: approval.id,
-            state: approval.state as 'APPROVED' | 'DENIED',
-            runState: runRows[0]?.state ?? 'UNKNOWN',
-            replay: true,
-            runKind: runRows[0]?.runKind ?? 'standard',
-          };
-        }
-        throw ApiError.conflict('approval already decided', {
-          approval_id: approval.id,
-          state: approval.state,
-        });
-      }
-
-      // Wave 4 GAP 1: a still-PENDING approval whose expires_at has passed
-      // must fail closed — it can no longer be decided. The sweep worker
-      // will terminalize it; the decision API refuses loudly here.
-      if (approval.expiresAt && new Date(approval.expiresAt) <= new Date()) {
-        throw ApiError.conflict('approval expired', {
-          approval_id: approval.id,
-          expires_at: approval.expiresAt,
-        });
-      }
-
-      const foundRun = await tx
-        .select()
-        .from(runs)
-        .where(eq(runs.id, input.runId))
-        .for('update')
-        .limit(1);
-      if (foundRun.length === 0) {
-        throw ApiError.notFound('run');
-      }
-      const run = foundRun[0];
-      if (!isRunState(run.state)) {
-        throw ApiError.internal();
-      }
-      const decisionId = uuidv7();
-      const now = new Date().toISOString();
-
-      if (input.decision === 'APPROVED') {
-        if (required > 1) {
-          const nextReceived = [
-            ...received,
-            { actor: input.actor, decision: 'APPROVED', decided_at: now },
-          ];
-          // Not yet at threshold — record the vote, stay PENDING, do not resume run.
-          if (nextReceived.filter((r) => r.decision === 'APPROVED').length < required) {
-            await tx
-              .update(approvals)
-              .set({
-                approvalsReceived:
-                  nextReceived as unknown as typeof approvals.$inferInsert.approvalsReceived,
-                decisionActorId: input.actor,
-                decidedAt: now,
-              } as never)
-              .where(eq(approvals.id, approval.id));
-            await this.auditSafe({
-              action: 'mcp.approval_voted',
-              resourceType: 'approval',
-              resourceId: approval.id,
-              tenantId: input.orgId,
-              details: {
-                run_id: run.id,
-                decision: 'APPROVED',
-                actor: input.actor,
-                received: nextReceived.length,
-                required,
-              },
-            });
-            return {
-              approvalId: approval.id,
-              state: 'PENDING' as const,
-              runState: run.state,
-              replay: false,
-              runKind: run.runKind,
-            };
-          }
-          // Threshold reached — fall through to the single-approver transition below,
-          // but persist the final accumulated votes first.
-          await tx
-            .update(approvals)
-            .set({
-              state: 'APPROVED',
-              decisionActorId: input.actor,
-              decisionId,
-              decidedAt: now,
-              approvalsReceived:
-                nextReceived as unknown as typeof approvals.$inferInsert.approvalsReceived,
-            } as never)
-            .where(eq(approvals.id, approval.id));
-        } else {
-          await tx
-            .update(approvals)
-            .set({ state: 'APPROVED', decisionActorId: input.actor, decisionId, decidedAt: now })
-            .where(eq(approvals.id, approval.id));
-        }
-        // WAITING_APPROVAL → RUNNING; the resume outbox event re-drives Studio.
-        assertRunTransition(run.state, 'RUNNING');
-        await tx
-          .update(runs)
-          .set({ state: 'RUNNING', version: run.version + 1, updatedAt: now })
-          .where(eq(runs.id, run.id));
-        await recordOutboxEvent(tx, {
-          aggregateType: 'run',
-          aggregateId: run.id,
-          organizationId: input.orgId,
-          eventType: 'run.resume_requested',
-          partitionKey: run.conversationId,
-          payload: {
-            run_id: run.id,
-            conversation_id: run.conversationId,
-            message_id: run.inputMessageId,
-            assistant_version_id: run.assistantVersionId,
-            approval_id: approval.id,
-          },
-        });
-        await this.auditSafe({
-          action: 'mcp.approval_decided',
-          resourceType: 'approval',
-          resourceId: approval.id,
-          tenantId: input.orgId,
-          details: {
-            run_id: run.id,
-            decision: 'APPROVED',
-            actor: input.actor,
-            required,
-            received: required > 1 ? required : 1,
-            // P5-A1: the UI copies call the reason "audited" — record it.
-            reason: input.reason ?? null,
-          },
-        });
-        return {
-          approvalId: approval.id,
-          state: 'APPROVED' as const,
-          runState: 'RUNNING',
-          replay: false,
-          runKind: run.runKind,
-        };
-      }
-
-      // DENIED — any DENIED short-circuits the chain (even for multi-approver).
-      if (required > 1) {
-        const nextReceived = [
-          ...received,
-          { actor: input.actor, decision: 'DENIED', decided_at: now },
-        ];
-        await tx
-          .update(approvals)
-          .set({
-            state: 'DENIED',
-            decisionActorId: input.actor,
-            decisionId,
-            decidedAt: now,
-            approvalsReceived:
-              nextReceived as unknown as typeof approvals.$inferInsert.approvalsReceived,
-          } as never)
-          .where(eq(approvals.id, approval.id));
-      } else {
-        await tx
-          .update(approvals)
-          .set({ state: 'DENIED', decisionActorId: input.actor, decisionId, decidedAt: now })
-          .where(eq(approvals.id, approval.id));
-      }
-      assertRunTransition(run.state, 'CANCELED');
-      await tx
-        .update(runs)
-        .set({
-          state: 'CANCELED',
-          terminalReason: input.reason ?? 'approval_denied',
-          finishedAt: now,
-          version: run.version + 1,
-          updatedAt: now,
-        })
-        .where(eq(runs.id, run.id));
-      // W2.4 — a denied run never runs: release its durable quota reservation
-      // in the SAME transaction (the wall must not count it). Advisory-hold
-      // release happens after commit, below.
-      if (run.runKind === 'standard') {
-        await tx.execute(sql`
-          update quota_reservations
-          set state = 'RELEASED', released_at = now()
-          where run_id = ${run.id}::uuid and state = 'RESERVED'
-        `);
-      }
-      await recordOutboxEvent(tx, {
-        aggregateType: 'run',
-        aggregateId: run.id,
-        organizationId: input.orgId,
-        eventType: 'run.canceled',
-        partitionKey: run.conversationId,
-        payload: {
-          run_id: run.id,
-          conversation_id: run.conversationId,
-          reason: input.reason ?? 'approval_denied',
-        },
-      });
-      await this.auditSafe({
-        action: 'mcp.approval_decided',
-        resourceType: 'approval',
-        resourceId: approval.id,
-        tenantId: input.orgId,
-        // Compliance shape parity with the APPROVED branch (P2-COMP-43): a
-        // reviewer must see the quorum requirement on denials too.
-        // P5-A2: the UI copies call the reason "audited" — record it.
-        details: { run_id: run.id, decision: 'DENIED', actor: input.actor, required, reason: input.reason ?? null },
-      });
-      return {
-        approvalId: approval.id,
-        state: 'DENIED' as const,
-        runState: 'CANCELED',
-        replay: false,
-        runKind: run.runKind,
-      };
-    });
+    const outcome = await this.approvalsRepo.decideApproval(input);
+    // Replay the repository's audit trail (best-effort).
+    for (const event of outcome.auditTrail) {
+      await this.auditSafe(event);
+    }
     // W2.4 — the denial path previously leaked both the durable reservation
     // and the advisory Redis hold (proved by wave-4 approval-denial injection:
     // a DENIED run left its quota hold behind). The durable release above
@@ -1387,170 +524,20 @@ export class McpAuthorityService {
     sweptApprovals: Array<{ approvalId: string; runId: string; runTerminalized: boolean }>;
     canceledRuns: Array<{ runId: string }>;
   }> {
-    const batchSize = Math.min(1000, Math.max(1, input.batchSize ?? 200));
-    const sweptApprovals: Array<{ approvalId: string; runId: string; runTerminalized: boolean }> = [];
-    const canceledRuns: Array<{ runId: string }> = [];
-    const canceledRunIds = new Set<string>();
-
-    // Claim overdue PENDING approvals. FOR UPDATE SKIP LOCKED makes
-    // concurrent sweep replicas safe — a row claimed by one is skipped by
-    // the other.
-    const claimed = await this.db.withBypass((tx) =>
-      tx.execute(sql`
-        select id, run_id
-        from approvals
-        where organization_id = ${input.orgId}::uuid
-          and state = 'PENDING'
-          and expires_at <= now()
-        order by expires_at asc
-        limit ${batchSize}
-        for update skip locked
-      `),
-    );
-
-    for (const row of claimed.rows as Array<{ id: string; run_id: string }>) {
-      const approvalId = row.id;
-      const runId = row.run_id;
-      const decisionId = `sweep-${approvalId.slice(0, 8)}`;
-
-      await this.db.withBypass(async (tx) => {
-        // Re-check still-PENDING inside the TX (a decision may have landed
-        // between claim and here).
-        const stillPending = await tx.execute(sql`
-          select id from approvals
-          where id = ${approvalId}::uuid and state = 'PENDING'
-          for update
-        `);
-        if (stillPending.rows.length === 0) return;
-
-        // Approval → EXPIRED.
-        await tx.execute(sql`
-          update approvals
-          set state = 'EXPIRED',
-              decided_at = now(),
-              decision_actor_id = 'system:approval-expiry-sweep'
-          where id = ${approvalId}::uuid
-        `);
-        await this.auditSafe({
-          action: 'approval.expired',
-          resourceType: 'approval',
-          resourceId: approvalId,
-          tenantId: input.orgId,
-          details: {
-            run_id: runId,
-            decision_id: decisionId,
-            reason: 'approval past expires_at with no decision',
-            actor: 'system:approval-expiry-sweep',
-          },
-        });
-        let runTerminalized = false;
-        sweptApprovals.push({ approvalId, runId, runTerminalized });
-
-        // Run → CANCELED only if still non-terminal. Already-terminal runs
-        // (completed/failed/canceled by another path) are left alone, but
-        // their sibling PENDING approvals still expire below.
-        const runRows = (await tx.execute(sql`
-          select id, state, conversation_id from runs where id = ${runId}::uuid for update
-        `)).rows as Array<{ id: string; state: string; conversation_id: string }>;
-        const run = runRows[0];
-        const terminalStates = ['COMPLETED', 'FAILED', 'CANCELED'];
-        if (run && !terminalStates.includes(run.state)) {
-          await tx.execute(sql`
-            update runs
-            set state = 'CANCELED',
-                terminal_reason = 'approval_expired',
-                finished_at = now()
-            where id = ${runId}::uuid
-          `);
-          // Durable quota: RESERVED → RELEASED.
-          await tx.execute(sql`
-            update quota_reservations
-            set state = 'RELEASED'
-            where run_id = ${runId}::uuid and state = 'RESERVED'
-          `);
-          // Transactional outbox event (invariant 7).
-          // partitionKey: the run's conversation (matches run.failed above).
-          const runRow = runRows[0] as unknown as { conversation_id: string };
-          await recordOutboxEvent(tx, {
-            aggregateType: 'run',
-            aggregateId: runId,
-            organizationId: input.orgId,
-            eventType: 'run.canceled',
-            partitionKey: runRow.conversation_id ?? runId,
-            payload: {
-              run_id: runId,
-              conversation_id: runRow.conversation_id,
-              reason: 'approval_expired',
-              approval_id: approvalId,
-            },
-          });
-          await this.auditSafe({
-            action: 'run.canceled',
-            resourceType: 'run',
-            resourceId: runId,
-            tenantId: input.orgId,
-            details: {
-              approval_id: approvalId,
-              reason: 'approval expired with no decision',
-              actor: 'system:approval-expiry-sweep',
-            },
-          });
-          runTerminalized = true;
-          // Update the already-pushed entry.
-          sweptApprovals[sweptApprovals.length - 1].runTerminalized = true;
-          if (!canceledRunIds.has(runId)) {
-            canceledRunIds.add(runId);
-            canceledRuns.push({ runId });
-          }
-        }
-
-        // Sibling PENDING approvals on this run also expire (they can never
-        // be decided once the run is terminal).
-        const siblings = (await tx.execute(sql`
-          select id from approvals
-          where run_id = ${runId}::uuid
-            and state = 'PENDING'
-            and id != ${approvalId}::uuid
-          for update
-        `)).rows as Array<{ id: string }>;
-        for (const sib of siblings) {
-          await tx.execute(sql`
-            update approvals
-            set state = 'EXPIRED',
-                decided_at = now(),
-                decision_actor_id = 'system:approval-expiry-sweep'
-            where id = ${sib.id}::uuid
-          `);
-          await this.auditSafe({
-            action: 'approval.expired',
-            resourceType: 'approval',
-            resourceId: sib.id,
-            tenantId: input.orgId,
-            details: {
-              run_id: runId,
-              decision_id: `sweep-${sib.id.slice(0, 8)}`,
-              reason: 'sibling approval on terminalized run',
-              actor: 'system:approval-expiry-sweep',
-            },
-          });
-          sweptApprovals.push({ approvalId: sib.id, runId, runTerminalized });
-        }
-      });
-
-      // Redis advisory hold release after commit (best-effort; the durable
-      // reservation is already RELEASED above).
-      try {
-        await this.releaseRunQuotaHold(input.orgId);
-      } catch {
-        // Best-effort: the durable state is already settled.
-      }
+    const outcome = await this.approvalsRepo.sweepExpiredApprovals(input.orgId, input.batchSize);
+    // Replay the repository's audit trail (best-effort).
+    for (const event of outcome.auditTrail) {
+      await this.auditSafe(event);
     }
-
-    return { sweptApprovals, canceledRuns };
+    // Advisory Redis quota-hold releases (best-effort, one per claimed approval).
+    for (let i = 0; i < outcome.quotaHoldReleases; i++) {
+      await this.releaseRunQuotaHold(input.orgId);
+    }
+    return {
+      sweptApprovals: outcome.sweptApprovals,
+      canceledRuns: outcome.canceledRuns,
+    };
   }
-
-
-  // ── Memory proposals (5.9) — proposals are NOT truth ────────────────────
 
   async submitMemoryProposal(input: {
     orgId: string;
@@ -1563,44 +550,8 @@ export class McpAuthorityService {
     visibility?: string;
     expiresAt?: Date;
   }): Promise<{ storedId: string; accepted: boolean; replay: boolean }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const existing = await tx
-        .select()
-        .from(memoryProposals)
-        .where(
-          and(
-            eq(memoryProposals.organizationId, input.orgId),
-            eq(memoryProposals.proposalRef, input.proposalRef),
-          ),
-        )
-        .limit(1);
-      if (existing.length > 0) {
-        if (existing[0].value !== input.value) {
-          throw ApiError.conflict('proposal_ref reuse with different value', {
-            proposal_ref: input.proposalRef,
-          });
-        }
-        return { storedId: existing[0].id, accepted: true, replay: true };
-      }
-      const storedId = uuidv7();
-      await tx.insert(memoryProposals).values({
-        id: storedId,
-        organizationId: input.orgId,
-        runId: input.runId,
-        proposalRef: input.proposalRef,
-        scope: input.scope,
-        value: input.value,
-        provenance: input.provenance ?? null,
-        confidence:
-          input.confidence != null ? String(Math.min(1, Math.max(0, input.confidence))) : null,
-        visibility: input.visibility ?? null,
-        expiresAt: input.expiresAt?.toISOString() ?? null,
-      });
-      return { storedId, accepted: true, replay: false };
-    });
+    return this.memory.submitMemoryProposal(input);
   }
-
-  // ── Tool calls (5.10) ───────────────────────────────────────────────────
 
   async authorizeToolCall(input: {
     orgId: string;
@@ -1631,252 +582,11 @@ export class McpAuthorityService {
       'tool.authorization',
       { org_id: input.orgId, run_id: input.runId, tool_name: input.toolName },
       async (span) => {
-        const outcome = await this.db.withOrg(input.orgId, async (tx) => {
-          const found = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
-          if (found.length === 0) {
-            throw ApiError.notFound('run');
-          }
-          const run = found[0];
-          if (isTerminalRun(run.state)) {
-            throw ApiError.conflict('run is terminal; tool calls rejected', { state: run.state });
-          }
-
-          // Snapshot + pinned binding resolve BEFORE the dedup return: a
-          // replayed ack still reports its binding's shadow mode truthfully.
-          // (Reads only — the descriptor-missing DENY below stays after
-          // dedup, preserving replay-ack idempotency.)
-          const snapshot = await tx
-            .select()
-            .from(policySnapshots)
-            .where(eq(policySnapshots.id, run.policySnapshotId))
-            .limit(1);
-          if (snapshot.length === 0) {
-            throw ApiError.internal();
-          }
-          const bindingsRaw = (snapshot[0] as { toolBindings?: unknown }).toolBindings;
-          const bindingsList = Array.isArray(bindingsRaw)
-            ? (bindingsRaw as Array<Record<string, unknown>>)
-            : [];
-          const pin = bindingsList.find((b) => b.name === input.toolName) as
-            | {
-                execution_environment?: unknown;
-                allowed_egress_domains?: unknown;
-                execution_mode?: unknown;
-              }
-            | undefined;
-          // Legacy snapshots predate the perimeter pin (P4): no fields = no
-          // drift verdict possible — the check below skips, exactly as
-          // before. Only pins that CARRY the perimeter can fail on drift.
-          const shadow = pin?.execution_mode === 'shadow';
-
-          const duplicate = await tx
-            .select()
-            .from(toolEffects)
-            .where(
-              and(
-                eq(toolEffects.organizationId, input.orgId),
-                eq(toolEffects.toolCallId, input.toolCallId),
-              ),
-            )
-            .limit(1);
-          if (duplicate.length > 0) {
-            const same =
-              duplicate[0].argumentDigest &&
-              Buffer.from(duplicate[0].argumentDigest).equals(input.argumentDigest);
-            if (!same) {
-              throw ApiError.conflict('tool_call_id reuse with different arguments', {
-                tool_call_id: input.toolCallId,
-              });
-            }
-            return {
-              allowed: true,
-              toolCapability: undefined,
-              approvalRequired: false,
-              duplicate: true,
-              shadow,
-            };
-          }
-
-          // Policy check against the pinned snapshot's tool_policy.
-          const toolPolicy = snapshot[0].toolPolicy as {
-            tools?: Array<{ name: string; approval?: string }>;
-          };
-          const descriptor = toolPolicy?.tools?.find((t) => t.name === input.toolName);
-          if (!descriptor) {
-            return {
-              allowed: false,
-              reason: `tool ${input.toolName} is not in the pinned tool policy`,
-              approvalRequired: false,
-              duplicate: false,
-              shadow: false,
-            };
-          }
-
-          // TPL-6.3 kill levels 2-4 — evaluated on EVERY new authorization (no
-          // cache, so kill-to-deny latency is one RPC). Order: explicit operator
-          // blocks first (cheapest, most specific), then the catalog enabled
-          // flag. NOTE: the dedup early-return above intentionally precedes all
-          // of this — replaying an already-authorized call's ack is idempotency,
-          // not a new authorization; freezing it would corrupt exactly-once
-          // completion of in-flight effects.
-          const deny = async (
-            reason: string,
-          ): Promise<{
-            allowed: false;
-            reason: string;
-            approvalRequired: false;
-            duplicate: false;
-            shadow: boolean;
-          }> => {
-            await this.auditSafe({
-              action: 'mcp.tool_denied',
-              resourceType: 'tool_effect',
-              resourceId: run.id,
-              tenantId: input.orgId,
-              details: { run_id: input.runId, tool: input.toolName, reason },
-            });
-            return { allowed: false, reason, approvalRequired: false, duplicate: false, shadow };
-          };
-          const capabilityBlock = await ControlBlocksService.findActiveBlock(
-            tx,
-            input.orgId,
-            'capability',
-            'tool',
-          );
-          if (capabilityBlock) {
-            return deny(`tool capability frozen (${capabilityBlock.reason})`);
-          }
-          const toolBlock = await ControlBlocksService.findActiveBlock(
-            tx,
-            input.orgId,
-            'tool',
-            input.toolName,
-          );
-          if (toolBlock) {
-            return deny(`tool ${input.toolName} is blocked (${toolBlock.reason})`);
-          }
-          if (!BUILT_IN_TOOLS.has(input.toolName)) {
-            const catalogRows = await tx
-              .select({
-                id: toolCatalog.id,
-                enabled: toolCatalog.enabled,
-                executionEnvironment: toolCatalog.executionEnvironment,
-                allowedEgressDomains: toolCatalog.allowedEgressDomains,
-              })
-              .from(toolCatalog)
-              .where(
-                and(
-                  eq(toolCatalog.organizationId, input.orgId),
-                  eq(toolCatalog.name, input.toolName),
-                ),
-              )
-              .limit(1);
-            const row = catalogRows[0];
-            if (!row) {
-              // Pinned at publish but the row is gone (deleted post-publish) —
-              // fail closed rather than executing against an ungoverned tool.
-              return deny(`tool ${input.toolName} has no catalog row at this org`);
-            }
-            if (!row.enabled) {
-              return deny(`tool ${input.toolName} is disabled at this org`);
-            }
-            // P4 — perimeter drift-deny: the publish-time pin (environment +
-            // egress) must still match the live row. A widened environment or
-            // egress list after publish refuses until re-published (re-pin =
-            // explicit operator acknowledgment). Legacy pins without the
-            // fields skip (history stays authorizable exactly as before).
-            if (pin !== undefined && typeof pin.execution_environment === 'string') {
-              const liveEgress = Array.isArray(row.allowedEgressDomains)
-                ? (row.allowedEgressDomains as unknown[])
-                    .filter((d): d is string => typeof d === 'string')
-                    .slice()
-                    .sort()
-                : [];
-              const pinnedEgress = Array.isArray(pin.allowed_egress_domains)
-                ? (pin.allowed_egress_domains as unknown[])
-                    .filter((d): d is string => typeof d === 'string')
-                    .slice()
-                    .sort()
-                : [];
-              const envDrifted = row.executionEnvironment !== pin.execution_environment;
-              const egressDrifted =
-                liveEgress.length !== pinnedEgress.length ||
-                liveEgress.some((d, i) => d !== pinnedEgress[i]);
-              if (envDrifted || egressDrifted) {
-                return deny(
-                  `tool ${input.toolName} perimeter drifted since publish (environment ${String(pin.execution_environment)}→${row.executionEnvironment}, egress [${pinnedEgress.join(',')}]→[${liveEgress.join(',')}]) — re-publish to re-pin the perimeter`,
-                );
-              }
-            }
-          }
-          // Assistant-level kill for in-flight runs: acceptance already refuses
-          // new runs, but a run accepted BEFORE the kill must not authorize new
-          // tool calls after it. Either the disabled flag or an active block
-          // freezes the assistant. (Version blocks intentionally do NOT gate
-          // here — in-flight runs stay pinned to their manifest by invariant.)
-          const versionRows = await tx
-            .select({ assistantId: assistantVersions.assistantId })
-            .from(assistantVersions)
-            .where(eq(assistantVersions.id, run.assistantVersionId))
-            .limit(1);
-          const assistantId = versionRows[0]?.assistantId;
-          if (assistantId) {
-            const assistantRows = await tx
-              .select({ disabledAt: assistants.disabledAt })
-              .from(assistants)
-              .where(eq(assistants.id, assistantId))
-              .limit(1);
-            if (assistantRows[0]?.disabledAt) {
-              return deny(`assistant is disabled`);
-            }
-            const assistantBlock = await ControlBlocksService.findActiveBlock(
-              tx,
-              input.orgId,
-              'assistant',
-              assistantId,
-            );
-            if (assistantBlock) {
-              return deny(`assistant is blocked (${assistantBlock.reason})`);
-            }
-          }
-
-          const effectId = uuidv7();
-          await tx.insert(toolEffects).values({
-            id: effectId,
-            organizationId: input.orgId,
-            runId: input.runId,
-            stepId: input.stepId ?? null,
-            toolCallId: input.toolCallId,
-            toolName: input.toolName,
-            toolVersion: input.toolVersion ?? null,
-            argumentDigest: input.argumentDigest,
-          });
-
-          const approvalRequired = descriptor.approval === 'required';
-          const toolCapability = issueCapability({
-            organizationId: input.orgId,
-            conversationId: run.conversationId,
-            runId: input.runId,
-            assistantVersionId: run.assistantVersionId,
-            policyVersion: run.policySnapshotId,
-            allowedOps: ['tool'],
-            subject: 'agent-studio-tool',
-          }).token;
-
-          await this.auditSafe({
-            action: 'mcp.tool_authorized',
-            resourceType: 'tool_effect',
-            resourceId: effectId,
-            tenantId: input.orgId,
-            details: {
-              run_id: input.runId,
-              tool: input.toolName,
-              approval_required: approvalRequired,
-              shadow,
-            },
-          });
-          return { allowed: true, toolCapability, approvalRequired, duplicate: false, shadow };
-        });
+        const outcome = await this.toolAuthority.authorizeToolCall(input);
+        // Replay the repository's audit trail (best-effort).
+        for (const event of outcome.auditTrail) {
+          await this.auditSafe(event);
+        }
         setSpanAttributes(span, {
           allowed: outcome.allowed,
           duplicate: outcome.duplicate,
@@ -1896,44 +606,7 @@ export class McpAuthorityService {
     status: string;
     resultArtifactId?: string;
   }): Promise<{ accepted: boolean; wasDuplicate: boolean }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .select()
-        .from(toolEffects)
-        .where(
-          and(
-            eq(toolEffects.organizationId, input.orgId),
-            eq(toolEffects.toolCallId, input.toolCallId),
-          ),
-        )
-        .limit(1);
-      if (rows.length === 0) {
-        throw ApiError.notFound('tool call authorization');
-      }
-      const effect = rows[0];
-      if (effect.recordedAt) {
-        const same =
-          input.resultDigest &&
-          effect.resultDigest &&
-          Buffer.from(effect.resultDigest).equals(input.resultDigest);
-        if (!same) {
-          throw ApiError.conflict('tool outcome replay with different digest', {
-            tool_call_id: input.toolCallId,
-          });
-        }
-        return { accepted: true, wasDuplicate: true };
-      }
-      await tx
-        .update(toolEffects)
-        .set({
-          resultDigest: input.resultDigest ?? null,
-          status: input.status,
-          resultArtifactId: input.resultArtifactId ?? null,
-          recordedAt: new Date().toISOString(),
-        })
-        .where(eq(toolEffects.id, effect.id));
-      return { accepted: true, wasDuplicate: false };
-    });
+    return this.toolAuthority.recordToolOutcome(input);
   }
 
   // ── Checkpoints (5.8) — claim-check pointers only ───────────────────────
@@ -1947,39 +620,7 @@ export class McpAuthorityService {
     digest: Buffer;
     producer: string;
   }): Promise<{ accepted: boolean; replay: boolean }> {
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const existing = await tx
-        .select()
-        .from(checkpoints)
-        .where(
-          and(
-            eq(checkpoints.runId, input.runId),
-            eq(checkpoints.checkpointRef, input.checkpointRef),
-            eq(checkpoints.checkpointVersion, input.checkpointVersion),
-          ),
-        )
-        .limit(1);
-      if (existing.length > 0) {
-        const same = Buffer.from(existing[0].digest).equals(input.digest);
-        if (!same) {
-          throw ApiError.conflict('checkpoint version reuse with different digest', {
-            checkpoint_ref: input.checkpointRef,
-          });
-        }
-        return { accepted: true, replay: true };
-      }
-      await tx.insert(checkpoints).values({
-        id: uuidv7(),
-        organizationId: input.orgId,
-        runId: input.runId,
-        checkpointRef: input.checkpointRef,
-        checkpointVersion: input.checkpointVersion,
-        artifactId: input.artifactId ?? null,
-        digest: input.digest,
-        producer: input.producer,
-      });
-      return { accepted: true, replay: false };
-    });
+    return this.checkpointsRepo.saveCheckpointRef(input);
   }
 
   /**
@@ -2006,31 +647,17 @@ export class McpAuthorityService {
     };
   }> {
     const MCP_READ_PURPOSES = new Set(['checkpoint', 'tool_result', 'source_document']);
-    const run = await this.getRun(input.orgId, input.runId);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select()
-        .from(artifacts)
-        .where(and(eq(artifacts.id, input.artifactId), eq(artifacts.organizationId, input.orgId)))
-        .limit(1),
-    );
-    const artifact = rows[0];
+    await this.getRun(input.orgId, input.runId); // fail-closed on purged/tombstoned runs
+    const { artifact, bound } = await this.artifactsRepo.findRunArtifact({
+      orgId: input.orgId,
+      runId: input.runId,
+      artifactId: input.artifactId,
+    });
     if (!artifact) {
       throw ApiError.notFound('artifact');
     }
     // Run-scope binding: checkpoints / tool_effects / run_events of THIS run.
-    const binding = await this.db.withOrg(input.orgId, async (tx) => {
-      const cp = await tx.execute(sql`
-        select 1 from checkpoints where run_id = ${run.id}::uuid and artifact_id = ${artifact.id}::uuid
-        union all
-        select 1 from tool_effects where run_id = ${run.id}::uuid and result_artifact_id = ${artifact.id}::uuid
-        union all
-        select 1 from run_events where run_id = ${run.id}::uuid and artifact_id = ${artifact.id}::uuid
-        limit 1
-      `);
-      return cp.rows.length > 0;
-    });
-    if (!binding) {
+    if (!bound) {
       throw ApiError.forbidden('artifact is not bound to this run');
     }
     if (!MCP_READ_PURPOSES.has(artifact.purpose)) {
@@ -2056,7 +683,7 @@ export class McpAuthorityService {
         artifactId: artifact.id,
         // Opaque capability URI — names the claim-check ref, never a bearer link.
         uri: `neryva://org/${input.orgId}/artifact/${artifact.id}`,
-        mediaType: artifact.contentTypeDetected ?? artifact.contentTypeDeclared,
+        mediaType: artifact.contentTypeDetected ?? artifact.contentTypeDeclared ?? 'application/octet-stream',
         byteLength: artifact.byteLength,
         sha256: Buffer.from(artifact.sha256),
         purpose: artifact.purpose,
@@ -2273,422 +900,33 @@ export class McpAuthorityService {
     // (policy identifiers only — verdicts are Studio-resolved; see the
     // execution_mode contract in validation.ts).
     return withSpan('run.context', { org_id: input.orgId, run_id: input.runId }, async (span) => {
-      const assembled = await this.db.withOrg(input.orgId, async (tx) => {
-        const found = await tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1);
-        if (found.length === 0) {
-          throw ApiError.notFound('run');
-        }
-        const run = found[0];
-
-        const snapshotRows = await tx
-          .select()
-          .from(policySnapshots)
-          .where(eq(policySnapshots.id, run.policySnapshotId))
-          .limit(1);
-        const snapshot = snapshotRows[0] ?? null;
-        const toolPolicy = (snapshot?.toolPolicy as {
-          tools?: Array<{ name: string; access?: string; approval?: string }>;
-        } | null) ?? { tools: [] };
-        const pinnedTools = toolPolicy.tools ?? [];
-        const contextPolicy =
-          (snapshot?.contextPolicy as {
-            history_limit?: number;
-            knowledge_sources?: string[];
-            memory_scope?: string;
-          } | null) ?? {};
-        const knowledgePolicy =
-          (snapshot?.knowledgePolicy as {
-            retrieval_enabled?: boolean;
-            max_results?: number;
-          } | null) ?? {};
-        const guardrailPolicy =
-          (snapshot?.guardrailPolicy as {
-            input_policy?: string;
-            output_policy?: string;
-            pii_redaction?: boolean;
-            execution_mode?: string;
-          } | null) ?? {};
-        const piiOff = guardrailPolicy.pii_redaction === false;
-        // P3: legacy snapshots predate the field — resolve blocking (their
-        // historical behavior), never undefined.
-        const executionMode =
-          guardrailPolicy.execution_mode === 'logging'
-            ? ('logging' as const)
-            : ('blocking' as const);
-        const modelParams =
-          (snapshot?.modelParams as {
-            temperature?: number;
-            max_output_tokens?: number;
-            top_p?: number;
-            reasoning_effort?: string;
-          } | null) ?? null;
-        const modelPolicy = (snapshot?.modelPolicy as { allowed_models?: string[] } | null) ?? {};
-        const allowedModels = Array.isArray(modelPolicy.allowed_models)
-          ? modelPolicy.allowed_models.slice(0, 16)
-          : [];
-        // Model identity: the manifest contract requires provider/model
-        // references (context.proto). Bare aliases pinned in the snapshot are
-        // qualified here via the platform catalog; unresolvable ones pass
-        // through and fail loudly in Studio (fail-closed, never guessed).
-        // The same qualified references key modelWindows, so Studio's
-        // pre-call overflow check reads them with the identical key.
-        const modelCatalogRows = await this.activeModelCatalogRows();
-        const qualifiedModels = qualifyModelAliases(allowedModels, modelCatalogRows);
-        // TEMP-DEBUG (wave-4 smoke only): prove the manifest carries qualified
-        const modelWindows = this.resolveModelWindows(qualifiedModels, modelCatalogRows);
-        const budgetPolicy =
-          (snapshot?.budgetPolicy as {
-            max_total_tokens?: number;
-            max_cost_micros?: number;
-            wall_clock_seconds?: number;
-            max_tool_calls?: number;
-            max_model_calls?: number;
-          } | null) ?? {};
-
-        // FL-1.5 — the pinned memory_scope decides WHICH memory surfaces the
-        // manifest carries. Undefined keeps the legacy default (organization +
-        // conversation rows) for pre-FL-1.5 snapshots; 'none' excludes the
-        // surface entirely; 'user' resolves the run actor's account via the
-        // trigger message — user-scoped rows are NEVER visible across accounts;
-        // 'assistant' (A4-23) resolves this run's assistant via the pinned
-        // snapshot → version — assistant-scoped rows are the agent's own
-        // memory, visible only to its own runs.
-        const memoryScopeRaw =
-          typeof contextPolicy.memory_scope === 'string' ? contextPolicy.memory_scope : undefined;
-        const memoryScope =
-          memoryScopeRaw === 'user' ||
-          memoryScopeRaw === 'organization' ||
-          memoryScopeRaw === 'conversation' ||
-          memoryScopeRaw === 'assistant' ||
-          memoryScopeRaw === 'none'
-            ? memoryScopeRaw
-            : undefined;
-        // Run actor: the trigger message author when it is an account id.
-        // Drives user-scoped memory AND source-ACL identity (P0-1) — the two
-        // concerns share one lookup but diverge after: memory keeps the legacy
-        // scope default, source matching always uses the actor when known.
-        const triggerRows = await tx
-          .select({ createdBy: messages.createdBy })
-          .from(messages)
-          .where(eq(messages.id, run.inputMessageId))
-          .limit(1);
-        const triggerAuthor = triggerRows[0]?.createdBy ?? null;
-        const runActorAccountId =
-          triggerAuthor !== null && McpAuthorityService.UUID_RE.test(triggerAuthor)
-            ? triggerAuthor
-            : null;
-        const userAccountId = memoryScope === 'user' ? runActorAccountId : null;
-
-        // A4-23: the assistant identity behind this run's pinned snapshot.
-        // Resolved snapshot → version → assistant; unresolvable (deleted
-        // version/assistant) yields NO assistant scopes — fail closed, never
-        // a widening to another scope (same posture as the user branch).
-        let runAssistantId: string | null = null;
-        if (memoryScope === 'assistant' && snapshot?.assistantVersionId) {
-          const versionRows = await tx
-            .select({ assistantId: assistantVersions.assistantId })
-            .from(assistantVersions)
-            .where(eq(assistantVersions.id, snapshot.assistantVersionId))
-            .limit(1);
-          runAssistantId = versionRows[0]?.assistantId ?? null;
-        }
-
-        // History — bounded by the pinned context policy (contract caps 20).
-        const historyLimit = Math.min(Math.max(1, contextPolicy.history_limit ?? 20), 20);
-        const recent = await tx
-          .select({
-            id: messages.id,
-            role: messages.role,
-            content: messages.content,
-            sequence: messages.sequence,
-            artifactRefs: messages.artifactRefs,
-          })
-          .from(messages)
-          .where(
-            and(
-              eq(messages.conversationId, run.conversationId),
-              eq(messages.organizationId, input.orgId),
-            ),
-          )
-          .orderBy(sql`sequence desc`)
-          .limit(historyLimit);
-        const orderedRecent = recent.reverse();
-        const oldestIncludedSequence =
-          orderedRecent.length > 0 ? orderedRecent[0].sequence : Number.MAX_SAFE_INTEGER;
-
-        // Compaction — newest summary that covers material OUTSIDE the included
-        // history window (source_sequence < oldest included message).
-        let summaryText = '';
-        if (orderedRecent.length > 0) {
-          const summaryRows = await tx
-            .select({ summary: conversationSummaries.summary })
-            .from(conversationSummaries)
-            .where(
-              and(
-                eq(conversationSummaries.organizationId, input.orgId),
-                eq(conversationSummaries.conversationId, run.conversationId),
-                sql`${conversationSummaries.sourceSequence} <= ${oldestIncludedSequence - 1}`,
-              ),
-            )
-            .orderBy(desc(conversationSummaries.sourceSequence))
-            .limit(1);
-          summaryText = summaryRows[0]?.summary ?? '';
-        }
-
-        // Approved memories — scoped rows WITH content, selected by the pinned
-        // memory_scope (FL-1.5). FL-2.4: selection is SEMANTIC — the trigger
-        // message is the query; RetrievalService orders by cosine similarity
-        // with the scope OR-list inside the ranking statement (ACL-before-
-        // scoring) and degrades to recency for zero signal / pre-0038 rows.
-        // Proposals never surface here (Phase 7.8). Content is untrusted →
-        // spotlight (+PII redact).
-        const triggerText = [...orderedRecent].reverse().find((m) => m.role === 'user');
-        const triggerQuery = String(
-          (triggerText?.content as { text?: unknown } | null)?.text ?? '',
-        );
-        let memoryRows: Array<typeof memoryItems.$inferSelect> = [];
-        if (memoryScope !== 'none') {
-          const scopes =
-            memoryScope === undefined
-              ? // Legacy default: organization + conversation surfaces.
-                [
-                  { scopeType: 'organization' as const },
-                  { scopeType: 'conversation' as const, scopeId: run.conversationId },
-                ]
-              : memoryScope === 'conversation'
-                ? [{ scopeType: 'conversation' as const, scopeId: run.conversationId }]
-                : memoryScope === 'organization'
-                  ? [{ scopeType: 'organization' as const }]
-                  : memoryScope === 'assistant'
-                    ? // A4-23: assistant scope without a resolvable assistant
-                      // (deleted version/assistant) yields NO scopes — zero
-                      // assistant memories, never a widening to another scope.
-                      runAssistantId !== null
-                      ? [{ scopeType: 'assistant' as const, scopeId: runAssistantId }]
-                      : []
-                    : // user scope without a resolvable account (service/channel
-                      // trigger) yields NO scopes — zero user memories, never a
-                      // widening to another scope.
-                      userAccountId !== null
-                      ? [{ scopeType: 'user' as const, scopeId: userAccountId }]
-                      : [];
-          memoryRows = await this.retrieval.searchApprovedMemories({
-            orgId: input.orgId,
-            query: triggerQuery,
-            scopes,
-            limit: 20,
-          });
-        }
-
-        // Knowledge — retrieval over the newest user message when the pinned
-        // policy enables it. ACL-before-scoring happens inside RetrievalService
-        // (the authorization predicates live in the retrieval query itself).
-        let knowledgeRefs: Array<{
-          documentId: string;
-          chunkId: string;
-          snippet?: string;
-          title?: string;
-          score?: number;
-          sourceRangeStart?: number;
-          sourceRangeEnd?: number;
-        }> = [];
-        if (knowledgePolicy.retrieval_enabled && triggerText) {
-          const query = String((triggerText.content as { text?: unknown }).text ?? '').slice(
-            0,
-            512,
-          );
-          if (query.trim().length > 0) {
-            const hits = await this.retrieval.searchKnowledge({
-              orgId: input.orgId,
-              query,
-              limit: Math.min(Math.max(1, knowledgePolicy.max_results ?? 5), 20),
-              // E-1: constrain to the snapshot's resolved pins (undefined =
-              // unpinned legacy versions keep the org-wide posture).
-              allowedDocumentVersionIds: McpAuthorityService.resolvedPinVersionIds(snapshot),
-              callerAccountId: runActorAccountId ?? undefined,
-            });
-            // FL-2.9 — the retrieval leg is a durable run event; CommitRunResult
-            // reads it in the SAME TX as the terminal commit and pins bounded
-            // citations onto the assistant message.
-            await this.recordRetrievalEvent({
-              orgId: input.orgId,
+      const assembled = await this.runContext.assembleRunContext(
+        { orgId: input.orgId, runId: input.runId },
+        {
+          searchApprovedMemories: (hookInput) =>
+            this.retrieval.searchApprovedMemories(hookInput),
+          searchKnowledge: async (hookInput) => {
+            const hits = await this.searchKnowledge({
+              orgId: hookInput.orgId,
               runId: input.runId,
-              query,
-              hits,
-              tx,
+              query: hookInput.query,
+              maxResults: hookInput.limit,
             });
-            knowledgeRefs = hits.map((h) => {
-              const snippet = piiOff ? h.text : redactPii(h.text).redacted;
-              return {
-                documentId: h.documentId,
-                chunkId: h.chunkId,
-                snippet: spotlight({ source: 'knowledge', content: snippet.slice(0, 4096) }),
-                title: h.title ?? undefined,
-                score: h.score,
-                sourceRangeStart: h.sourceRange.byteStart,
-                sourceRangeEnd: h.sourceRange.byteEnd,
-              };
-            });
-          }
-        }
-
-        // Tools — resolve pinned tool policy entries against the org catalog;
-        // entries missing from the catalog degrade to name-only descriptors so
-        // a legacy definition still runs (the model sees no schema for them and
-        // AuthorizeToolCall still gates execution).
-        const catalogRows = pinnedTools.length
-          ? await tx.select().from(toolCatalog).where(eq(toolCatalog.organizationId, input.orgId))
-          : [];
-        const catalogByName = new Map(catalogRows.map((r) => [r.name, r]));
-        // TPL-6.3 — disabled or operator-blocked tools are withheld from the
-        // served descriptors: the model is never offered what authorize would
-        // deny. Silent on this read path by design (documented); authorize
-        // denies loudly with audit — the decision point, not the read path.
-        const blockRows = await tx
-          .select({ targetName: controlBlocks.targetName })
-          .from(controlBlocks)
-          .where(
-            and(
-              eq(controlBlocks.organizationId, input.orgId),
-              eq(controlBlocks.targetType, 'tool'),
-              or(isNull(controlBlocks.expiresAt), sql`${controlBlocks.expiresAt} > now()`),
-            ),
-          );
-        const blockedNames = new Set(blockRows.map((r) => r.targetName));
-        const visibleTools = pinnedTools.filter((t) => {
-          if (blockedNames.has(t.name)) return false;
-          const entry = catalogByName.get(t.name);
-          if (entry && !entry.enabled) return false;
-          return true;
-        });
-        const tools = visibleTools.map((t) => {
-          const entry = catalogByName.get(t.name);
-          // Built-in tools (e.g. request_human_handoff) resolve without a
-          // catalog row - the platform implements them (FL-1.7c).
-          const builtin = BUILT_IN_TOOLS.get(t.name);
-          const annotations = (entry?.annotations ?? {}) as {
-            read_only?: boolean;
-            destructive?: boolean;
-            idempotent?: boolean;
-            open_world?: boolean;
-          };
-          return {
-            name: t.name,
-            effectClass:
-              entry?.effectClass ??
-              builtin?.effectClass ??
-              (t.access === 'read' ? 'READ_ONLY' : 'MUTATING'),
-            approvalRequirement:
-              entry?.approvalRequirement ??
-              builtin?.approvalRequirement ??
-              (t.approval === 'required' ? 'REQUIRED' : 'NONE'),
-            description: entry?.description ?? builtin?.description ?? undefined,
-            inputSchemaJson: entry
-              ? JSON.stringify(entry.inputSchema)
-              : builtin
-                ? JSON.stringify(builtin.inputSchema)
-                : undefined,
-            httpBinding: entry
-              ? ((entry.httpBinding ?? null) as {
-                  url: string;
-                  method: string;
-                  timeout_ms: number;
-                  header_name: string;
-                } | null)
-              : undefined,
-            annotations: entry
-              ? {
-                  readOnly: annotations.read_only ?? entry.effectClass === 'READ_ONLY',
-                  destructive: annotations.destructive ?? entry.effectClass === 'DESTRUCTIVE',
-                  idempotent: annotations.idempotent ?? false,
-                  openWorld: annotations.open_world ?? false,
-                }
-              : undefined,
-          };
-        });
-
-        return {
-          assistantVersionId: run.assistantVersionId,
-          policyVersion: run.policySnapshotId,
-          runUserId: runActorAccountId,
-          conversationSummary: summaryText,
-          recentMessages: orderedRecent.map((m) => {
-            // FL-1.6 — pinned MESSAGE_ATTACHMENT claim-check refs; the runtime
-            // fetches each via GetRunArtifact and builds provider image parts.
-            const refs = Array.isArray(m.artifactRefs)
-              ? (m.artifactRefs as Array<{
-                  artifact_id: string;
-                  media_type: string;
-                  byte_length: number;
-                  sha256: string;
-                  purpose: string;
-                }>)
-              : [];
-            return {
-              messageId: m.id,
-              role: m.role,
-              text: String((m.content as { text?: unknown }).text ?? '').slice(0, 8192),
-              attachments: refs.slice(0, 4).map((r) => ({
-                artifactId: r.artifact_id,
-                mediaType: r.media_type,
-                byteLength: r.byte_length,
-                sha256: Buffer.from(r.sha256, 'hex'),
-                purpose: r.purpose,
-              })),
-            };
-          }),
-          memories: memoryRows.map((m) => {
-            const content = piiOff ? m.content : redactPii(m.content).redacted;
-            return {
-              memoryId: m.id,
-              scope: m.scopeType,
-              scopeId: m.scopeId ?? undefined,
-              provenance: m.provenance ?? '',
-              content: spotlight({ source: 'memory', content: content.slice(0, 2048) }),
-              contentMediaType: 'text/plain',
-            };
-          }),
-          knowledgeRefs,
-          tools,
-          artifactRefs: [],
-          instructions: composeSystemPrompt(
-            snapshot?.instructions ?? null,
-            snapshot?.brand ?? null,
-          ),
-          brandVoice: snapshot?.brand ?? undefined,
-          allowedModels: qualifiedModels,
-          modelWindows,
-          modelParams: modelParams
-            ? {
-                temperature: modelParams.temperature,
-                maxOutputTokens: modelParams.max_output_tokens,
-                topP: modelParams.top_p,
-                reasoningEffort: modelParams.reasoning_effort,
-                outputSchema: (modelParams as { output_schema?: string }).output_schema,
-              }
-            : undefined,
-          budgets: {
-            maxToolCalls: budgetPolicy.max_tool_calls ?? 8,
-            maxModelCalls: budgetPolicy.max_model_calls ?? 16,
-            maxOutputBytes: 262144n,
-            maxTotalTokens: BigInt(budgetPolicy.max_total_tokens ?? 200_000),
-            maxCostMicros: BigInt(budgetPolicy.max_cost_micros ?? 0),
-            wallClockSeconds: budgetPolicy.wall_clock_seconds ?? 0,
+            // Adapt service shape to repository KnowledgeHitRow
+            return hits.map((h) => ({
+              documentId: h.documentId,
+              chunkId: h.chunkId,
+              text: h.snippet,
+              title: h.title ?? null,
+              score: h.score,
+              sourceRange: {
+                byteStart: h.sourceRangeStart,
+                byteEnd: h.sourceRangeEnd,
+              },
+            }));
           },
-          guardrailPolicy: {
-            inputPolicy: guardrailPolicy.input_policy ?? 'default',
-            outputPolicy: guardrailPolicy.output_policy ?? 'default',
-            piiRedaction: !piiOff,
-            executionMode,
-          },
-        };
-      });
-      setSpanAttributes(span, {
-        guardrail_input_policy: String(assembled.guardrailPolicy.inputPolicy).slice(0, 64),
-        guardrail_output_policy: String(assembled.guardrailPolicy.outputPolicy).slice(0, 64),
-        guardrail_execution_mode: assembled.guardrailPolicy.executionMode,
-        guardrail_pii_redaction: assembled.guardrailPolicy.piiRedaction,
-      });
+        },
+      );
       return assembled;
     });
   }
@@ -2757,51 +995,12 @@ export class McpAuthorityService {
     orgId: string,
     runId: string,
   ): Promise<string[] | undefined> {
-    const found = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ policySnapshotId: runs.policySnapshotId })
-        .from(runs)
-        .where(eq(runs.id, runId))
-        .limit(1),
-    );
-    const snapshotId = found[0]?.policySnapshotId ?? null;
-    if (!snapshotId) {
-      return undefined;
-    }
-    const snapshots = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ knowledgePins: policySnapshots.knowledgePins })
-        .from(policySnapshots)
-        .where(eq(policySnapshots.id, snapshotId))
-        .limit(1),
-    );
-    return McpAuthorityService.resolvedPinVersionIds(
-      (snapshots[0] ?? null) as { knowledgePins?: unknown } | null,
-    );
+    return this.runContext.pinnedVersionIdsForRun(orgId, runId);
   }
 
   /** P0-1 — run actor account for source-ACL matching (trigger author iff an account id). */
   private async runActorAccountId(orgId: string, runId: string): Promise<string | null> {
-    const found = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ inputMessageId: runs.inputMessageId })
-        .from(runs)
-        .where(eq(runs.id, runId))
-        .limit(1),
-    );
-    const messageId = found[0]?.inputMessageId ?? null;
-    if (!messageId) {
-      return null;
-    }
-    const trigger = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ createdBy: messages.createdBy })
-        .from(messages)
-        .where(eq(messages.id, messageId))
-        .limit(1),
-    );
-    const author = trigger[0]?.createdBy ?? null;
-    return author !== null && McpAuthorityService.UUID_RE.test(author) ? author : null;
+    return this.runContext.runActorAccountId(orgId, runId);
   }
 
   /**
@@ -2819,7 +1018,6 @@ export class McpAuthorityService {
       chunkId: string;
       sourceRange: { byteStart: number; byteEnd: number };
     }>;
-    tx?: Parameters<Parameters<DbService['withOrg']>[1]>[0];
   }): Promise<void> {
     const citations = input.hits.slice(0, 10).map((h) => ({
       document_id: h.documentId,
@@ -2831,25 +1029,19 @@ export class McpAuthorityService {
       return;
     }
     const eventId = `retr-${createHash('sha256').update(`${input.runId}:${input.query}`).digest('hex').slice(0, 56)}`;
-    const insert = (tx: Parameters<Parameters<DbService['withOrg']>[1]>[0]): Promise<unknown> =>
-      tx
-        .insert(runEvents)
-        .values({
-          id: uuidv7(),
+    await this.runEventsRepo.appendRunEvents({
+      orgId: input.orgId,
+      runId: input.runId,
+      producerIdentity: 'engine:mcp-authority',
+      events: [
+        {
           eventId,
-          runId: input.runId,
-          organizationId: input.orgId,
           eventType: '5',
           schemaVersion: 1,
-          producerIdentity: 'engine:mcp-authority',
-          payload: { case: 'retrieval', value: { citations }, redaction: 'NONE' } as never,
-        })
-        .onConflictDoNothing({ target: [runEvents.runId, runEvents.eventId] });
-    if (input.tx) {
-      await insert(input.tx);
-      return;
-    }
-    await this.db.withOrg(input.orgId, insert);
+          payload: { case: 'retrieval', value: { citations } },
+        },
+      ],
+    });
   }
 
   /**
@@ -2873,101 +1065,20 @@ export class McpAuthorityService {
       throw ApiError.validation({ source_sequence: 'must be a non-negative integer' });
     }
     const summary = input.summary.slice(0, 8192);
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const conv = await tx
-        .select({ id: conversations.id })
-        .from(conversations)
-        .where(
-          and(
-            eq(conversations.id, input.conversationId),
-            eq(conversations.organizationId, input.orgId),
-          ),
-        )
-        .limit(1);
-      if (conv.length === 0) {
-        throw ApiError.notFound('conversation');
-      }
-      // Idempotency anchor: same caller key + same digest → replay; different
-      // digest → conflict. The conversation row is the natural scope here.
-      const claimed = await tx
-        .insert(conversationSummaries)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          conversationId: input.conversationId,
-          sourceSequence: input.sourceSequence,
-          summary,
-          tokenCount: Math.max(0, Math.floor(input.tokenCount)),
-          modelId: input.modelId?.slice(0, 128) ?? null,
-        })
-        .onConflictDoNothing()
-        .returning();
-      if (claimed.length > 0) {
-        return { summaryId: claimed[0].id, duplicate: false };
-      }
-      const existing = await tx
-        .select({ id: conversationSummaries.id, summary: conversationSummaries.summary })
-        .from(conversationSummaries)
-        .where(
-          and(
-            eq(conversationSummaries.conversationId, input.conversationId),
-            eq(conversationSummaries.sourceSequence, input.sourceSequence),
-          ),
-        )
-        .limit(1);
-      if (existing.length > 0 && existing[0].summary === summary) {
-        return { summaryId: existing[0].id, duplicate: true };
-      }
-      throw ApiError.conflict(
-        'summary already exists for this source sequence with different content',
-      );
+    return this.conversationsRepo.saveConversationSummary({
+      orgId: input.orgId,
+      conversationId: input.conversationId,
+      sourceSequence: input.sourceSequence,
+      summary,
+      tokenCount: input.tokenCount,
+      modelId: input.modelId,
+      callerScope: input.callerScope,
+      idempotencyKey: input.idempotencyKey,
     });
   }
 
   // ── Run idempotency (run-scoped helper for callers that need it) ────────
 
-  async claimRunIdempotency(
-    tx: NodePgDatabase,
-    input: {
-      orgId: string;
-      runId: string;
-      callerScope: string;
-      idempotencyKey: string;
-      requestHash: string;
-    },
-  ): Promise<'claimed' | 'duplicate'> {
-    const inserted = await tx
-      .insert(runIdempotency)
-      .values({
-        id: uuidv7(),
-        organizationId: input.orgId,
-        runId: input.runId,
-        callerScope: input.callerScope,
-        idempotencyKey: input.idempotencyKey,
-        requestHash: input.requestHash,
-        expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-      })
-      .onConflictDoNothing()
-      .returning({ id: runIdempotency.id });
-    if (inserted.length > 0) {
-      return 'claimed';
-    }
-    const existing = await tx
-      .select({ requestHash: runIdempotency.requestHash })
-      .from(runIdempotency)
-      .where(
-        and(
-          eq(runIdempotency.organizationId, input.orgId),
-          eq(runIdempotency.callerScope, input.callerScope),
-          eq(runIdempotency.idempotencyKey, input.idempotencyKey),
-        ),
-      )
-      .limit(1);
-    if (existing.length > 0 && existing[0].requestHash !== input.requestHash) {
-      throw ApiError.conflict('idempotency key reuse with different payload');
-    }
-    return 'duplicate';
-  }
 
   private async auditSafe(event: {
     action: string;

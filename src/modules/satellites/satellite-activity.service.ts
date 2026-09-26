@@ -1,9 +1,9 @@
-import { eq, sql } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { satelliteKeyOf } from '../../common/auth/principal';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
-import { SatelliteScope, satelliteCounters, SatelliteCounterRow } from './satellite.schema';
+import { SATELLITE_ACTIVITY_REPOSITORY } from './repositories/repository-tokens';
+import type { ISatelliteActivityRepository } from './repositories/satellite-activity.repository';
+import { SatelliteScope, SatelliteCounterRow } from './satellite.schema';
 
 /** Kept for the surfaces that already import it from here. */
 export const satelliteKeyFor = satelliteKeyOf;
@@ -29,7 +29,8 @@ export class SatelliteActivityService implements OnModuleInit {
   private readonly logger = new Logger(SatelliteActivityService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(SATELLITE_ACTIVITY_REPOSITORY)
+    private readonly counters: ISatelliteActivityRepository,
     private readonly events: EventBus,
   ) {}
 
@@ -49,65 +50,13 @@ export class SatelliteActivityService implements OnModuleInit {
   touch(satelliteKey: string, scope: SatelliteScope, opts: { events?: number } = {}): void {
     const now = new Date().toISOString();
     const events = Math.max(0, Math.floor(opts.events ?? 0));
-    // INSERT seed + ON CONFLICT increment, per scope, with typed column refs.
-    const seed: Partial<typeof satelliteCounters.$inferInsert> = { satelliteKey, updatedAt: now };
-    const set: Record<string, unknown> = { updatedAt: now };
-    switch (scope) {
-      case 'heartbeat':
-        seed.heartbeats = 1;
-        seed.lastHeartbeatAt = now;
-        set.heartbeats = sql`${satelliteCounters.heartbeats} + 1`;
-        set.lastHeartbeatAt = now;
-        break;
-      case 'revocations':
-        seed.revocationPolls = 1;
-        seed.lastRevocationPollAt = now;
-        set.revocationPolls = sql`${satelliteCounters.revocationPolls} + 1`;
-        set.lastRevocationPollAt = now;
-        break;
-      case 'config_pull':
-        seed.configPulls = 1;
-        seed.lastConfigPullAt = now;
-        set.configPulls = sql`${satelliteCounters.configPulls} + 1`;
-        set.lastConfigPullAt = now;
-        break;
-      case 'config_ack':
-        seed.configAcks = 1;
-        seed.lastConfigAckAt = now;
-        set.configAcks = sql`${satelliteCounters.configAcks} + 1`;
-        set.lastConfigAckAt = now;
-        break;
-      case 'keys_validate':
-        seed.keyValidations = 1;
-        seed.lastKeyValidationAt = now;
-        set.keyValidations = sql`${satelliteCounters.keyValidations} + 1`;
-        set.lastKeyValidationAt = now;
-        break;
-      case 'ingest':
-        seed.ingestBatches = 1;
-        seed.ingestEvents = events;
-        seed.lastIngestAt = now;
-        set.ingestBatches = sql`${satelliteCounters.ingestBatches} + 1`;
-        set.ingestEvents = sql`${satelliteCounters.ingestEvents} + ${events}`;
-        set.lastIngestAt = now;
-        break;
-      case 'quota_check':
-        seed.quotaChecks = 1;
-        seed.lastQuotaCheckAt = now;
-        set.quotaChecks = sql`${satelliteCounters.quotaChecks} + 1`;
-        set.lastQuotaCheckAt = now;
-        break;
-    }
-    void this.db.root
-      .insert(satelliteCounters)
-      .values(seed as typeof satelliteCounters.$inferInsert)
-      .onConflictDoUpdate({ target: satelliteCounters.satelliteKey, set: set as never })
+    void this.counters
+      .touchCounter({ satelliteKey, scope, events, now })
       .catch((err) => this.logger.warn(`activity counter bump failed (${satelliteKey}/${scope}): ${(err as Error).message}`));
   }
 
   async row(satelliteKey: string): Promise<SatelliteCounterRow | null> {
-    const rows = await this.db.root.select().from(satelliteCounters).where(eq(satelliteCounters.satelliteKey, satelliteKey)).limit(1);
-    return rows[0] ?? null;
+    return this.counters.getCounter(satelliteKey);
   }
 
   /**

@@ -1,17 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { inArray, sql, and, eq } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { pgViolation } from '../../common/infra/db/pg-types';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EntitlementState, OrgAccessPort } from '../../common/auth/ports';
 import { EventBus, EngineEvents, AccountCreatedEvent } from '../../common/events/event-bus';
 import { AuditService } from '../../common/audit/audit.service';
-import { ApiError } from '../../common/http/api-error';
+import { ApiError, ERROR_CODES } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
-import { legacyTenants } from '../../common/infra/db/legacy-schema';
 import { EntitlementsService } from './entitlements.service';
 import { MembershipsService } from './memberships.service';
-import { orgMemberships, orgSettings } from './schema';
+import { ORG_ACCESS_REPOSITORY, ORG_INFO_REPOSITORY } from './repositories/repository-tokens';
+import type { IOrgAccessRepository } from './repositories/org-access.repository';
+import type { IOrgInfoRepository } from './repositories/org-info.repository';
 
 /**
  * OrgAccessPort implementation (the kernel's entitlement/roles guards bind
@@ -22,13 +20,18 @@ import { orgMemberships, orgSettings } from './schema';
  * orgs using the TenantModel column set — the DDL authority stays Python
  * until handover A-1). Defaults below mirror Python's model defaults so
  * the runtime reads these rows without surprises.
+ *
+ * Persistence lives behind `IOrgAccessRepository` / `IOrgInfoRepository`
+ * (selected by `DB_PROVIDER` in `OrganizationsModule`); this service keeps
+ * validation, retry loops, capacity checks, audit, and events.
  */
 @Injectable()
 export class OrgAccessService implements OrgAccessPort, OnModuleInit {
   private readonly logger = new Logger(OrgAccessService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(ORG_ACCESS_REPOSITORY) private readonly access: IOrgAccessRepository,
+    @Inject(ORG_INFO_REPOSITORY) private readonly orgInfo: IOrgInfoRepository,
     private readonly events: EventBus,
     private readonly audit: AuditService,
     private readonly memberships: MembershipsService,
@@ -51,7 +54,7 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
 
   /**
    * ADR-001: personal org, individual tier, sole owner. The whole creation —
-   * tenants row, owner membership — is one transaction via insertOrgWithOwner
+   * tenants row, owner membership — is one transaction in the repository
    * (AUTH-2.2 refactor): a membership failure can no longer strand an orphan
    * tenants row the way two separate root writes could.
    */
@@ -61,7 +64,7 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const slug = `pers-${slugBase}-${randomUUID().slice(0, 8)}`;
       try {
-        await this.insertOrgWithOwner({ orgId, slug, name: `${email.split('@')[0]}'s org`, accountId, kind: 'personal' });
+        await this.access.createOrgWithOwner({ orgId, slug, name: `${email.split('@')[0]}'s org`, accountId, kind: 'personal' });
         break;
       } catch (err) {
         if (attempt === 4) {
@@ -110,7 +113,7 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
       const orgId = randomUUID();
       const slug = input.slug ? normalizeTeamSlug(input.slug) : deriveTeamSlug(name, attempt > 0);
       try {
-        await this.insertOrgWithOwner({ orgId, slug, name, accountId: input.accountId, kind: 'team' });
+        await this.access.createOrgWithOwner({ orgId, slug, name, accountId: input.accountId, kind: 'team' });
         await this.audit.add({
           action: 'org.created',
           resourceType: 'tenant',
@@ -124,10 +127,13 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
         return { orgId, slug };
       } catch (err) {
         lastErr = err;
-        const pg = pgViolation(err);
-        if (input.slug && pg.code === '23505') {
-          // A user-chosen slug is an immutable choice: collision is a 409, never a retry.
-          throw ApiError.conflict('that workspace address is already taken', { reason: 'slug_taken' });
+        if (input.slug && isSlugTakenConflict(err)) {
+          // A user-chosen slug is an immutable choice: collision is a 409,
+          // never a retry. The repository already throws the stable
+          // ApiError.conflict('that workspace address is already taken',
+          // { reason: 'slug_taken' }) on both lanes (pg: 23505 translation)
+          // — rethrow as-is (identical to the old pgViolation mapping).
+          throw err;
         }
         // Derived slug: loop retries with a fresh random suffix.
       }
@@ -136,58 +142,14 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
   }
 
   /**
-   * The shared creation transaction (personal + team): the Python-owned
-   * tenants row (documented INSERT seam — engine inserts, Python owns DDL
-   * until handover A-1), the owner membership, and (team only) the eager
-   * org_settings row, all atomic. Tenant context is set transaction-locally
-   * so the RLS-guarded membership/settings inserts admit the new org.
-   */
-  private async insertOrgWithOwner(input: { orgId: string; slug: string; name: string; accountId: string; kind: 'personal' | 'team' }): Promise<void> {
-    const now = new Date().toISOString();
-    await this.db.root.transaction(async (tx) => {
-      await tx.execute(sql`select set_config('statement_timeout', '10000', true)`);
-      await tx.execute(sql`select set_config('idle_in_transaction_session_timeout', '30000', true)`);
-      await tx.execute(sql`select set_config('app.current_tenant', ${input.orgId}, true)`);
-      await tx.insert(legacyTenants).values({
-        id: input.orgId,
-        slug: input.slug,
-        name: input.name,
-        allowed_topics: [],
-        blocked_topics: [],
-        escalation_threshold: 0.7,
-        knowledge_allowlist: [],
-        default_provider: 'openai',
-        default_model: 'gpt-4',
-        features: {},
-        guardrail_config: {},
-        guardrail_thresholds: {},
-        version: 1,
-        // The Python TenantModel supplies these; the mirror carries no
-        // defaults, so the engine passes them explicitly.
-        created_at: now,
-        updated_at: now,
-      });
-      await tx.insert(orgMemberships).values({ accountId: input.accountId, orgId: input.orgId, role: 'owner', invitedBy: null });
-      if (input.kind === 'team') {
-        await tx.insert(orgSettings).values({ orgId: input.orgId, kind: 'team' }).onConflictDoNothing({ target: orgSettings.orgId });
-      }
-    });
-  }
-
-  /**
    * AUTH-2.2: abuse cap — an account may own at most
    * ORGS__MAX_OWNED_PER_ACCOUNT orgs with an active owner membership.
    */
   private async assertOwnershipCapacity(accountId: string): Promise<void> {
-    const rows = await this.db.withBypass((tx) =>
-      tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(orgMemberships)
-        .where(and(eq(orgMemberships.accountId, accountId), eq(orgMemberships.role, 'owner'), eq(orgMemberships.status, 'active'))),
-    );
-    // Justification (withBypass): the caller's own ownership rows span orgs
-    // by definition; the query filters account_id explicitly.
-    if (Number(rows[0]?.n ?? 0) >= env.ORGS__MAX_OWNED_PER_ACCOUNT) {
+    // Justification (cross-org read): the caller's own ownership rows span
+    // orgs by definition; the repository filters account_id explicitly.
+    const owned = await this.access.countOwnedOrgs(accountId);
+    if (owned >= env.ORGS__MAX_OWNED_PER_ACCOUNT) {
       throw ApiError.conflict(`you already own the maximum number of workspaces (${env.ORGS__MAX_OWNED_PER_ACCOUNT})`, { reason: 'ownership_cap_reached' });
     }
   }
@@ -203,22 +165,23 @@ export class OrgAccessService implements OrgAccessPort, OnModuleInit {
     if (memberships.length === 0) {
       return [];
     }
-    const orgRows = await this.db.withBypass((tx) =>
-      // Justification (withBypass): cross-org read for exactly the caller's
-      // memberships; ids come from the filtered membership query above.
-      tx
-        .select({ id: legacyTenants.id, name: legacyTenants.name })
-        .from(legacyTenants)
-        .where(
-          inArray(
-            legacyTenants.id,
-            memberships.map((m) => m.orgId),
-          ),
-        ),
-    );
-    const nameById = new Map(orgRows.map((row) => [row.id, row.name]));
+    // Cross-org read for exactly the caller's memberships; ids come from
+    // the filtered membership query above.
+    const briefs = await this.orgInfo.listBriefs(memberships.map((m) => m.orgId));
+    const nameById = new Map(briefs.map((brief) => [brief.id, brief.name]));
     return memberships.map((m) => ({ orgId: m.orgId, role: m.role, name: nameById.get(m.orgId) ?? null }));
   }
+}
+
+/** The stable slug-collision conflict both repository lanes throw. */
+function isSlugTakenConflict(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.code === ERROR_CODES.CONFLICT &&
+    typeof err.details === 'object' &&
+    err.details !== null &&
+    (err.details as { reason?: unknown }).reason === 'slug_taken'
+  );
 }
 
 /** AUTH-2.2: workspace addresses that belong to the platform, never to a tenant. */

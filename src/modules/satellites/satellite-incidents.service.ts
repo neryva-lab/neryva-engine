@@ -1,7 +1,7 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { satelliteIncidents, SatelliteIncidentRow } from './satellite.schema';
+import { Inject, Injectable } from '@nestjs/common';
+import { SATELLITE_INCIDENT_REPOSITORY } from './repositories/repository-tokens';
+import type { ISatelliteIncidentRepository, SatelliteIncidentKind } from './repositories/satellite-incident.repository';
+import { SatelliteIncidentRow } from './satellite.schema';
 
 /**
  * The satellite incident timeline (eng-0010): liveness transitions,
@@ -10,19 +10,14 @@ import { satelliteIncidents, SatelliteIncidentRow } from './satellite.schema';
  * spamming rows; resolution closes it. The list IS the status page's
  * history (statuspage parity) and the ops evidence trail.
  */
-export type IncidentKind =
-  | 'liveness_lost'
-  | 'liveness_restored'
-  | 'quarantined'
-  | 'released'
-  | 'version_floor'
-  | 'config_drift'
-  | 'drained'
-  | 'resumed';
+export type IncidentKind = SatelliteIncidentKind;
 
 @Injectable()
 export class SatelliteIncidentsService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    @Inject(SATELLITE_INCIDENT_REPOSITORY)
+    private readonly incidents: ISatelliteIncidentRepository,
+  ) {}
 
   /**
    * Open (or extend) an incident. `liveness_restored`-style kinds resolve
@@ -32,7 +27,7 @@ export class SatelliteIncidentsService {
   async open(input: { satelliteKey: string; kind: IncidentKind; detail?: Record<string, unknown>; autoResolve?: boolean }): Promise<void> {
     const now = new Date().toISOString();
     if (input.autoResolve) {
-      await this.db.root.insert(satelliteIncidents).values({
+      await this.incidents.openIncident({
         satelliteKey: input.satelliteKey,
         kind: input.kind,
         detail: input.detail ?? {},
@@ -44,75 +39,45 @@ export class SatelliteIncidentsService {
     // Dedup: extend the open window of the same kind if one exists.
     const existing = await this.unresolved(input.satelliteKey, input.kind);
     if (existing) {
-      await this.db.root
-        .update(satelliteIncidents)
-        .set({ detail: { ...(existing.detail as Record<string, unknown>), last_seen: now, ...(input.detail ?? {}) } })
-        .where(eq(satelliteIncidents.id, existing.id));
+      await this.incidents.extendIncident(existing.id, {
+        ...(existing.detail as Record<string, unknown>),
+        last_seen: now,
+        ...(input.detail ?? {}),
+      });
       return;
     }
-    await this.db.root.insert(satelliteIncidents).values({
+    await this.incidents.openIncident({
       satelliteKey: input.satelliteKey,
       kind: input.kind,
       detail: { ...(input.detail ?? {}), first_seen: now },
+      openedAt: now,
     });
   }
 
   /** Close every open incident of a kind for a satellite (condition cleared). */
   async resolve(input: { satelliteKey: string; kind?: IncidentKind }): Promise<number> {
-    const conditions = [eq(satelliteIncidents.satelliteKey, input.satelliteKey), isNull(satelliteIncidents.resolvedAt)];
-    if (input.kind) {
-      conditions.push(eq(satelliteIncidents.kind, input.kind));
-    }
-    const resolved = await this.db.root
-      .update(satelliteIncidents)
-      .set({ resolvedAt: new Date().toISOString() })
-      .where(and(...conditions))
-      .returning({ id: satelliteIncidents.id });
-    return resolved.length;
+    return this.incidents.resolveIncidents(input.satelliteKey, input.kind);
   }
 
   async unresolved(satelliteKey: string, kind: IncidentKind): Promise<SatelliteIncidentRow | null> {
-    const rows = await this.db.root
-      .select()
-      .from(satelliteIncidents)
-      .where(and(eq(satelliteIncidents.satelliteKey, satelliteKey), eq(satelliteIncidents.kind, kind), isNull(satelliteIncidents.resolvedAt)))
-      .limit(1);
-    return rows[0] ?? null;
+    return this.incidents.findUnresolved(satelliteKey, kind);
   }
 
   async listFor(satelliteKey: string, limit = 100): Promise<SatelliteIncidentRow[]> {
-    return this.db.root
-      .select()
-      .from(satelliteIncidents)
-      .where(eq(satelliteIncidents.satelliteKey, satelliteKey))
-      .orderBy(desc(satelliteIncidents.openedAt))
-      .limit(Math.min(Math.max(limit, 1), 500));
+    return this.incidents.listFor(satelliteKey, limit);
   }
 
   /** Unresolved incidents only (the detail view's "open now" panel). */
   async listOpen(satelliteKey: string, limit = 50): Promise<SatelliteIncidentRow[]> {
-    return this.db.root
-      .select()
-      .from(satelliteIncidents)
-      .where(and(eq(satelliteIncidents.satelliteKey, satelliteKey), isNull(satelliteIncidents.resolvedAt)))
-      .orderBy(desc(satelliteIncidents.openedAt))
-      .limit(Math.min(Math.max(limit, 1), 200));
+    return this.incidents.listOpen(satelliteKey, limit);
   }
 
   /** The status page feed: every satellite's recent incidents, newest first. */
   async recent(limit = 100): Promise<SatelliteIncidentRow[]> {
-    return this.db.root
-      .select()
-      .from(satelliteIncidents)
-      .orderBy(desc(satelliteIncidents.openedAt))
-      .limit(Math.min(Math.max(limit, 1), 500));
+    return this.incidents.listRecent(limit);
   }
 
   async openCount(): Promise<number> {
-    const rows = await this.db.root
-      .select({ id: satelliteIncidents.id })
-      .from(satelliteIncidents)
-      .where(isNull(satelliteIncidents.resolvedAt));
-    return rows.length;
+    return this.incidents.countOpen();
   }
 }

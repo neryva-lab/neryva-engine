@@ -1,24 +1,25 @@
 import { createHash } from 'node:crypto';
-import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
-import { env } from '../../common/config/env';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ManifestRegistryService } from '../console/manifest-registry.service';
 import { SatelliteRegistryService } from '../satellites/satellite-registry.service';
-import {
-  CONFIG_SCOPES,
-  ConfigScope,
-  configDrafts,
-  configNotifications,
-  publishedConfigs,
-  PublishedConfig,
-  ConfigDraft,
-} from './config-publish.schema';
+import { CONFIG_SCOPES } from './config-publish.schema';
+import type { ConfigDraft, ConfigScope, PublishedConfig } from './config-publish.schema';
 import { validatePayload } from './payload-schemas';
-import { diffJson, JsonDiffEntry } from './json-diff';
+import { diffJson } from './json-diff';
+import type { JsonDiffEntry } from './json-diff';
+import {
+  CONFIG_DRAFT_REPOSITORY,
+  CONFIG_NOTIFICATION_REPOSITORY,
+  CONFIG_PUBLISH_REPOSITORY,
+} from './repositories/repository-tokens';
+import type {
+  IConfigDraftRepository,
+  IConfigNotificationRepository,
+  IConfigPublishRepository,
+} from './repositories/config-publish.repository';
 
 /**
  * Config publishing (handover A-4, engine side): the engine is the single
@@ -39,13 +40,20 @@ import { diffJson, JsonDiffEntry } from './json-diff';
  * (with ETag), and bootstrap (every key's live version in one call). The
  * runtime's local editing routes freeze read-only at A-4 — drafts are where
  * those edits moved to.
+ *
+ * Persistence (P3): all database access goes through the repository ports
+ * (`IConfigPublishRepository`, `IConfigDraftRepository`,
+ * `IConfigNotificationRepository`) — this service owns validation,
+ * hashing, audit, events, and fanout targeting only.
  */
 @Injectable()
 export class ConfigPublishService {
   private static readonly logger = new Logger(ConfigPublishService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(CONFIG_PUBLISH_REPOSITORY) private readonly published: IConfigPublishRepository,
+    @Inject(CONFIG_DRAFT_REPOSITORY) private readonly drafts: IConfigDraftRepository,
+    @Inject(CONFIG_NOTIFICATION_REPOSITORY) private readonly notifications: IConfigNotificationRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly satellites: SatelliteRegistryService,
@@ -89,30 +97,15 @@ export class ConfigPublishService {
       );
     }
 
-    const inserted = await this.db.withOrg(input.orgId, async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`cfg:${input.orgId}:${input.scope}:${input.product ?? '*'}`}))`);
-      const latest = await tx
-        .select({ version: publishedConfigs.version })
-        .from(publishedConfigs)
-        .where(configKey(input.orgId, input.scope, input.product))
-        .orderBy(desc(publishedConfigs.version))
-        .limit(1);
-      const nextVersion = (latest[0]?.version ?? 0) + 1;
-      const rows = await tx
-        .insert(publishedConfigs)
-        .values({
-          orgId: input.orgId,
-          scope: input.scope,
-          product: input.product,
-          version: nextVersion,
-          payload: normalized.normalized,
-          payloadHash,
-          notes: input.notes ?? null,
-          rollbackOf: input.rollbackOf ?? null,
-          publishedBy: input.publishedBy,
-        })
-        .returning();
-      return rows[0];
+    const inserted = await this.published.insertNextVersion({
+      orgId: input.orgId,
+      scope: input.scope,
+      product: input.product,
+      payload: normalized.normalized,
+      payloadHash,
+      notes: input.notes ?? null,
+      rollbackOf: input.rollbackOf ?? null,
+      publishedBy: input.publishedBy,
     });
 
     await this.audit.add({
@@ -150,7 +143,7 @@ export class ConfigPublishService {
     notes?: string | null;
     publishedBy: string;
   }): Promise<PublishedConfig> {
-    const draft = await this.getDraft(input.orgId, input.scope, input.product);
+    const draft = await this.drafts.getDraft(input.orgId, input.scope, input.product);
     if (!draft) {
       throw ApiError.notFound('config draft');
     }
@@ -167,12 +160,8 @@ export class ConfigPublishService {
     });
     // Drop the draft only if it still matches what was published (a
     // concurrent edit keeps the draft alive for its author).
-    await this.db
-      .withOrg(input.orgId, (tx) =>
-        tx
-          .delete(configDrafts)
-          .where(and(draftKey(input.orgId, input.scope, input.product), eq(configDrafts.payloadHash, published.payloadHash))),
-      )
+    await this.drafts
+      .deleteDraftIfPayloadMatches(input.orgId, input.scope, input.product, published.payloadHash)
       .catch(() => undefined);
     return published;
   }
@@ -241,35 +230,16 @@ export class ConfigPublishService {
     const payload = input.payload as Record<string, unknown>;
     const payloadHash = hashPayload(payload);
 
-    const saved = await this.db.withOrg(input.orgId, async (tx) => {
-      const rows = await tx
-        .insert(configDrafts)
-        .values({
-          orgId: input.orgId,
-          scope: input.scope,
-          product: input.product,
-          payload,
-          payloadHash,
-          validationStatus: result.ok ? 'valid' : 'invalid',
-          validationIssues: result.ok ? null : { issues: result.issues },
-          notes: input.notes ?? null,
-          createdBy: input.updatedBy,
-          updatedBy: input.updatedBy,
-        })
-        .onConflictDoUpdate({
-          target: [configDrafts.orgId, configDrafts.scope, configDrafts.product],
-          set: {
-            payload,
-            payloadHash,
-            validationStatus: result.ok ? 'valid' : 'invalid',
-            validationIssues: result.ok ? null : { issues: result.issues },
-            notes: input.notes ?? null,
-            updatedBy: input.updatedBy,
-            updatedAt: new Date().toISOString(),
-          },
-        })
-        .returning();
-      return rows[0];
+    const saved = await this.drafts.saveDraft({
+      orgId: input.orgId,
+      scope: input.scope,
+      product: input.product,
+      payload,
+      payloadHash,
+      validationStatus: result.ok ? 'valid' : 'invalid',
+      validationIssues: result.ok ? null : { issues: result.issues },
+      notes: input.notes ?? null,
+      updatedBy: input.updatedBy,
     });
 
     await this.audit.add({
@@ -286,23 +256,20 @@ export class ConfigPublishService {
   }
 
   async getDraft(orgId: string, scope: ConfigScope, product: string | null): Promise<ConfigDraft | null> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(configDrafts).where(draftKey(orgId, scope, product)).limit(1),
-    );
-    return rows[0] ?? null;
+    return this.drafts.getDraft(orgId, scope, product);
   }
 
   async listDrafts(orgId: string): Promise<ConfigDraft[]> {
-    return this.db.withOrg(orgId, (tx) => tx.select().from(configDrafts).orderBy(configDrafts.scope, configDrafts.product));
+    return this.drafts.listDrafts(orgId);
   }
 
   async deleteDraft(orgId: string, scope: ConfigScope, product: string | null, deletedBy: string): Promise<void> {
-    const rows = await this.db.withOrg(orgId, (tx) => tx.delete(configDrafts).where(draftKey(orgId, scope, product)).returning({ id: configDrafts.id }));
-    if (rows[0]) {
+    const deleted = await this.drafts.deleteDraft(orgId, scope, product);
+    if (deleted) {
       await this.audit.add({
         action: 'config.draft_deleted',
         resourceType: 'config_draft',
-        resourceId: rows[0].id,
+        resourceId: deleted.id,
         actorType: 'account',
         actorId: deletedBy,
         tenantId: orgId,
@@ -322,15 +289,7 @@ export class ConfigPublishService {
 
   /** Latest version of one config key (null when nothing published). */
   async latest(orgId: string, scope: ConfigScope, product: string | null): Promise<PublishedConfig | null> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(publishedConfigs)
-        .where(configKey(orgId, scope, product))
-        .orderBy(desc(publishedConfigs.version))
-        .limit(1),
-    );
-    return rows[0] ?? null;
+    return this.published.latest(orgId, scope, product);
   }
 
   /** One specific version (history drill-down / rollback source). */
@@ -338,14 +297,7 @@ export class ConfigPublishService {
     if (!Number.isInteger(version) || version < 1) {
       throw ApiError.validation({ version: 'must be a positive integer' });
     }
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(publishedConfigs)
-        .where(and(configKey(orgId, scope, product), eq(publishedConfigs.version, version)))
-        .limit(1),
-    );
-    return rows[0] ?? null;
+    return this.published.version(orgId, scope, product, version);
   }
 
   /** Version history, newest first, paginated. */
@@ -356,22 +308,7 @@ export class ConfigPublishService {
     limit = 25,
     offset = 0,
   ): Promise<{ versions: PublishedConfig[]; total: number }> {
-    const cappedLimit = Math.min(Math.max(limit, 1), 100);
-    const rows = await this.db.withOrg(orgId, async (tx) => {
-      const versions = await tx
-        .select()
-        .from(publishedConfigs)
-        .where(configKey(orgId, scope, product))
-        .orderBy(desc(publishedConfigs.version))
-        .limit(cappedLimit)
-        .offset(Math.max(offset, 0));
-      const counted = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(publishedConfigs)
-        .where(configKey(orgId, scope, product));
-      return { versions, total: counted[0]?.count ?? 0 };
-    });
-    return rows;
+    return this.published.history(orgId, scope, product, limit, offset);
   }
 
   /**
@@ -419,13 +356,8 @@ export class ConfigPublishService {
     }>
   > {
     const [published, drafts] = await Promise.all([
-      this.db.withOrg(orgId, (tx) =>
-        tx
-          .select()
-          .from(publishedConfigs)
-          .orderBy(desc(publishedConfigs.version)),
-      ),
-      this.listDrafts(orgId),
+      this.published.listAllDesc(orgId),
+      this.drafts.listDrafts(orgId),
     ]);
 
     const latestBykey = new Map<string, PublishedConfig>();
@@ -436,17 +368,7 @@ export class ConfigPublishService {
       }
     }
     const latestIds = [...latestBykey.values()].map((c) => c.id);
-    const unacked = new Map<string, number>();
-    if (latestIds.length > 0) {
-      const counted = await this.db.root
-        .select({ configId: configNotifications.configId, count: sql<number>`count(*)::int` })
-        .from(configNotifications)
-        .where(and(inArray(configNotifications.configId, latestIds), isNull(configNotifications.ackedAt)))
-        .groupBy(configNotifications.configId);
-      for (const row of counted) {
-        unacked.set(row.configId, row.count);
-      }
-    }
+    const unacked = await this.notifications.countUnackedByConfigIds(latestIds);
 
     const keys = new Set([...latestBykey.keys(), ...drafts.map((d) => `${d.scope}::${d.product ?? '*'}`)]);
     return [...keys].sort().map((key) => {
@@ -483,9 +405,7 @@ export class ConfigPublishService {
     configs: Array<Pick<PublishedConfig, 'id' | 'scope' | 'product' | 'version' | 'payload' | 'payloadHash' | 'publishedAt'>>;
     cursors: Record<string, number>;
   }> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(publishedConfigs).orderBy(desc(publishedConfigs.version)),
-    );
+    const rows = await this.published.listAllDesc(orgId);
     const latestByKey = new Map<string, PublishedConfig>();
     for (const row of rows) {
       const key = `${row.scope}::${row.product ?? '*'}`;
@@ -526,22 +446,7 @@ export class ConfigPublishService {
     if (!Number.isInteger(sinceVersion) || sinceVersion < 0) {
       throw ApiError.validation({ since: 'must be a non-negative integer version cursor' });
     }
-    const capped = Math.min(Math.max(limit, 1), 100);
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(publishedConfigs)
-        .where(and(configKey(orgId, scope, product), gt(publishedConfigs.version, sinceVersion)))
-        .orderBy(publishedConfigs.version)
-        .limit(capped + 1),
-    );
-    const hasMore = rows.length > capped;
-    const page = hasMore ? rows.slice(0, capped) : rows;
-    return {
-      configs: page,
-      nextSince: page.length ? page[page.length - 1].version : sinceVersion,
-      hasMore,
-    };
+    return this.published.since(orgId, scope, product, sinceVersion, limit);
   }
 
   // ── Notification ledger ──────────────────────────────────────────────────
@@ -558,10 +463,10 @@ export class ConfigPublishService {
     if (targets.length === 0) {
       return;
     }
-    await this.db.root
-      .insert(configNotifications)
-      .values(targets.map((t) => ({ configId: config.id, satelliteKey: t.key })))
-      .onConflictDoNothing();
+    await this.notifications.insertFanout(
+      config.id,
+      targets.map((t) => t.key),
+    );
     ConfigPublishService.logger.log(`config ${config.scope} v${config.version} for org ${config.orgId} → notified ${targets.map((t) => t.key).join(', ')}`);
   }
 
@@ -570,12 +475,10 @@ export class ConfigPublishService {
     const config = await this.findConfigById(configId);
     const rows = await this.satellites.list();
     const targets = rows.filter((s) => s.status === 'active' && (s.products as string[]).some((p) => config.product === null || p === config.product));
-    if (targets.length > 0) {
-      await this.db.root
-        .insert(configNotifications)
-        .values(targets.map((t) => ({ configId: config.id, satelliteKey: t.key })))
-        .onConflictDoNothing();
-    }
+    await this.notifications.insertFanout(
+      config.id,
+      targets.map((t) => t.key),
+    );
     await this.audit.add({
       action: 'config.renotified',
       resourceType: 'published_config',
@@ -591,21 +494,12 @@ export class ConfigPublishService {
 
   /** Satellite ACK: mark its notifications for a config as applied. */
   async ack(satelliteKey: string, configId: string): Promise<void> {
-    await this.db.root
-      .update(configNotifications)
-      .set({ ackedAt: new Date().toISOString() })
-      .where(and(eq(configNotifications.configId, configId), eq(configNotifications.satelliteKey, satelliteKey), isNull(configNotifications.ackedAt)));
+    await this.notifications.ack(configId, satelliteKey);
   }
 
   /** Pending (unacked) notifications for one satellite — its work queue. */
   async pendingFor(satelliteKey: string, limit = 50): Promise<Array<{ configId: string }>> {
-    const rows = await this.db.root
-      .select({ configId: configNotifications.configId })
-      .from(configNotifications)
-      .where(and(eq(configNotifications.satelliteKey, satelliteKey), isNull(configNotifications.ackedAt)))
-      .orderBy(configNotifications.notifiedAt)
-      .limit(limit);
-    return rows;
+    return this.notifications.pendingFor(satelliteKey, limit);
   }
 
   /**
@@ -629,7 +523,7 @@ export class ConfigPublishService {
       throw ApiError.notFound('config version');
     }
     const [rows, registry] = await Promise.all([
-      this.db.root.select().from(configNotifications).where(eq(configNotifications.configId, config.id)),
+      this.notifications.notificationsForConfig(config.id),
       this.satellites.list(),
     ]);
     const byKey = new Map(registry.map((s) => [s.key, s]));
@@ -661,27 +555,7 @@ export class ConfigPublishService {
    * a satellite that never came back).
    */
   async retentionSweep(): Promise<{ notificationsDeleted: number; versionsDeleted: number }> {
-    const result = await this.db.withBypass(async (tx) => {
-      const notifications = await tx.execute(sql`
-        delete from config_notifications
-        where acked_at is not null
-          and acked_at < now() - (${env.CONFIG_NOTIFICATION_RETENTION_DAYS} * interval '1 day')
-      `);
-      const versions = await tx.execute(sql`
-        delete from published_configs
-        where id in (
-          select id from (
-            select id, row_number() over (partition by org_id, scope, product order by version desc) as rank
-            from published_configs
-          ) ranked
-          where ranked.rank > ${env.CONFIG_VERSION_RETENTION}
-        )
-      `);
-      return {
-        notificationsDeleted: notifications.rowCount ?? 0,
-        versionsDeleted: versions.rowCount ?? 0,
-      };
-    });
+    const result = await this.published.retentionSweep();
     if (result.notificationsDeleted > 0 || result.versionsDeleted > 0) {
       await this.audit.add({
         action: 'config.retention_pruned',
@@ -713,25 +587,12 @@ export class ConfigPublishService {
     if (!/^[0-9a-f-]{36}$/i.test(configId)) {
       throw ApiError.validation({ config_id: 'must be a uuid' });
     }
-    const rows = await this.db.withBypass((tx) => tx.select().from(publishedConfigs).where(eq(publishedConfigs.id, configId)).limit(1));
-    const row = rows[0];
+    const row = await this.published.getById(configId);
     if (!row) {
       throw ApiError.notFound('config version');
     }
     return row;
   }
-}
-
-function configKey(orgId: string, scope: ConfigScope, product: string | null) {
-  return product === null
-    ? and(eq(publishedConfigs.orgId, orgId), eq(publishedConfigs.scope, scope), isNull(publishedConfigs.product))
-    : and(eq(publishedConfigs.orgId, orgId), eq(publishedConfigs.scope, scope), eq(publishedConfigs.product, product));
-}
-
-function draftKey(orgId: string, scope: ConfigScope, product: string | null) {
-  return product === null
-    ? and(eq(configDrafts.orgId, orgId), eq(configDrafts.scope, scope), isNull(configDrafts.product))
-    : and(eq(configDrafts.orgId, orgId), eq(configDrafts.scope, scope), eq(configDrafts.product, product));
 }
 
 export function assertScope(scope: string): asserts scope is ConfigScope {

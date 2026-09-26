@@ -34,9 +34,45 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
-  DATABASE_URL: z.string().url(),
+  /**
+   * PostgreSQL connection string. Required iff DB_PROVIDER=postgres
+   * (enforced by the superRefine below); a pure-MongoDB boot must NOT
+   * require it.
+   */
+  DATABASE_URL: z.string().url().optional(),
   DATABASE_POOL_MAX: positiveInt(10, 200),
   REDIS_URL: z.string().url(),
+
+  /**
+   * Persistence provider selection (dual-persistence, plan D1). 'postgres'
+   * is the default and preserves current behavior; 'mongodb' selects the
+   * native-driver MongoDB lane (src/common/infra/db/mongo). Unknown values
+   * fail closed at boot via the enum. MONGODB_URI is required iff the
+   * mongodb provider is selected (enforced by the superRefine below).
+   */
+  DB_PROVIDER: z.enum(['postgres', 'mongodb']).default('postgres'),
+  MONGODB_URI: z.string().url().optional(),
+  MONGODB_POOL_MAX: positiveInt(10, 200),
+  MONGODB_SERVER_SELECTION_TIMEOUT_MS: positiveInt(1000, 120000),
+  MONGODB_SOCKET_TIMEOUT_MS: positiveInt(1000, 300000),
+  /**
+   * MongoDB lane: TTL (ms) of the `assistant:<id>` distributed lease that
+   * serializes publish/retire/rollback on the assistants module
+   * (mongo-assistant-version.repository.ts; replaces pg_advisory_xact_lock).
+   * Trade-off: too low and a slow legitimate publish loses its lease
+   * mid-flight (a stolen lease fails closed via the unique version index,
+   * never silently); too high and a crashed publisher blocks the assistant
+   * longer before stale-lease recovery. Default 30s preserves the
+   * pre-config behavior.
+   */
+  MONGODB_PUBLISH_LEASE_TTL_MS: positiveInt(30_000, 3_600_000),
+  /**
+   * Vector-search sidecar for the mongodb lane (P4). When DB_PROVIDER=mongodb
+   * and the topology is not Atlas, a reachable QDRANT_URL selects the
+   * qdrant search backend; absent/unreachable → fail closed at boot (never
+   * a silent lexical-only downgrade). Ignored on the postgres lane.
+   */
+  QDRANT_URL: z.string().url().optional(),
 
   ENGINE_BASE_URL: z.string().url(),
   /** The web app's public base (auth email links point here, not at the API). */
@@ -269,6 +305,11 @@ const envSchema = z.object({
   // FL-2.2 — resumable re-embed worker (batched, atomic per-document swap).
   WORKERS__REEMBED_ENABLED: boolean(false),
   WORKERS__REEMBED_BATCH: positiveInt(10, 200),
+  // P4 — search-index outbox sweeper (replays stranded Qdrant sync intents).
+  // Enabled by default: idle unless the resolved backend requires sidecar
+  // sync, so the default costs one no-op tick per interval on pg/Atlas.
+  WORKERS__SEARCH_INDEX_SYNC_ENABLED: boolean(true),
+  WORKERS__SEARCH_INDEX_SYNC_INTERVAL_MS: positiveInt(30_000, 3_600_000),
   WORKERS__CONNECTORS_ENABLED: boolean(false),
   WORKERS__CONNECTORS_INTERVAL_MS: positiveInt(300_000, 86_400_000),
 
@@ -376,6 +417,24 @@ const envSchema = z.object({
   TURNSTILE_SECRET_KEY: z.string().optional().default(''),
 
   ENGINE_ENCRYPTION_KEY: z.string().optional().default(''),
+}).superRefine((val, ctx) => {
+  // Dual-persistence fail-closed: the mongodb lane cannot boot without a URI.
+  if (val.DB_PROVIDER === 'mongodb' && !val.MONGODB_URI) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['MONGODB_URI'],
+      message: 'MONGODB_URI is required when DB_PROVIDER=mongodb',
+    });
+  }
+  // Mirror: the postgres lane cannot boot without DATABASE_URL, but a
+  // pure-MongoDB boot must not require it.
+  if (val.DB_PROVIDER === 'postgres' && !val.DATABASE_URL) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['DATABASE_URL'],
+      message: 'DATABASE_URL is required when DB_PROVIDER=postgres',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;

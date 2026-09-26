@@ -1,19 +1,27 @@
-import { and, eq, lte, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { ApiError } from '../../common/http/api-error';
 import { env } from '../../common/config/env';
 import { EmailService } from '../corporate/email/email.service';
 import { AccountsService } from '../identity/accounts.service';
-import { legacyApiKeys, legacyTenants } from '../../common/infra/db/legacy-schema';
 import { EntitlementsService } from './entitlements.service';
 import { MembershipsService } from './memberships.service';
 import { OrgGroupsService } from './org-groups.service';
 import { OrgServiceAccountsService } from './org-service-accounts.service';
 import { getOrgBrief, getOrgName } from './org-info';
-import { orgDeletions, orgInvites, orgMemberships, orgServiceAccounts, productEntitlements, projects } from './schema';
+import {
+  INVITE_REPOSITORY,
+  ORG_AUDIT_REPOSITORY,
+  ORG_INFO_REPOSITORY,
+  ORG_LIFECYCLE_REPOSITORY,
+  PROJECT_REPOSITORY,
+} from './repositories/repository-tokens';
+import type { IOrgLifecycleRepository } from './repositories/org-lifecycle.repository';
+import type { IOrgInfoRepository } from './repositories/org-info.repository';
+import type { IInviteRepository } from './repositories/invite.repository';
+import type { IProjectRepository } from './repositories/project.repository';
+import type { IOrgAuditRepository } from './repositories/org-audit.repository';
 
 /**
  * Org lifecycle (the audit's O-2/O-3 blockers): staged deletion with a
@@ -43,13 +51,21 @@ import { orgDeletions, orgInvites, orgMemberships, orgServiceAccounts, productEn
  * — the partial unique index uq_one_active_owner_per_org (drizzle/0044) is the
  * database backstop for the exactly-one-owner invariant; both parties
  * notified + audited.
+ *
+ * Persistence lives behind the repository ports (selected by `DB_PROVIDER`
+ * in `OrganizationsModule`); this service keeps validation, audit replay,
+ * event emission, and notification emails.
  */
 @Injectable()
 export class OrgLifecycleService {
   private static readonly logger = new Logger(OrgLifecycleService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(ORG_LIFECYCLE_REPOSITORY) private readonly lifecycle: IOrgLifecycleRepository,
+    @Inject(ORG_INFO_REPOSITORY) private readonly orgInfo: IOrgInfoRepository,
+    @Inject(INVITE_REPOSITORY) private readonly invitesRepo: IInviteRepository,
+    @Inject(PROJECT_REPOSITORY) private readonly projectsRepo: IProjectRepository,
+    @Inject(ORG_AUDIT_REPOSITORY) private readonly orgAudit: IOrgAuditRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly email: EmailService,
@@ -63,7 +79,7 @@ export class OrgLifecycleService {
   // ── deletion ───────────────────────────────────────────────────────────────
 
   async requestDeletion(input: { orgId: string; actorId: string }): Promise<{ scheduled_purge_at: string }> {
-    const existing = await this.deletionRow(input.orgId);
+    const existing = await this.lifecycle.getDeletion(input.orgId);
     if (existing && existing.status === 'requested') {
       throw ApiError.conflict('deletion is already scheduled', { scheduled_purge_at: existing.scheduledPurgeAt });
     }
@@ -75,19 +91,11 @@ export class OrgLifecycleService {
     }
 
     const scheduledPurgeAt = new Date(Date.now() + env.ORG_DELETION_GRACE_DAYS * 86_400_000).toISOString();
-    const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(orgDeletions)
-        .values({ orgId: input.orgId, requestedBy: input.actorId, status: 'requested', scheduledPurgeAt })
-        .onConflictDoUpdate({
-          target: orgDeletions.orgId,
-          set: { status: 'requested', requestedBy: input.actorId, scheduledPurgeAt, cancelledAt: null, purgedAt: null, updatedAt: now },
-        }),
-    );
+    await this.lifecycle.requestDeletion({ orgId: input.orgId, requestedBy: input.actorId, scheduledPurgeAt });
 
-    // Immediate effects: entitlements expire (each audited by the service),
-    // invites revoke, org keys revoke, service-account tokens void.
+    // Immediate effects: entitlements expire (each audited by the service
+    // through EntitlementsService.transition), invites revoke, org keys
+    // revoke, service-account tokens void.
     const entitlementRows = await this.entitlements.listForOrg(input.orgId);
     for (const row of entitlementRows) {
       if (row.status !== 'expired') {
@@ -96,23 +104,13 @@ export class OrgLifecycleService {
           .catch((err) => OrgLifecycleService.logger.warn(`entitlement expiry failed for ${row.product}: ${(err as Error).message}`));
       }
     }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(orgInvites).set({ revokedAt: now }).where(and(eq(orgInvites.orgId, input.orgId), sql`${orgInvites.revokedAt} is null`)),
-    );
-    // api_keys is Python-owned without RLS — explicit tenant filter (the
-    // documented dual-write seam the keys module already opened).
-    await this.db.root
-      .update(legacyApiKeys)
-      .set({ revoked: true, updated_at: now })
-      .where(and(eq(legacyApiKeys.tenant_id, input.orgId), eq(legacyApiKeys.revoked, false)));
+    await this.lifecycle.revokeInvitesForOrg(input.orgId);
+    // api_keys is Python-owned without RLS — the repository carries the
+    // explicit tenant filter (the documented dual-write seam).
+    await this.lifecycle.revokeApiKeysForOrg(input.orgId);
     // Service-account tokens die with the request (identities linger until
     // purge so the inventory stays inspectable during grace).
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(orgServiceAccounts)
-        .set({ tokenHash: null, tokenPrefix: null, tokenExpiresAt: null, updatedAt: now })
-        .where(eq(orgServiceAccounts.orgId, input.orgId)),
-    );
+    await this.lifecycle.voidServiceAccountTokensForOrg(input.orgId);
 
     await this.audit.add({
       action: 'org.deletion_requested',
@@ -125,21 +123,18 @@ export class OrgLifecycleService {
     });
     await this.events.emit(EngineEvents.OrgDeletionRequested, { orgId: input.orgId, scheduledPurgeAt });
     await this.emailOwner(input.orgId, input.actorId, 'org.deletion-requested', {
-      org_name: await getOrgName(this.db, input.orgId),
+      org_name: await getOrgName(this.orgInfo, input.orgId),
       purge_date: scheduledPurgeAt.slice(0, 10),
     });
     return { scheduled_purge_at: scheduledPurgeAt };
   }
 
   async cancelDeletion(input: { orgId: string; actorId: string }): Promise<void> {
-    const row = await this.deletionRow(input.orgId);
+    const row = await this.lifecycle.getDeletion(input.orgId);
     if (!row || row.status !== 'requested') {
       throw ApiError.notFound('pending org deletion');
     }
-    const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(orgDeletions).set({ status: 'cancelled', cancelledAt: now, updatedAt: now }).where(eq(orgDeletions.orgId, input.orgId)),
-    );
+    await this.lifecycle.cancelDeletion(input.orgId);
     await this.audit.add({
       action: 'org.deletion_cancelled',
       resourceType: 'tenant',
@@ -151,12 +146,12 @@ export class OrgLifecycleService {
     });
     await this.events.emit(EngineEvents.OrgDeletionCancelled, { orgId: input.orgId });
     await this.emailOwner(input.orgId, input.actorId, 'org.deletion-cancelled', {
-      org_name: await getOrgName(this.db, input.orgId),
+      org_name: await getOrgName(this.orgInfo, input.orgId),
     });
   }
 
   async deletionStatus(orgId: string): Promise<{ status: string; scheduled_purge_at: string | null } | null> {
-    const row = await this.deletionRow(orgId);
+    const row = await this.lifecycle.getDeletion(orgId);
     return row ? { status: row.status, scheduled_purge_at: row.scheduledPurgeAt } : null;
   }
 
@@ -166,22 +161,18 @@ export class OrgLifecycleService {
    * accounts sans hashes, entitlements, the trailing audit window).
    */
   async exportOrgData(input: { orgId: string; actorId: string }): Promise<Record<string, unknown>> {
-    const brief = await getOrgBrief(this.db, input.orgId);
+    const brief = await getOrgBrief(this.orgInfo, input.orgId);
     if (!brief) {
       throw ApiError.notFound('organization');
     }
-    const [members, invites, projectRows, groupRows, serviceAccountViews, entitlementViews, auditRows] = await Promise.all([
-      this.db.withOrg(input.orgId, (tx) => tx.select().from(orgMemberships).where(eq(orgMemberships.orgId, input.orgId))),
-      this.db.withOrg(input.orgId, (tx) => tx.select().from(orgInvites).where(eq(orgInvites.orgId, input.orgId))),
-      this.db.withOrg(input.orgId, (tx) => tx.select().from(projects).where(eq(projects.orgId, input.orgId))),
+    const [members, invites, projectRows, groupRows, serviceAccountViews, entitlementViews, auditPage] = await Promise.all([
+      this.lifecycle.listMembershipRows(input.orgId),
+      this.invitesRepo.listInvites(input.orgId),
+      this.projectsRepo.listProjects(input.orgId, true),
       this.groups.list(input.orgId),
       this.serviceAccounts.list(input.orgId),
       this.entitlements.listForOrg(input.orgId),
-      this.db.root.execute<Record<string, unknown>>(sql`
-        select id, actor_type, actor_id, action, resource_type, resource_id, details, created_at
-        from audit_events where tenant_id = ${input.orgId}
-        order by created_at desc limit 1000
-      `),
+      this.orgAudit.query(input.orgId, { limit: 1000, order: 'desc' }),
     ]);
     await this.audit.add({
       action: 'org.data_exported',
@@ -204,34 +195,26 @@ export class OrgLifecycleService {
       groups: groupRows,
       service_accounts: serviceAccountViews,
       entitlements: entitlementViews,
-      audit: auditRows.rows,
+      audit: auditPage.events,
     };
   }
 
   /** The daily purge pass: erase due orgs. Returns purged org ids (ops evidence). */
   async purgeDue(): Promise<string[]> {
-    const due = await this.db.withBypass((tx) =>
-      // Justification (withBypass): the purge scheduler scans across orgs —
-      // an explicitly administrative, cross-tenant read.
-      tx
-        .select({ orgId: orgDeletions.orgId })
-        .from(orgDeletions)
-        .where(and(eq(orgDeletions.status, 'requested'), lte(orgDeletions.scheduledPurgeAt, new Date().toISOString()))),
-    );
+    const dueOrgIds = await this.lifecycle.listDeletionsDue(new Date().toISOString());
     const purged: string[] = [];
-    for (const row of due) {
+    for (const orgId of dueOrgIds) {
       try {
-        await this.purge(row.orgId);
-        purged.push(row.orgId);
+        await this.purge(orgId);
+        purged.push(orgId);
       } catch (err) {
-        OrgLifecycleService.logger.error(`purge failed for org ${row.orgId}: ${(err as Error).message}`);
+        OrgLifecycleService.logger.error(`purge failed for org ${orgId}: ${(err as Error).message}`);
       }
     }
     return purged;
   }
 
   private async purge(orgId: string): Promise<void> {
-    const now = new Date().toISOString();
     await this.audit.add({
       action: 'org.purge_started',
       resourceType: 'tenant',
@@ -241,39 +224,12 @@ export class OrgLifecycleService {
       details: {},
     });
 
-    // Engine-owned org data, per schema — RLS context per org.
-    await this.db.withOrg(orgId, async (tx) => {
-      await tx.execute(sql`delete from studio_project_keys where org_id = ${orgId}`);
-      await tx.execute(sql`delete from product_deployment.deployment_events where org_id = ${orgId}`);
-      await tx.execute(sql`delete from product_deployment.deployments where org_id = ${orgId}`);
-      await tx.execute(sql`delete from product_deployment.pipeline_stages where org_id = ${orgId}`);
-      await tx.execute(sql`delete from product_deployment.pipelines where org_id = ${orgId}`);
-      await tx.execute(sql`delete from product_deployment.secrets where org_id = ${orgId}`);
-      await tx.execute(sql`delete from product_deployment.environments where org_id = ${orgId}`);
-      await tx.execute(sql`delete from published_configs where org_id = ${orgId}`);
-      await tx.execute(sql`delete from webhook_deliveries where org_id = ${orgId}`);
-      await tx.execute(sql`delete from webhooks where org_id = ${orgId}`);
-      await tx.execute(sql`delete from notifications where org_id = ${orgId}`);
-      await tx.execute(sql`delete from org_group_members where org_id = ${orgId}`);
-      await tx.execute(sql`delete from org_groups where org_id = ${orgId}`);
-      await tx.execute(sql`delete from org_service_accounts where org_id = ${orgId}`);
-      await tx.execute(sql`delete from org_settings where org_id = ${orgId}`);
-      await tx.delete(projects).where(eq(projects.orgId, orgId));
-      await tx.delete(orgInvites).where(eq(orgInvites.orgId, orgId));
-      await tx.delete(orgMemberships).where(eq(orgMemberships.orgId, orgId));
-      await tx.delete(productEntitlements).where(eq(productEntitlements.orgId, orgId));
-    });
+    // Engine-owned org data erased in the schema order, the Python-owned
+    // tenants row marked deleted (NOT removed), the deletion row flipped to
+    // 'purged' — one repository unit; per-table counts are ops evidence.
+    const counts = await this.lifecycle.purgeOrgData(orgId);
+    OrgLifecycleService.logger.debug(`purge counts for org ${orgId}: ${JSON.stringify(counts)}`);
 
-    // The tenants row is Python-owned: mark deleted via features jsonb
-    // (documented seam — same INSERT-seam family the ownership map tracks).
-    await this.db.root
-      .update(legacyTenants)
-      .set({ features: sql`jsonb_set(coalesce(features, '{}'::jsonb), '{deleted}', 'true'::jsonb, true)`, updated_at: now })
-      .where(eq(legacyTenants.id, orgId));
-
-    await this.db.withOrg(orgId, (tx) =>
-      tx.update(orgDeletions).set({ status: 'purged', purgedAt: now, updatedAt: now }).where(eq(orgDeletions.orgId, orgId)),
-    );
     await this.audit.add({
       action: 'org.purged',
       resourceType: 'tenant',
@@ -292,51 +248,14 @@ export class OrgLifecycleService {
     if (input.targetAccountId === input.actorId) {
       throw ApiError.validation({ target_account_id: 'cannot transfer to yourself' });
     }
-    // AUTH-1.6 (auth_plan.md D2): ONE transaction, demote-then-promote — the
-    // only ordering that never momentarily holds two active owners, so the
-    // partial unique index uq_one_active_owner_per_org (drizzle/0044) holds at
-    // every statement boundary. A crash rolls the whole TX back; a concurrent
-    // transfer loses at its promote statement with 23505. Direct UPDATEs, not
-    // changeRole — its owner-preservation check would trip mid-transfer by
-    // design. The post-condition re-check is defense-in-depth.
-    const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, async (tx) => {
-      const demoted = await tx
-        .update(orgMemberships)
-        .set({ role: 'admin', updatedAt: now })
-        .where(
-          and(
-            eq(orgMemberships.orgId, input.orgId),
-            eq(orgMemberships.accountId, input.actorId),
-            eq(orgMemberships.role, 'owner'),
-            eq(orgMemberships.status, 'active'),
-          ),
-        )
-        .returning({ id: orgMemberships.id });
-      if (demoted.length === 0) {
-        throw ApiError.forbidden('only the current owner may transfer ownership');
-      }
-      const promoted = await tx
-        .update(orgMemberships)
-        .set({ role: 'owner', updatedAt: now })
-        .where(
-          and(
-            eq(orgMemberships.orgId, input.orgId),
-            eq(orgMemberships.accountId, input.targetAccountId),
-            eq(orgMemberships.status, 'active'),
-          ),
-        )
-        .returning({ id: orgMemberships.id });
-      if (promoted.length === 0) {
-        throw ApiError.notFound('target member (must be an active member of the org)');
-      }
-      const owners = await tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(orgMemberships)
-        .where(and(eq(orgMemberships.orgId, input.orgId), eq(orgMemberships.role, 'owner'), eq(orgMemberships.status, 'active')));
-      if (Number(owners[0]?.n ?? 0) !== 1) {
-        throw ApiError.conflict('ownership transfer must leave exactly one active owner');
-      }
+    // AUTH-1.6 (auth_plan.md D2): ONE transaction, demote-then-promote —
+    // owned by the repository (the only ordering that never momentarily
+    // holds two active owners). Direct UPDATEs, not changeRole — its
+    // owner-preservation check would trip mid-transfer by design.
+    await this.lifecycle.transferOwnership({
+      orgId: input.orgId,
+      currentOwnerAccountId: input.actorId,
+      newOwnerAccountId: input.targetAccountId,
     });
 
     await this.audit.add({
@@ -360,7 +279,7 @@ export class OrgLifecycleService {
           template: 'org.ownership-transferred',
           to: target.email,
           vars: {
-            org_name: await getOrgName(this.db, input.orgId),
+            org_name: await getOrgName(this.orgInfo, input.orgId),
             from_email: input.actorEmail ?? 'the previous owner',
           },
           metadata: { orgId: input.orgId, accountId: target.id },
@@ -377,10 +296,5 @@ export class OrgLifecycleService {
     await this.email
       .sendTemplate({ template, to: account.email, vars, metadata: { orgId, accountId } })
       .catch(() => undefined);
-  }
-
-  private async deletionRow(orgId: string) {
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(orgDeletions).where(eq(orgDeletions.orgId, orgId)).limit(1));
-    return rows[0] ?? null;
   }
 }

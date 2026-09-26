@@ -1,30 +1,46 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../../common/audit/audit.service';
 import { EventBus, EngineEvents, SessionRevokedEvent, TokenRefreshReuseEvent } from '../../../common/events/event-bus';
 import { tokenRefreshReuseTotal } from '../../../common/observability/metrics';
 import { envelopeDecrypt } from '../../../common/infra/crypto/envelope';
-import { oauthClients, oauthGrants, oauthRefreshTokens, oauthSessions, oidcPayloads, accounts } from '../schema';
+import {
+  ACCOUNT_REPOSITORY,
+  GRANT_CODE_REPOSITORY,
+  OAUTH_CLIENT_REPOSITORY,
+  OIDC_PAYLOAD_REPOSITORY,
+  REFRESH_TOKEN_REPOSITORY,
+  SESSION_REPOSITORY,
+} from '../repositories/repository-tokens';
+import type { IAccountRepository } from '../repositories/account.repository';
+import type { IOauthClientRepository } from '../repositories/client.repository';
+import type { IGrantCodeRepository } from '../repositories/grant-code.repository';
+import type { IOidcPayloadRepository } from '../repositories/oidc-payload.repository';
+import type { IRefreshTokenRepository } from '../repositories/refresh-token.repository';
+import type { ISessionRepository } from '../repositories/session.repository';
 
 /**
- * oidc-provider persistence adapter. Model dispatch:
+ * oidc-provider persistence adapter. Model dispatch (provider-blind
+ * repository ports — this class never imports Drizzle, the schema, or
+ * DbService):
  *
- *   Client        → oauth_clients  (registry rows; confidential secrets are
- *                                  envelope-encrypted at rest and decrypted
- *                                  only in-memory for the provider's compare)
- *   Session       → oidc_payloads  + oauth_sessions sync (the L1 device
- *                                  list mirrors the provider's browser
- *                                  session — sid = model id)
- *   Grant         → oidc_payloads
- *   GrantCode     → oauth_grants   (single-use via consumed_at)
- *   AccessToken   → oidc_payloads  (JWTs are self-contained; the provider
- *                                  still stores an introspection record)
- *   RefreshToken  → oauth_refresh_tokens — consume() implements the reuse
- *                                  tripwire: presenting an ALREADY-consumed
- *                                  refresh token revokes the entire family
- *                                  and audits auth.refresh_reuse (doc-06 §10.4)
+ *   Client        → IOauthClientRepository  (registry rows; confidential
+ *                                  secrets are envelope-encrypted at rest
+ *                                  and decrypted only in-memory for the
+ *                                  provider's compare)
+ *   Session       → IOidcPayloadRepository  + ISessionRepository sync (the
+ *                                  L1 device list mirrors the provider's
+ *                                  browser session — sid = model id)
+ *   Grant         → IOidcPayloadRepository
+ *   GrantCode     → IGrantCodeRepository    (single-use via consumed_at)
+ *   AccessToken   → IOidcPayloadRepository  (JWTs are self-contained; the
+ *                                  provider still stores an introspection
+ *                                  record)
+ *   RefreshToken  → IRefreshTokenRepository — consumeWithReuseDetection()
+ *                                  implements the reuse tripwire:
+ *                                  presenting an ALREADY-consumed refresh
+ *                                  token revokes the entire family and
+ *                                  audits auth.refresh_reuse (doc-06 §10.4)
  *
  * NOTE (build-time): the Adapter interface (upsert/find/findByUid/consume/
  * destroy/revokeByGrantId) follows oidc-provider v8 exactly — v7 names
@@ -39,14 +55,19 @@ export interface AdapterHelpers {
 }
 
 @Injectable()
-export class OidcDrizzleAdapter {
-  private readonly logger = new Logger(OidcDrizzleAdapter.name);
+export class OidcRepositoryAdapter {
+  private readonly logger = new Logger(OidcRepositoryAdapter.name);
   helpers: AdapterHelpers = { pushSidDeny: () => undefined };
 
   constructor(
-    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly events: EventBus,
+    @Inject(SESSION_REPOSITORY) private readonly sessions: ISessionRepository,
+    @Inject(REFRESH_TOKEN_REPOSITORY) private readonly refreshTokens: IRefreshTokenRepository,
+    @Inject(OIDC_PAYLOAD_REPOSITORY) private readonly payloads: IOidcPayloadRepository,
+    @Inject(GRANT_CODE_REPOSITORY) private readonly grantCodes: IGrantCodeRepository,
+    @Inject(OAUTH_CLIENT_REPOSITORY) private readonly clients: IOauthClientRepository,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accounts: IAccountRepository,
   ) {}
 
   /** The oidc-provider Adapter factory it receives as `name` per model. */
@@ -75,16 +96,14 @@ export class OidcDrizzleAdapter {
         }
       },
 
-      async find(id: string): Promise<Payload | undefined> {        switch (name) {
+      async find(id: string): Promise<Payload | undefined> {
+        switch (name) {
           case 'Client':
             return self.findClient(id);
-          case 'Session': {
-            const row = await self.db.root.select().from(oidcPayloads).where(and(eq(oidcPayloads.model, 'Session'), eq(oidcPayloads.id, id))).limit(1);
-            return row[0] ? (row[0].payload as Payload) : undefined;
-          }
+          case 'Session':
+            return self.payloads.find<Payload>('Session', id);
           case 'GrantCode': {
-            const rows = await self.db.root.select().from(oauthGrants).where(eq(oauthGrants.codeHash, sha256(id))).limit(1);
-            const row = rows[0];
+            const row = await self.grantCodes.findByCodeHash(sha256(id));
             if (!row) {
               return undefined;
             }
@@ -100,8 +119,7 @@ export class OidcDrizzleAdapter {
             } as Payload;
           }
           case 'RefreshToken': {
-            const rows = await self.db.root.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.jti, id)).limit(1);
-            const row = rows[0];
+            const row = await self.refreshTokens.findByJti(id);
             if (!row) {
               return undefined;
             }
@@ -116,12 +134,8 @@ export class OidcDrizzleAdapter {
             // round-trips via the oidc_payloads copy written at upsert.
             // Without it the provider sees clientId undefined and rejects
             // every rotation with `client mismatch`.
-            const full = await self.db.root
-              .select()
-              .from(oidcPayloads)
-              .where(and(eq(oidcPayloads.model, 'RefreshToken'), eq(oidcPayloads.id, id)))
-              .limit(1);
-            const base: Payload = { grantId: row.grantId ?? undefined, ...(full[0]?.payload as Payload | undefined) };
+            const full = await self.payloads.find<Payload>('RefreshToken', id);
+            const base: Payload = { grantId: row.grantId ?? undefined, ...full };
             if (row.consumedAt) {
               base.consumed = true;
             }
@@ -137,8 +151,7 @@ export class OidcDrizzleAdapter {
             return base;
           }
           default: {
-            const rows = await self.db.root.select().from(oidcPayloads).where(and(eq(oidcPayloads.model, name), eq(oidcPayloads.id, id))).limit(1);
-            return rows[0] ? (rows[0].payload as Payload) : undefined;
+            return self.payloads.find<Payload>(name, id);
           }
         }
       },
@@ -152,12 +165,7 @@ export class OidcDrizzleAdapter {
         if (name !== 'Session') {
           return undefined;
         }
-        const rows = await self.db.root
-          .select()
-          .from(oidcPayloads)
-          .where(and(eq(oidcPayloads.model, 'Session'), sql`${oidcPayloads.payload}->>'uid' = ${uid}`))
-          .limit(1);
-        return rows[0] ? (rows[0].payload as Payload) : undefined;
+        return (await self.payloads.findSessionByUid(uid)) as Payload | undefined;
       },
 
       /**
@@ -168,16 +176,17 @@ export class OidcDrizzleAdapter {
         return undefined;
       },
 
-      async consume(id: string): Promise<void> {        const now = new Date().toISOString();
+      async consume(id: string): Promise<void> {
+        const now = new Date().toISOString();
         switch (name) {
           case 'GrantCode':
-            await self.db.root.update(oauthGrants).set({ consumedAt: now }).where(eq(oauthGrants.codeHash, sha256(id)));
+            await self.grantCodes.consumeByCodeHash(sha256(id), now);
             return;
           case 'RefreshToken':
             await self.consumeRefreshTokenWithReuseDetection(id);
             return;
           default:
-            await self.db.root.update(oidcPayloads).set({ consumedAt: now }).where(and(eq(oidcPayloads.model, name), eq(oidcPayloads.id, id)));
+            await self.payloads.consume(name, id, now);
             return;
         }
       },
@@ -188,27 +197,22 @@ export class OidcDrizzleAdapter {
             await self.revokeSession(id, 'logout');
             return;
           case 'RefreshToken':
-            await self.db.root
-              .update(oauthRefreshTokens)
-              .set({ revokedAt: nowIso() })
-              .where(eq(oauthRefreshTokens.jti, id));
-            await self.db.root
-              .delete(oidcPayloads)
-              .where(and(eq(oidcPayloads.model, 'RefreshToken'), eq(oidcPayloads.id, id)));
+            await self.refreshTokens.revoke(id, nowIso());
+            await self.payloads.destroy('RefreshToken', id);
             return;
           case 'GrantCode':
-            await self.db.root.delete(oauthGrants).where(eq(oauthGrants.codeHash, sha256(id)));
+            await self.grantCodes.destroyByCodeHash(sha256(id));
             return;
           default:
-            await self.db.root.delete(oidcPayloads).where(and(eq(oidcPayloads.model, name), eq(oidcPayloads.id, id)));
+            await self.payloads.destroy(name, id);
             return;
         }
       },
 
       async revokeByGrantId(grantId: string): Promise<void> {
         // RFC 7009 / grant revocation: everything issued under the grant dies.
-        await self.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso() }).where(eq(oauthRefreshTokens.grantId, grantId));
-        await self.db.root.delete(oidcPayloads).where(eq(oidcPayloads.grantId, grantId));
+        await self.refreshTokens.revokeByGrantId(grantId, nowIso());
+        await self.payloads.deleteByGrantId(grantId);
         await self.audit.add({ action: 'token.grant_revoked', resourceType: 'oauth_grant', resourceId: grantId, actorType: 'system' });
       },
     };
@@ -217,8 +221,7 @@ export class OidcDrizzleAdapter {
   // ── Client registry ─────────────────────────────────────────────────────
 
   async findClient(clientId: string): Promise<Payload | undefined> {
-    const rows = await this.db.root.select().from(oauthClients).where(eq(oauthClients.clientId, clientId)).limit(1);
-    const row = rows[0];
+    const row = await this.clients.findClientRow(clientId);
     if (!row) {
       return undefined;
     }
@@ -253,28 +256,31 @@ export class OidcDrizzleAdapter {
     // P7 D-2: persist the OIDC session.uid — it is the identifier tokens
     // carry, so the JWT `sid` claim, deny-list, and registry check key off it.
     const sessionUid = typeof payload.uid === 'string' ? payload.uid : null;
-    await this.db.root
-      .insert(oauthSessions)
-      .values({ sid, accountId, clientId, familyId: randomUUID(), sessionUid, device: payload.extra ?? {} })
-      .onConflictDoUpdate({
-        target: oauthSessions.sid,
-        set: { lastSeenAt: new Date().toISOString(), device: payload.extra ?? {}, sessionUid },
-      });
+    await this.sessions.upsertSessionRow({
+      sid,
+      accountId,
+      clientId,
+      familyId: randomUUID(),
+      sessionUid,
+      device: payload.extra ?? {},
+      nowIso: new Date().toISOString(),
+    });
   }
 
   private async revokeSession(sid: string, reason: string): Promise<void> {
-    const rows = await this.db.root.select().from(oauthSessions).where(eq(oauthSessions.sid, sid)).limit(1);
-    await this.db.root.delete(oidcPayloads).where(and(eq(oidcPayloads.model, 'Session'), eq(oidcPayloads.id, sid)));
-    await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sid, sid));
+    const row = await this.sessions.revokeBySid(sid, nowIso());
+    // The Session payload is provider state — its cleanup stays with the
+    // payload port (the session port owns the registry row only).
+    await this.payloads.destroy('Session', sid);
     // P7 D-2: the deny-list keys off the OIDC session.uid (the JWT `sid`
     // claim) — pushing the storage id here previously denied nothing.
-    const uid = rows[0]?.sessionUid;
+    const uid = row?.sessionUid;
     if (uid) {
       this.helpers.pushSidDeny(uid);
     }
     await this.events.emit<SessionRevokedEvent>(EngineEvents.SessionRevoked, {
       sid,
-      accountId: rows[0]?.accountId ?? 'unknown',
+      accountId: row?.accountId ?? 'unknown',
     });
     await this.audit.add({ action: 'session.revoked', resourceType: 'oauth_session', resourceId: sid, actorType: 'system', details: { reason } });
   }
@@ -285,12 +291,7 @@ export class OidcDrizzleAdapter {
    * holds the per-client authz sid — the wrong namespace for revocation.
    */
   private async sessionUidForRefreshToken(jti: string): Promise<string | null> {
-    const rows = await this.db.root
-      .select({ payload: oidcPayloads.payload })
-      .from(oidcPayloads)
-      .where(and(eq(oidcPayloads.model, 'RefreshToken'), eq(oidcPayloads.id, jti)))
-      .limit(1);
-    const payload = rows[0]?.payload as Record<string, unknown> | null | undefined;
+    const payload = await this.payloads.find<Payload>('RefreshToken', jti);
     const uid = payload?.['sessionUid'];
     return typeof uid === 'string' ? uid : null;
   }
@@ -304,12 +305,8 @@ export class OidcDrizzleAdapter {
    * access tokens, applied here to the OP's refresh_token grant path.
    */
   private async isTokenNewerThanRevocation(accountId: string, tokenCreatedAt: string): Promise<boolean> {
-    const rows = await this.db.root
-      .select({ sessionsRevokedAt: accounts.sessionsRevokedAt })
-      .from(accounts)
-      .where(eq(accounts.id, accountId))
-      .limit(1);
-    const revokedAt = rows[0]?.sessionsRevokedAt;
+    const guard = await this.accounts.sessionGuardState(accountId);
+    const revokedAt = guard?.sessionsRevokedAt;
     if (!revokedAt) {
       return true;
     }
@@ -321,83 +318,66 @@ export class OidcDrizzleAdapter {
     const rotatedFrom = extractRotatedFrom(payload);
     const caps: Array<string | null | undefined> = [];
     if (rotatedFrom) {
-      const prev = await this.db.root
-        .select({ expiresAt: oauthRefreshTokens.expiresAt })
-        .from(oauthRefreshTokens)
-        .where(eq(oauthRefreshTokens.jti, rotatedFrom))
-        .limit(1);
-      caps.push(prev[0]?.expiresAt);
+      caps.push(await this.refreshTokens.findExpiresAt(rotatedFrom));
     }
-    const existing = await this.db.root
-      .select({ expiresAt: oauthRefreshTokens.expiresAt })
-      .from(oauthRefreshTokens)
-      .where(eq(oauthRefreshTokens.jti, id))
-      .limit(1);
-    caps.push(existing[0]?.expiresAt);
+    caps.push(await this.refreshTokens.findExpiresAt(id));
     const finalExpiresAt = clampRefreshExpiresAt(expiresAt, caps);
-    await this.db.root
-      .insert(oauthRefreshTokens)
-      .values({
-        jti: id,
-        familyId,
-        sessionId: extractSessionId(payload),
-        tokenHash: sha256(String(payload.rotatingToken ?? id)),
-        grantId: typeof payload.grantId === 'string' ? payload.grantId : null,
-        expiresAt: finalExpiresAt,
-        rotatedFrom,
-      })
-      .onConflictDoUpdate({
-        target: oauthRefreshTokens.jti,
-        set: { expiresAt: finalExpiresAt },
-      });
-    if (rotatedFrom) {
-      await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, rotatedFrom));
-    }
+    await this.refreshTokens.upsert({
+      jti: id,
+      familyId,
+      sessionId: extractSessionId(payload),
+      tokenHash: sha256(String(payload.rotatingToken ?? id)),
+      grantId: typeof payload.grantId === 'string' ? payload.grantId : null,
+      expiresAt: finalExpiresAt,
+      rotatedFrom,
+      nowIso: nowIso(),
+    });
     // Dual-write the full payload: the bookkeeping row above holds security
     // state only; rotation needs the complete token back (see find).
     await this.upsertOidcPayload('RefreshToken', id, payload, finalExpiresAt);
   }
 
   private async consumeRefreshTokenWithReuseDetection(id: string): Promise<void> {
-    const rows = await this.db.root.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.jti, id)).limit(1);
-    const row = rows[0];
-    if (!row) {
-      return;
-    }
-    if (row.consumedAt) {
-      // REUSE: a retired token was presented again — revoke the family.
-      // Alert exactly once per family: the revoke marks every member, so a
-      // repeat replay already carries revokedAt and stays silent (audit
-      // still records every attempt below).
-      const firstDetection = !row.revokedAt;
-      this.logger.warn(`refresh token reuse detected: jti=${id} family=${row.familyId}`);
-      await this.db.root.update(oauthRefreshTokens).set({ revokedAt: nowIso(), retiredAt: nowIso() }).where(eq(oauthRefreshTokens.familyId, row.familyId));
-      // P7 D-2: revoke by the OIDC session.uid (the JWT `sid` claim). The old
-      // code matched oauth_sessions.sid against the per-client authz sid —
-      // different namespaces, so the session row was never actually revoked.
-      const uid = await this.sessionUidForRefreshToken(id);
-      if (uid) {
-        await this.db.root.update(oauthSessions).set({ revokedAt: nowIso() }).where(eq(oauthSessions.sessionUid, uid));
-        this.helpers.pushSidDeny(uid);
-      }
-      if (firstDetection) {
-        tokenRefreshReuseTotal.inc();
-        await this.events.emit<TokenRefreshReuseEvent>(EngineEvents.TokenRefreshReuse, {
-          accountId: await this.resolveAccountForSessionUid(uid),
-          familyId: row.familyId,
-          sessionId: row.sessionId,
+    const outcome = await this.refreshTokens.consumeWithReuseDetection(id, nowIso());
+    switch (outcome.status) {
+      case 'not_found':
+        return;
+      case 'reused': {
+        // REUSE: a retired token was presented again — revoke the family.
+        // Alert exactly once per family: the revoke marks every member, so
+        // a repeat replay already carries revokedAt and stays silent (audit
+        // still records every attempt below).
+        const firstDetection = outcome.firstDetection;
+        this.logger.warn(`refresh token reuse detected: jti=${id} family=${outcome.familyId}`);
+        // P7 D-2: revoke by the OIDC session.uid (the JWT `sid` claim). The
+        // old code matched oauth_sessions.sid against the per-client authz
+        // sid — different namespaces, so the session row was never actually
+        // revoked.
+        const uid = await this.sessionUidForRefreshToken(id);
+        if (uid) {
+          await this.sessions.revokeBySessionUid(uid, nowIso());
+          this.helpers.pushSidDeny(uid);
+        }
+        if (firstDetection) {
+          tokenRefreshReuseTotal.inc();
+          await this.events.emit<TokenRefreshReuseEvent>(EngineEvents.TokenRefreshReuse, {
+            accountId: await this.resolveAccountForSessionUid(uid),
+            familyId: outcome.familyId,
+            sessionId: outcome.sessionId,
+          });
+        }
+        await this.audit.add({
+          action: 'auth.refresh_reuse',
+          resourceType: 'oauth_refresh_token',
+          resourceId: id,
+          actorType: 'system',
+          details: { family_id: outcome.familyId, consequence: 'family_revoked' },
         });
+        return;
       }
-      await this.audit.add({
-        action: 'auth.refresh_reuse',
-        resourceType: 'oauth_refresh_token',
-        resourceId: id,
-        actorType: 'system',
-        details: { family_id: row.familyId, consequence: 'family_revoked' },
-      });
-      return;
+      case 'consumed':
+        return;
     }
-    await this.db.root.update(oauthRefreshTokens).set({ consumedAt: nowIso() }).where(eq(oauthRefreshTokens.jti, id));
   }
 
   /** Owner lookup for the reuse alert — 'unknown' when the session row is gone. */
@@ -405,28 +385,23 @@ export class OidcDrizzleAdapter {
     if (!sessionUid) {
       return 'unknown';
     }
-    const rows = await this.db.root
-      .select({ accountId: oauthSessions.accountId })
-      .from(oauthSessions)
-      .where(eq(oauthSessions.sessionUid, sessionUid))
-      .limit(1);
-    return rows[0]?.accountId ?? 'unknown';
+    return (await this.sessions.findAccountIdBySessionUid(sessionUid)) ?? 'unknown';
   }
 
   // ── Generic payloads & grant codes ───────────────────────────────────────
 
   private async upsertOidcPayload(model: string, id: string, payload: Payload, expiresAt: string | null): Promise<void> {
-    await this.db.root
-      .insert(oidcPayloads)
-      .values({ model, id, payload, grantId: typeof payload.grantId === 'string' ? payload.grantId : null, expiresAt })
-      .onConflictDoUpdate({
-        target: [oidcPayloads.model, oidcPayloads.id],
-        set: { payload, expiresAt },
-      });
+    await this.payloads.upsert({
+      model,
+      id,
+      payload,
+      grantId: typeof payload.grantId === 'string' ? payload.grantId : null,
+      expiresAt,
+    });
   }
 
   private async upsertGrantCode(id: string, payload: Payload, expiresAt: string): Promise<void> {
-    await this.db.root.insert(oauthGrants).values({
+    await this.grantCodes.upsertGrantCode({
       codeHash: sha256(id),
       clientId: String(payload.clientId ?? 'unknown'),
       accountId: String(payload.accountId ?? 'unknown'),

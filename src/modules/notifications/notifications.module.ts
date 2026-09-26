@@ -6,6 +6,7 @@ import { IdentityModule } from '../identity/identity.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsService } from './notifications.service';
+import { NotificationRepositoriesModule } from './repositories/notification-repositories.module';
 
 /**
  * The notifications platform service (gap P-2): the account-facing feed +
@@ -17,7 +18,7 @@ import { NotificationsService } from './notifications.service';
  * the corporate transport).
  */
 @Module({
-  imports: [CorporateModule, IdentityModule, OrganizationsModule],
+  imports: [CorporateModule, IdentityModule, OrganizationsModule, NotificationRepositoriesModule],
   controllers: [NotificationsController],
   providers: [NotificationsService],
   exports: [NotificationsService],

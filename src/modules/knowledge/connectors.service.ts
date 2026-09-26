@@ -1,14 +1,11 @@
-import { and, eq, inArray } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ApiError } from '../../common/http/api-error';
 import { AuditService } from '../../common/audit/audit.service';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { envelopeDecrypt, envelopeEncrypt } from '../../common/infra/crypto/envelope';
 import { uuidv7 } from '../../common/ids/uuidv7';
 import { sha256Hex } from '../../common/infra/crypto/envelope';
-import { connectorAccounts, connectorDocuments, connectorOAuthApps, type ConnectorAccount } from './connectors.schema';
-import { artifacts, documents, documentSourceAcls, uploadSessions } from './schema';
+import type { ConnectorAccount } from './connectors.schema';
 import {
   CONNECTOR_PROVIDERS,
   CONNECTOR_PROVIDER_IDS,
@@ -28,6 +25,17 @@ import {
   sealDanceState,
   type ConnectorCredentialBundle,
 } from './connector-oauth';
+import {
+  CONNECTOR_ACCOUNT_REPOSITORY,
+  CONNECTOR_OAUTH_APP_REPOSITORY,
+  CONNECTOR_DOCUMENT_TOMBSTONE_REPOSITORY,
+  CONNECTOR_INGEST_STAGING_REPOSITORY,
+} from './repositories/repository-tokens';
+import type { IConnectorAccountRepository } from './repositories/connector-account.repository';
+import type { IConnectorOAuthAppRepository } from './repositories/connector-oauth-app.repository';
+import type { IConnectorDocumentTombstoneRepository } from './repositories/connector-document-tombstone.repository';
+import type { IConnectorIngestStagingRepository } from './repositories/connector-ingest-staging.repository';
+import type { StagedSourceDocument } from './repositories/repository-types';
 
 export interface ConnectorAccountView {
   id: string;
@@ -97,7 +105,12 @@ export class ConnectorsService {
   private static readonly MAX_BYTES_PER_DOCUMENT = 5 * 1024 * 1024;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(CONNECTOR_ACCOUNT_REPOSITORY) private readonly accounts: IConnectorAccountRepository,
+    @Inject(CONNECTOR_OAUTH_APP_REPOSITORY) private readonly oauthApps: IConnectorOAuthAppRepository,
+    @Inject(CONNECTOR_DOCUMENT_TOMBSTONE_REPOSITORY)
+    private readonly tombstones: IConnectorDocumentTombstoneRepository,
+    @Inject(CONNECTOR_INGEST_STAGING_REPOSITORY)
+    private readonly staging: IConnectorIngestStagingRepository,
     private readonly storage: StorageService,
     private readonly audit: AuditService,
   ) {}
@@ -128,41 +141,25 @@ export class ConnectorsService {
       const b = JSON.parse(input.credentials) as { client_id: string; tenant: string; secret: string };
       sealedCredentials = JSON.stringify({ kind: 'msal-cc', client_id: b.client_id, tenant: b.tenant, secret: b.secret });
     }
-    const id = uuidv7();
-    const rows = await this.db.withOrg(input.orgId, async (tx) => {
-      const inserted = await tx
-        .insert(connectorAccounts)
-        .values({
-          id,
-          organizationId: input.orgId,
-          provider: input.provider,
-          displayName: input.displayName.trim().slice(0, 128),
-          config: input.config,
-          ...(sealedCredentials ? { credentialsSealed: { v: envelopeEncrypt(sealedCredentials) } } : {}),
-          createdBy: input.actor,
-        })
-        .onConflictDoUpdate({
-          target: [connectorAccounts.organizationId, connectorAccounts.provider, connectorAccounts.displayName],
-          set: {
-            config: input.config,
-            ...(sealedCredentials ? { credentialsSealed: { v: envelopeEncrypt(sealedCredentials) } } : {}),
-            state: 'active',
-            updatedAt: new Date().toISOString(),
-          },
-        })
-        .returning();
-      return inserted;
+    const displayName = input.displayName.trim().slice(0, 128);
+    const account = await this.accounts.upsertAccount(input.orgId, {
+      id: uuidv7(),
+      provider: input.provider,
+      displayName,
+      config: input.config,
+      credentialsSealed: sealedCredentials ? { v: envelopeEncrypt(sealedCredentials) } : null,
+      createdBy: input.actor,
     });
     await this.audit.add({
       action: 'connector.linked',
       resourceType: 'connector_account',
-      resourceId: rows[0].id,
+      resourceId: account.id,
       actorType: 'account',
       actorId: input.actor,
       tenantId: input.orgId,
-      details: { provider: input.provider, display_name: input.displayName.trim().slice(0, 128) },
+      details: { provider: input.provider, display_name: displayName },
     });
-    return ConnectorsService.toView(rows[0]);
+    return ConnectorsService.toView(account);
   }
 
   /**
@@ -172,9 +169,7 @@ export class ConnectorsService {
    */
   async list(orgId: string): Promise<ConnectorAccountView[]> {
     assertUuid(orgId, 'orgId');
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(connectorAccounts).where(eq(connectorAccounts.organizationId, orgId)),
-    );
+    const rows = await this.accounts.listAccounts(orgId);
     return rows.map((a) => ConnectorsService.toView(a));
   }
 
@@ -195,18 +190,8 @@ export class ConnectorsService {
 
   async setState(input: { orgId: string; accountId: string; state: 'active' | 'paused' | 'error'; actor: string }): Promise<ConnectorAccountView> {
     assertUuid(input.orgId, 'orgId');
-    const rows = await this.db.withOrg(input.orgId, async (tx) => {
-      const updated = await tx
-        .update(connectorAccounts)
-        .set({ state: input.state, updatedAt: new Date().toISOString() })
-        .where(and(eq(connectorAccounts.organizationId, input.orgId), eq(connectorAccounts.id, input.accountId)))
-        .returning();
-      if (updated.length === 0) {
-        throw ApiError.notFound('connector account');
-      }
-      return updated;
-    });
-    return ConnectorsService.toView(rows[0]);
+    const account = await this.accounts.updateState(input.orgId, input.accountId, input.state, null);
+    return ConnectorsService.toView(account);
   }
 
   /**
@@ -220,10 +205,7 @@ export class ConnectorsService {
   async sync(orgId: string, accountId: string): Promise<{ synced: number; truncated: boolean; skipped: number; tombstoned: number }> {
     // Fresh row per sync (never trust a stale caller snapshot for state or
     // sealed material): credentials rotate, admins pause accounts.
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(connectorAccounts).where(and(eq(connectorAccounts.organizationId, orgId), eq(connectorAccounts.id, accountId))).limit(1),
-    );
-    const account = rows[0];
+    const account = await this.accounts.findById(orgId, accountId);
     if (!account) {
       throw ApiError.notFound('connector account');
     }
@@ -264,18 +246,7 @@ export class ConnectorsService {
         ConnectorsService.logger.warn(`connector doc skipped ${account.provider}:${doc.externalId}: ${(err as Error).message}`);
       }
     }
-    await this.db.withOrg(orgId, async (tx) => {
-      await tx
-        .update(connectorAccounts)
-        .set({
-          cursor: result.nextCursor,
-          lastSyncedAt: new Date().toISOString(),
-          state: 'active',
-          lastError: null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(connectorAccounts.id, account.id));
-    });
+    await this.accounts.updateCursor(orgId, account.id, result.nextCursor);
     if (tombstoned > 0) {
       ConnectorsService.logger.log(`connector ${account.id} (${account.provider}) tombstoned ${tombstoned} deleted document(s)`);
     }
@@ -303,22 +274,10 @@ export class ConnectorsService {
     await this.storage.putObject({ key: objectKey, contentType: `${mediaType}; charset=utf-8`, body: bytes });
     // Mapping-aware target: a known external id appends a version to its
     // document; a new one creates (slug is deterministic per external id).
-    const mapped = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ documentId: connectorDocuments.documentId })
-        .from(connectorDocuments)
-        .where(
-          and(
-            eq(connectorDocuments.organizationId, orgId),
-            eq(connectorDocuments.connectorAccountId, account.id),
-            eq(connectorDocuments.externalId, doc.externalId),
-          ),
-        )
-        .limit(1),
-    );
+    const documentId = await this.tombstones.lookupDocumentId(orgId, account.id, doc.externalId);
     const slug = connectorDocSlug(account.provider, doc.externalId);
-    await this.db.withOrg(orgId, async (tx) => {
-      await tx.insert(artifacts).values({
+    const draft: StagedSourceDocument = {
+      artifact: {
         id: artifactId,
         organizationId: orgId,
         purpose: 'SOURCE_DOCUMENT',
@@ -330,8 +289,8 @@ export class ConnectorsService {
         scanStatus: 'pending',
         state: 'active',
         createdBy: `connector:${account.provider}`,
-      });
-      await tx.insert(uploadSessions).values({
+      },
+      session: {
         id: uuidv7(),
         organizationId: orgId,
         artifactId,
@@ -342,49 +301,25 @@ export class ConnectorsService {
         state: 'UPLOADED',
         sourceSlug: slug,
         title: doc.title.slice(0, 256),
-        targetDocumentId: mapped[0]?.documentId ?? null,
+        targetDocumentId: documentId,
         connectorRef: { account_id: account.id, provider: account.provider, external_id: doc.externalId },
         sourceAcl: doc.acl ?? { mode: 'open' },
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
         createdBy: `connector:${account.provider}`,
-      });
-    });
+      },
+    };
+    await this.staging.stageDocument(orgId, draft);
     return 1;
   }
 
   /** Tombstone a source-deleted document (retired ⇒ unreachable; mapping kept). */
   private async tombstoneExternalDocument(orgId: string, accountId: string, externalId: string): Promise<number> {
-    return this.db.withOrg(orgId, async (tx) => {
-      const mapped = await tx
-        .select({ documentId: connectorDocuments.documentId })
-        .from(connectorDocuments)
-        .where(
-          and(
-            eq(connectorDocuments.organizationId, orgId),
-            eq(connectorDocuments.connectorAccountId, accountId),
-            eq(connectorDocuments.externalId, externalId),
-          ),
-        )
-        .limit(1);
-      if (!mapped[0]) {
-        return 0;
-      }
-      await tx.update(documents).set({ state: 'retired', updatedAt: new Date().toISOString() }).where(eq(documents.id, mapped[0].documentId));
-      await tx.delete(documentSourceAcls).where(eq(documentSourceAcls.documentId, mapped[0].documentId));
-      return 1;
-    });
+    return (await this.tombstones.tombstoneByExternalId(orgId, accountId, externalId)) ? 1 : 0;
   }
 
   /** Active accounts due for a scheduled sweep (worker path, bypass-scoped). */
   async dueAccounts(): Promise<ConnectorAccount[]> {
-    return this.db.withBypass(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(connectorAccounts)
-        .where(and(eq(connectorAccounts.state, 'active'), inArray(connectorAccounts.provider, [...CONNECTOR_PROVIDERS.keys()])))
-        .limit(50);
-      return rows;
-    });
+    return this.accounts.findDueActiveAccounts([...CONNECTOR_PROVIDERS.keys()], 50);
   }
 
   /**
@@ -461,12 +396,7 @@ export class ConnectorsService {
   }
 
   private async persistBundle(orgId: string, accountId: string, bundle: ConnectorCredentialBundle): Promise<void> {
-    await this.db.withOrg(orgId, (tx) =>
-      tx
-        .update(connectorAccounts)
-        .set({ credentialsSealed: { v: sealBundle(bundle) }, updatedAt: new Date().toISOString() })
-        .where(eq(connectorAccounts.id, accountId)),
-    );
+    await this.accounts.persistCredentialBundle(orgId, accountId, { v: sealBundle(bundle) });
   }
 
   // ── OAuth apps (org BYO provider apps) ─────────────────────────────────
@@ -479,48 +409,28 @@ export class ConnectorsService {
     if (!input.clientId.trim() || input.clientSecret.length < 8) {
       throw ApiError.validation({ client: 'client_id and a client_secret of at least 8 chars are required' });
     }
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(connectorOAuthApps)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          provider: input.provider,
-          clientId: input.clientId.trim().slice(0, 512),
-          clientSecretSealed: envelopeEncrypt(input.clientSecret),
-          createdBy: input.actor,
-        })
-        .onConflictDoUpdate({
-          target: [connectorOAuthApps.organizationId, connectorOAuthApps.provider],
-          set: {
-            clientId: input.clientId.trim().slice(0, 512),
-            clientSecretSealed: envelopeEncrypt(input.clientSecret),
-            updatedAt: new Date().toISOString(),
-          },
-        })
-        .returning({ id: connectorOAuthApps.id, provider: connectorOAuthApps.provider }),
-    );
-    return { id: rows[0].id, provider: rows[0].provider };
+    return this.oauthApps.upsertApp(input.orgId, {
+      provider: input.provider,
+      clientId: input.clientId.trim().slice(0, 512),
+      clientSecretSealed: envelopeEncrypt(input.clientSecret),
+      createdBy: input.actor,
+    });
   }
 
   async listOAuthApps(orgId: string): Promise<Array<{ provider: string; client_id: string; has_secret: boolean; updated_at: string }>> {
     assertUuid(orgId, 'orgId');
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(connectorOAuthApps).where(eq(connectorOAuthApps.organizationId, orgId)),
-    );
+    const rows = await this.oauthApps.listApps(orgId);
     return rows.map((r) => ({ provider: r.provider, client_id: r.clientId, has_secret: true, updated_at: r.updatedAt }));
   }
 
   async deleteOAuthApp(orgId: string, provider: string): Promise<void> {
     assertUuid(orgId, 'orgId');
-    await this.db.withOrg(orgId, (tx) => tx.delete(connectorOAuthApps).where(and(eq(connectorOAuthApps.organizationId, orgId), eq(connectorOAuthApps.provider, provider))));
+    await this.oauthApps.deleteApp(orgId, provider);
   }
 
   private async getOAuthApp(orgId: string, provider: string): Promise<{ clientId: string; clientSecretSealed: string } | null> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(connectorOAuthApps).where(and(eq(connectorOAuthApps.organizationId, orgId), eq(connectorOAuthApps.provider, provider))).limit(1),
-    );
-    return rows[0] ?? null;
+    const app = await this.oauthApps.findApp(orgId, provider);
+    return app ? { clientId: app.clientId, clientSecretSealed: app.clientSecretSealed } : null;
   }
 
   /**
@@ -531,10 +441,7 @@ export class ConnectorsService {
   async authorizeUrl(input: { orgId: string; accountId: string; actor: string; redirectUri: string }): Promise<{ authorize_url: string }> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.accountId, 'accountId');
-    const accounts = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(connectorAccounts).where(and(eq(connectorAccounts.organizationId, input.orgId), eq(connectorAccounts.id, input.accountId))).limit(1),
-    );
-    const account = accounts[0];
+    const account = await this.accounts.findById(input.orgId, input.accountId);
     if (!account) {
       throw ApiError.notFound('connector account');
     }
@@ -571,10 +478,7 @@ export class ConnectorsService {
     if (!meta) {
       throw ApiError.validation({ provider: `OAuth dance not supported for ${dance.provider}` });
     }
-    const accounts = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select().from(connectorAccounts).where(and(eq(connectorAccounts.organizationId, input.orgId), eq(connectorAccounts.id, dance.accountId))).limit(1),
-    );
-    const account = accounts[0];
+    const account = await this.accounts.findById(input.orgId, dance.accountId);
     if (!account || account.provider !== dance.provider) {
       throw ApiError.validation({ state: 'connector account mismatch' });
     }
@@ -601,12 +505,9 @@ export class ConnectorsService {
   }
 
   private async recordError(orgId: string, accountId: string, message: string): Promise<void> {
-    await this.db.withOrg(orgId, async (tx) => {
-      await tx
-        .update(connectorAccounts)
-        .set({ state: 'error', lastError: message.slice(0, 512), updatedAt: new Date().toISOString() })
-        .where(eq(connectorAccounts.id, accountId));
-    });
+    // The 512-char bound is service-owned (matches the legacy behavior the
+    // PostgreSQL implementation does not enforce itself).
+    await this.accounts.recordSyncError(orgId, accountId, message.slice(0, 512));
   }
 }
 

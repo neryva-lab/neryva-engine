@@ -8,6 +8,7 @@ import { ConfigPublishController } from './config-publish.controller';
 import { ConfigPullController } from './config-pull.controller';
 import { ConfigPublishService } from './config-publish.service';
 import { ConfigPublishWorker } from './config-publish.worker';
+import { ConfigPublishRepositoriesModule } from './repositories/config-publish-repositories.module';
 
 /**
  * The config-publish module — engine side of handover A-4: versioned,
@@ -22,7 +23,7 @@ import { ConfigPublishWorker } from './config-publish.worker';
  * console for the manifest registry's product-tag check).
  */
 @Module({
-  imports: [ConsoleModule, OrganizationsModule, SatellitesModule],
+  imports: [ConsoleModule, OrganizationsModule, SatellitesModule, ConfigPublishRepositoriesModule],
   controllers: [ConfigPublishController, ConfigPullController],
   providers: [ConfigPublishService, ConfigPublishWorker],
   exports: [ConfigPublishService],

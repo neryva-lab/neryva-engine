@@ -1,13 +1,13 @@
-import { and, asc, desc, eq, gte, sql } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { env } from '../../common/config/env';
 import { ApiError } from '../../common/http/api-error';
+import { SATELLITE_REGISTRY_REPOSITORY } from './repositories/repository-tokens';
+import type { ISatelliteRegistryRepository } from './repositories/satellite-registry.repository';
 import { SatelliteActivityService } from './satellite-activity.service';
 import { SatelliteIncidentsService } from './satellite-incidents.service';
-import { satellites, satelliteHeartbeats, Satellite, SatelliteHeartbeatRow } from './satellite.schema';
+import { Satellite, SatelliteHeartbeatRow } from './satellite.schema';
 
 /**
  * The satellite registry (ADR-006 D2/D4): the full lifecycle — seed,
@@ -34,7 +34,8 @@ export class SatelliteRegistryService implements OnModuleInit {
   private readonly logger = new Logger(SatelliteRegistryService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(SATELLITE_REGISTRY_REPOSITORY)
+    private readonly registry: ISatelliteRegistryRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly incidents: SatelliteIncidentsService,
@@ -54,7 +55,7 @@ export class SatelliteRegistryService implements OnModuleInit {
   }
 
   private async seed(): Promise<void> {
-    const seeds: Array<typeof satellites.$inferInsert> = [
+    const seeds = [
       {
         key: 'agent-runtime',
         kind: 'agent-runtime',
@@ -72,22 +73,22 @@ export class SatelliteRegistryService implements OnModuleInit {
         routePrefixes: [],
         serviceClientId: null,
         products: [],
+        endpointUrl: null,
         metadata: { note: 'pre-registered placeholder — opens only via an ADR-002 register amendment (ADR-006 D4)' },
       },
     ];
     for (const seed of seeds) {
-      await this.db.root.insert(satellites).values(seed).onConflictDoNothing({ target: satellites.key });
+      await this.registry.seedSatellite(seed);
     }
     this.logger.log('satellite registry seeded (agent-runtime active; inference placeholder)');
   }
 
   async list(): Promise<Satellite[]> {
-    return this.db.root.select().from(satellites).orderBy(satellites.key);
+    return this.registry.listSatellites();
   }
 
   async get(key: string): Promise<Satellite | null> {
-    const rows = await this.db.root.select().from(satellites).where(eq(satellites.key, key)).limit(1);
-    return rows[0] ?? null;
+    return this.registry.getSatellite(key);
   }
 
   /**
@@ -109,10 +110,7 @@ export class SatelliteRegistryService implements OnModuleInit {
   > {
     const rows = await this.list();
     const now = Date.now();
-    const openIncidentRows = await this.db.root.execute<{ satellite_key: string; n: string }>(sql`
-      select satellite_key, count(*) as n from satellite_incidents where resolved_at is null group by satellite_key
-    `);
-    const openByKey = new Map(openIncidentRows.rows.map((r) => [r.satellite_key, Number(r.n)]));
+    const openByKey = await this.registry.openIncidentCounts();
     return rows.map((row) => {
       const age = row.lastHeartbeatAt ? Math.floor((now - Date.parse(row.lastHeartbeatAt)) / 1000) : null;
       const lease = row.leaseExpiresAt ? Math.max(0, Math.floor((Date.parse(row.leaseExpiresAt) - now) / 1000)) : null;
@@ -165,28 +163,22 @@ export class SatelliteRegistryService implements OnModuleInit {
     if (existing?.status === 'retired') {
       throw ApiError.conflict('retired satellites are terminal — register a new key instead');
     }
-    const values = {
-      key,
-      kind: input.kind,
-      routePrefixes: prefixes,
-      serviceClientId: input.serviceClientId?.slice(0, 64) ?? null,
-      products,
-      endpointUrl: input.endpointUrl?.slice(0, 512) ?? null,
-      versionFloor: input.versionFloor?.slice(0, 64) ?? null,
-      capabilities: input.capabilities ?? {},
-      metadata: input.metadata ?? {},
-      updatedAt: new Date().toISOString(),
-    };
 
-    const upserted = await this.db.root
-      .insert(satellites)
-      .values({ ...values, status: input.status ?? 'active', createdBy: input.actorId })
-      .onConflictDoUpdate({
-        target: satellites.key,
-        set: values,
-      })
-      .returning();
-    const row = upserted[0];
+    const row = await this.registry.upsertSatellite(
+      key,
+      {
+        kind: input.kind,
+        routePrefixes: prefixes,
+        serviceClientId: input.serviceClientId?.slice(0, 64) ?? null,
+        products,
+        endpointUrl: input.endpointUrl?.slice(0, 512) ?? null,
+        versionFloor: input.versionFloor?.slice(0, 64) ?? null,
+        capabilities: input.capabilities ?? {},
+        metadata: input.metadata ?? {},
+        updatedAt: new Date().toISOString(),
+      },
+      { status: input.status ?? 'active', createdBy: input.actorId },
+    );
 
     const changes: Record<string, unknown> = existing
       ? {
@@ -231,10 +223,13 @@ export class SatelliteRegistryService implements OnModuleInit {
       throw ApiError.validation({ reason: 'a quarantine reason is required (audited + shown to ops)' });
     }
     const now = new Date().toISOString();
-    await this.db.root
-      .update(satellites)
-      .set({ status: 'quarantined', quarantinedAt: now, quarantinedBy: input.actorId, quarantineReason: reason, updatedAt: now })
-      .where(eq(satellites.key, input.key));
+    await this.registry.updateSatelliteStatus(input.key, {
+      status: 'quarantined',
+      quarantinedAt: now,
+      quarantinedBy: input.actorId,
+      quarantineReason: reason,
+      updatedAt: now,
+    });
     await this.audit.add({
       action: 'satellite.quarantined',
       resourceType: 'satellite',
@@ -253,10 +248,13 @@ export class SatelliteRegistryService implements OnModuleInit {
       throw ApiError.conflict('satellite is not quarantined');
     }
     const now = new Date().toISOString();
-    await this.db.root
-      .update(satellites)
-      .set({ status: 'active', quarantinedAt: null, quarantinedBy: null, quarantineReason: null, updatedAt: now })
-      .where(eq(satellites.key, input.key));
+    await this.registry.updateSatelliteStatus(input.key, {
+      status: 'active',
+      quarantinedAt: null,
+      quarantinedBy: null,
+      quarantineReason: null,
+      updatedAt: now,
+    });
     await this.audit.add({
       action: 'satellite.released',
       resourceType: 'satellite',
@@ -277,10 +275,12 @@ export class SatelliteRegistryService implements OnModuleInit {
       throw ApiError.conflict(`only an active satellite can drain (current: ${satellite.status})`);
     }
     const now = new Date().toISOString();
-    await this.db.root
-      .update(satellites)
-      .set({ status: 'draining', drainStartedAt: now, drainedBy: input.actorId, updatedAt: now })
-      .where(eq(satellites.key, input.key));
+    await this.registry.updateSatelliteStatus(input.key, {
+      status: 'draining',
+      drainStartedAt: now,
+      drainedBy: input.actorId,
+      updatedAt: now,
+    });
     await this.audit.add({
       action: 'satellite.draining',
       resourceType: 'satellite',
@@ -299,10 +299,12 @@ export class SatelliteRegistryService implements OnModuleInit {
       throw ApiError.conflict('satellite is not draining');
     }
     const now = new Date().toISOString();
-    await this.db.root
-      .update(satellites)
-      .set({ status: 'active', drainStartedAt: null, drainedBy: null, updatedAt: now })
-      .where(eq(satellites.key, input.key));
+    await this.registry.updateSatelliteStatus(input.key, {
+      status: 'active',
+      drainStartedAt: null,
+      drainedBy: null,
+      updatedAt: now,
+    });
     await this.audit.add({
       action: 'satellite.resumed',
       resourceType: 'satellite',
@@ -323,10 +325,11 @@ export class SatelliteRegistryService implements OnModuleInit {
       throw ApiError.conflict('satellite is already retired');
     }
     const now = new Date().toISOString();
-    await this.db.root
-      .update(satellites)
-      .set({ status: 'retired', retiredAt: now, updatedAt: now })
-      .where(eq(satellites.key, input.key));
+    await this.registry.updateSatelliteStatus(input.key, {
+      status: 'retired',
+      retiredAt: now,
+      updatedAt: now,
+    });
     await this.audit.add({
       action: 'satellite.retired',
       resourceType: 'satellite',
@@ -388,23 +391,19 @@ export class SatelliteRegistryService implements OnModuleInit {
     const now = new Date().toISOString();
     const leaseExpiresAt = new Date(Date.now() + this.timeoutSeconds * 1000).toISOString();
     const wasNotLive = satellite.liveness !== 'live';
-    await this.db.root
-      .update(satellites)
-      .set({
-        liveness: 'live',
-        leaseExpiresAt,
-        lastHeartbeatAt: now,
-        lastHeartbeatVersion: input.version?.slice(0, 64) ?? satellite.lastHeartbeatVersion,
-        heartbeatCount: sql`${satellites.heartbeatCount} + 1`,
-        ...(satellite.firstHeartbeatAt ? {} : { firstHeartbeatAt: now }),
-        ...(input.metadata ? { metadata: input.metadata } : {}),
-        ...(input.capabilities ? { capabilities: input.capabilities } : {}),
-        updatedAt: now,
-      })
-      .where(eq(satellites.key, input.key));
+    await this.registry.renewHeartbeatLease(input.key, {
+      liveness: 'live',
+      leaseExpiresAt,
+      lastHeartbeatAt: now,
+      lastHeartbeatVersion: input.version?.slice(0, 64) ?? satellite.lastHeartbeatVersion,
+      ...(satellite.firstHeartbeatAt ? {} : { firstHeartbeatAt: now }),
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...(input.capabilities ? { capabilities: input.capabilities } : {}),
+      updatedAt: now,
+    });
 
     // Bounded sample history (pruned by the sweeper).
-    await this.db.root.insert(satelliteHeartbeats).values({
+    await this.registry.insertHeartbeatSample({
       satelliteKey: input.key,
       version: input.version?.slice(0, 64) ?? null,
       metrics: sanitizeJson(input.metrics),
@@ -464,23 +463,13 @@ export class SatelliteRegistryService implements OnModuleInit {
 
   /** Heartbeat history for the ops view (bounded window + cap). */
   async history(key: string, limit = 200): Promise<SatelliteHeartbeatRow[]> {
-    return this.db.root
-      .select()
-      .from(satelliteHeartbeats)
-      .where(eq(satelliteHeartbeats.satelliteKey, key))
-      .orderBy(desc(satelliteHeartbeats.receivedAt))
-      .limit(Math.min(Math.max(limit, 1), 1000));
+    return this.registry.listHeartbeatHistory(key, limit);
   }
 
   /** History for the fleet view (all satellites, recent window). */
   async recentHistory(minutes = 60): Promise<SatelliteHeartbeatRow[]> {
     const since = new Date(Date.now() - minutes * 60_000).toISOString();
-    return this.db.root
-      .select()
-      .from(satelliteHeartbeats)
-      .where(and(gte(satelliteHeartbeats.receivedAt, since)))
-      .orderBy(asc(satelliteHeartbeats.receivedAt))
-      .limit(5000);
+    return this.registry.listRecentHeartbeats(since, 5000);
   }
 
   /** May this satellite serve traffic (config pull gate)? Quarantined/retired refuse. */

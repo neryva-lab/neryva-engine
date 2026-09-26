@@ -1,7 +1,8 @@
-import { FactoryProvider, Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
+import { FactoryProvider, Inject, Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
 import type Provider from 'oidc-provider';
 import { env } from '../../common/config/env';
 import { DbService } from '../../common/infra/db/db.service';
+import { MongoDbService } from '../../common/infra/db/mongo/mongo.service';
 import { JwksService } from '../../common/auth/jwks.service';
 import { HealthRegistry } from '../../common/health/health.controller';
 import { SERVICE_CLIENT_PORT, SESSION_REGISTRY_PORT } from '../../common/auth/ports';
@@ -22,7 +23,7 @@ import { OnboardingService } from './onboarding.service';
 import { PasswordService } from './password.service';
 import { JwksCustody } from './oidc/jwks-custody';
 import { OIDC_PROVIDER } from './oidc/oidc-provider.token';
-import { OidcDrizzleAdapter } from './oidc/oidc-adapter';
+import { OidcRepositoryAdapter } from './oidc/oidc-adapter';
 import { OidcProviderFactory } from './oidc/oidc-provider.factory';
 import { assertAppleKeyReadable } from './social/idp-verify';
 import { SocialAccountService } from './social/social-account.service';
@@ -30,7 +31,45 @@ import { SocialController } from './social/social.controller';
 import { SocialLoginService } from './social/social-login.service';
 import { socialProviders } from './social/social.config';
 import { envelopeEncrypt } from '../../common/infra/crypto/envelope';
-import { oauthClients } from './schema';
+import {
+  ACCOUNT_ACTION_TOKEN_REPOSITORY,
+  ACCOUNT_REPOSITORY,
+  CREDENTIAL_REPOSITORY,
+  EMAIL_CODE_REPOSITORY,
+  GRANT_CODE_REPOSITORY,
+  IDENTITY_LINK_REPOSITORY,
+  MFA_REPOSITORY,
+  OAUTH_CLIENT_REPOSITORY,
+  OIDC_PAYLOAD_REPOSITORY,
+  ONBOARDING_REPOSITORY,
+  REFRESH_TOKEN_REPOSITORY,
+  SESSION_REPOSITORY,
+} from './repositories/repository-tokens';
+import { PgAccountRepository } from './repositories/pg-account.repository';
+import { MongoAccountRepository } from './repositories/mongo-account.repository';
+import { PgCredentialRepository } from './repositories/pg-credential.repository';
+import { MongoCredentialRepository } from './repositories/mongo-credential.repository';
+import { PgMfaRepository } from './repositories/pg-mfa.repository';
+import { MongoMfaRepository } from './repositories/mongo-mfa.repository';
+import { PgEmailCodeRepository } from './repositories/pg-email-code.repository';
+import { MongoEmailCodeRepository } from './repositories/mongo-email-code.repository';
+import { PgAccountActionTokenRepository } from './repositories/pg-account-action-token.repository';
+import { MongoAccountActionTokenRepository } from './repositories/mongo-account-action-token.repository';
+import { PgSessionRepository } from './repositories/pg-session.repository';
+import { MongoSessionRepository } from './repositories/mongo-session.repository';
+import { PgRefreshTokenRepository } from './repositories/pg-refresh-token.repository';
+import { MongoRefreshTokenRepository } from './repositories/mongo-refresh-token.repository';
+import { PgOidcPayloadRepository } from './repositories/pg-oidc-payload.repository';
+import { MongoOidcPayloadRepository } from './repositories/mongo-oidc-payload.repository';
+import { PgGrantCodeRepository } from './repositories/pg-grant-code.repository';
+import { MongoGrantCodeRepository } from './repositories/mongo-grant-code.repository';
+import { PgOauthClientRepository } from './repositories/pg-client.repository';
+import { MongoClientRepository } from './repositories/mongo-client.repository';
+import { PgOnboardingRepository } from './repositories/pg-onboarding.repository';
+import { MongoOnboardingRepository } from './repositories/mongo-onboarding.repository';
+import { PgIdentityLinkRepository } from './repositories/pg-identity-link.repository';
+import { MongoIdentityLinkRepository } from './repositories/mongo-identity-link.repository';
+import type { IOauthClientRepository } from './repositories/client.repository';
 
 /**
  * The identity module (I-0…I-1d): accounts, the first-party OP, L1
@@ -68,14 +107,26 @@ export class IdentityBoot implements OnModuleInit {
   constructor(
     private readonly factory: OidcProviderFactory,
     private readonly custody: JwksCustody,
-    private readonly adapter: OidcDrizzleAdapter,
+    private readonly adapter: OidcRepositoryAdapter,
     private readonly jwksGuard: JwksService,
     private readonly db: DbService,
+    private readonly mongo: MongoDbService,
+    @Inject(OAUTH_CLIENT_REPOSITORY) private readonly clients: IOauthClientRepository,
     private readonly publicService: IdentityPublicService,
     private readonly holder: OidcProviderHolder,
     healthRegistry: HealthRegistry,
   ) {
-    healthRegistry.register('identity', () => this.db.check());
+    // Provider-aware liveness: probe the lane that actually serves reads.
+    // MongoDbService.check resolves void on success (throws on failure),
+    // so normalize it to the boolean shape the registry expects
+    // (mirrors the organizations module's health registration).
+    healthRegistry.register('identity', async () => {
+      if (isMongo()) {
+        await this.mongo.check();
+        return true;
+      }
+      return this.db.check();
+    });
   }
 
   async onModuleInit(): Promise<void> {
@@ -133,9 +184,8 @@ export class IdentityBoot implements OnModuleInit {
     ];
     for (const seed of seeds) {
       const secretEnvelope = seed.clientSecret ? envelopeEncrypt(seed.clientSecret) : null;
-      await this.db.root
-        .insert(oauthClients)
-        .values({
+      await this.clients.seedClients([
+        {
           clientId: seed.clientId,
           kind: seed.kind,
           name: seed.name,
@@ -143,25 +193,54 @@ export class IdentityBoot implements OnModuleInit {
           scopes: seed.scopes,
           grantTypes: seed.grantTypes,
           ...(secretEnvelope ? { secretEnvelope } : {}),
-        })
-        .onConflictDoUpdate({
-          target: oauthClients.clientId,
-          set: {
-            name: seed.name,
-            redirectUris: seed.redirectUris,
-            scopes: seed.scopes,
-            grantTypes: seed.grantTypes,
-            ...(secretEnvelope ? { secretEnvelope } : {}),
-          },
-        });
+        },
+      ]);
     }
   }
 }
+
+/** `DB_PROVIDER=mongodb` selects the MongoDB lane, anything else the PostgreSQL lane. */
+const isMongo = (): boolean => env.DB_PROVIDER === 'mongodb';
+
+function repositoryProvider(
+  token: symbol,
+  create: (db: DbService, mongo: MongoDbService) => unknown,
+) {
+  return {
+    provide: token,
+    useFactory: create,
+    inject: [DbService, MongoDbService],
+  };
+}
+
+const IDENTITY_REPOSITORY_PROVIDERS = [
+  repositoryProvider(ACCOUNT_REPOSITORY, (db, mongo) => (isMongo() ? new MongoAccountRepository(mongo) : new PgAccountRepository(db))),
+  repositoryProvider(CREDENTIAL_REPOSITORY, (db, mongo) => (isMongo() ? new MongoCredentialRepository(mongo) : new PgCredentialRepository(db))),
+  repositoryProvider(MFA_REPOSITORY, (db, mongo) => (isMongo() ? new MongoMfaRepository(mongo) : new PgMfaRepository(db))),
+  repositoryProvider(EMAIL_CODE_REPOSITORY, (db, mongo) => (isMongo() ? new MongoEmailCodeRepository(mongo) : new PgEmailCodeRepository(db))),
+  repositoryProvider(ACCOUNT_ACTION_TOKEN_REPOSITORY, (db, mongo) =>
+    isMongo() ? new MongoAccountActionTokenRepository(mongo) : new PgAccountActionTokenRepository(db),
+  ),
+  repositoryProvider(SESSION_REPOSITORY, (db, mongo) => (isMongo() ? new MongoSessionRepository(mongo) : new PgSessionRepository(db))),
+  repositoryProvider(REFRESH_TOKEN_REPOSITORY, (db, mongo) =>
+    isMongo() ? new MongoRefreshTokenRepository(mongo) : new PgRefreshTokenRepository(db),
+  ),
+  repositoryProvider(OIDC_PAYLOAD_REPOSITORY, (db, mongo) =>
+    isMongo() ? new MongoOidcPayloadRepository(mongo) : new PgOidcPayloadRepository(db),
+  ),
+  repositoryProvider(GRANT_CODE_REPOSITORY, (db, mongo) => (isMongo() ? new MongoGrantCodeRepository(mongo) : new PgGrantCodeRepository(db))),
+  repositoryProvider(OAUTH_CLIENT_REPOSITORY, (db, mongo) => (isMongo() ? new MongoClientRepository(mongo) : new PgOauthClientRepository(db))),
+  repositoryProvider(ONBOARDING_REPOSITORY, (db, mongo) => (isMongo() ? new MongoOnboardingRepository(mongo) : new PgOnboardingRepository(db))),
+  repositoryProvider(IDENTITY_LINK_REPOSITORY, (db, mongo) =>
+    isMongo() ? new MongoIdentityLinkRepository(mongo) : new PgIdentityLinkRepository(db),
+  ),
+];
 
 @Module({
   imports: [CorporateModule],
   controllers: [OidcProviderController, LoginInteractionController, AccountController, SocialController],
   providers: [
+    ...IDENTITY_REPOSITORY_PROVIDERS,
     AccountActionsService,
     AccountDeletionService,
     AccountPurgeWorker,
@@ -172,7 +251,7 @@ export class IdentityBoot implements OnModuleInit {
     IdentityPublicService,
     JwksCustody,
     MfaService,
-    OidcDrizzleAdapter,
+    OidcRepositoryAdapter,
     OidcProviderFactory,
     OidcProviderHolder,
     OnboardingService,

@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventBus } from '../../common/events/event-bus';
+import { SPEND_EVENT_REPOSITORY } from './repositories/repository-tokens';
+import type { ISpendEventRepository } from './repositories/spend-event.repository';
 
 /**
  * Per-product cost-anomaly detection (B-5): for every (org × product) ledger
@@ -34,41 +34,22 @@ export class AnomalyService {
   private static readonly logger = new Logger(AnomalyService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(SPEND_EVENT_REPOSITORY) private readonly spend: ISpendEventRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
   ) {}
 
   async scan(): Promise<{ checked: number; anomalies: CostAnomaly[] }> {
-    const rows = await this.db.withBypass((tx) =>
-      // Justification (withBypass): the scan walks every org's ledgers — an
-      // explicitly administrative, cross-tenant read.
-      tx.execute<{ org_id: string; product: string; day: string; cost_usd: string }>(sql`
-        with daily as (
-          select org_id, product,
-                 to_char(date_trunc('day', occurred_at), 'YYYY-MM-DD') as day,
-                 sum(cost_usd) as cost_usd
-          from billing.spend_events
-          where occurred_at >= now() - interval '30 days'
-          group by 1, 2, 3
-        )
-        select org_id, product, day, cost_usd::text as cost_usd
-        from (
-          select org_id, product, day, cost_usd,
-                 count(*) over (partition by org_id, product) as days_seen,
-                 row_number() over (partition by org_id, product order by day desc) as recency
-          from daily
-        ) t
-        where days_seen >= ${MIN_HISTORY_DAYS + 1}
-        order by org_id, product, day asc
-      `),
-    );
+    // Justification (dailyLedgerRows runs in the bypass context): the scan
+    // walks every org's ledgers — an explicitly administrative,
+    // cross-tenant read.
+    const rows = await this.spend.dailyLedgerRows();
 
     const byLedger = new Map<string, Array<{ day: string; cost: number }>>();
-    for (const row of rows.rows) {
-      const key = `${row.org_id}|${row.product}`;
+    for (const row of rows) {
+      const key = `${row.orgId}|${row.product}`;
       const list = byLedger.get(key) ?? [];
-      list.push({ day: row.day, cost: Number(row.cost_usd) });
+      list.push({ day: row.day, cost: Number(row.costUsd) });
       byLedger.set(key, list);
     }
 

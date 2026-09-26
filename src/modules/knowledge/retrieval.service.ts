@@ -1,16 +1,23 @@
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { sql } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ApiError } from '../../common/http/api-error';
 import { canonicalHash } from '../../common/crypto/canonical-hash';
-import { uuidv7 } from '../../common/ids/uuidv7';
-import { memoryItems, MemoryItem, retrievalAcl } from './schema';
+import { MemoryItem } from './schema';
 import { withSpan, setSpanAttributes, queryHash } from '../../common/observability/spans';
 import { EmbeddingService } from './embedding.service';
 import { RerankerService } from './reranker.port';
 import { QueryRewriteService } from './query-rewrite.port';
 import { ConfigPublishService } from '../config-publish/config-publish.service';
 import { assertUuid } from './assert';
+import {
+  RETRIEVAL_REPOSITORY,
+  RETRIEVAL_ACL_REPOSITORY,
+  MEMORY_ITEM_REPOSITORY,
+} from './repositories/repository-tokens';
+import type { IRetrievalRepository } from './repositories/retrieval.repository';
+import type { IRetrievalAclRepository } from './repositories/retrieval-acl.repository';
+import type { IMemoryItemRepository } from './repositories/memory-item.repository';
+import type { MemoryScope } from './repositories/repository-types';
 
 /**
  * Retrieval — Phase 7.7 (ledger) + FL-2.1/2.4. TENANT + ACL PREDICATES RUN
@@ -61,6 +68,10 @@ const MAX_VECTOR_VARIANTS = 3;
  * document with NO rows keeps the legacy posture. Unknown principals
  * default-deny; anonymous callers (no identity) see unrestricted docs only.
  * Pure — unit-tested (fragment assertions, not full-SQL snapshots).
+ *
+ * NOTE (P3): this builder is imported by `PgRetrievalRepository`, which
+ * builds the byte-identical leg SQL inside the repository's transaction
+ * shell. It stays here — with its unit test — as the canonical definition.
  */
 export function buildSourceAclFilter(input: {
   orgId: string;
@@ -110,7 +121,9 @@ export class RetrievalService {
   private static readonly logger = new Logger(RetrievalService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(RETRIEVAL_REPOSITORY) private readonly legs: IRetrievalRepository,
+    @Inject(RETRIEVAL_ACL_REPOSITORY) private readonly acl: IRetrievalAclRepository,
+    @Inject(MEMORY_ITEM_REPOSITORY) private readonly memories: IMemoryItemRepository,
     private readonly embedding: EmbeddingService,
     private readonly reranker: RerankerService,
     private readonly rewrite: QueryRewriteService,
@@ -253,6 +266,19 @@ export class RetrievalService {
     const embeddings = await this.embedding.embed(variants.slice(0, MAX_VECTOR_VARIANTS));
     const pool = Math.min(limit * 4, CANDIDATE_POOL);
 
+    // The leg SQL is built inside the repository's transaction shell (one
+    // tenant-scoped TX on one connection — RLS consistency across legs); the
+    // service hands over pre-computed vectors and primitive ACL inputs.
+    const vectorLegs = embeddings
+      .slice(0, MAX_VECTOR_VARIANTS)
+      .filter((vector) => !vector.every((v) => v === 0))
+      .map((vector) => ({
+        vectorLiteral: this.toVectorLiteral(vector),
+        pool,
+        queryModel,
+      }));
+    const ftsLegs = variants.map((variant) => ({ variant, pool }));
+
     // P1 (§6a) — rag.retrieval span. Attributes are ids/hashes/counts only:
     // the raw query text never enters a span (query_hash instead).
     const hits = await withSpan(
@@ -265,129 +291,60 @@ export class RetrievalService {
         limit,
         pinned_versions: allowedVersions === null ? -1 : allowedVersions.length,
       },
-      async (span) =>
-        this.db.withOrg(input.orgId, async (tx) => {
-          const finish = (ranked: KnowledgeHit[]): KnowledgeHit[] => {
-            setSpanAttributes(span, {
-              hit_count: ranked.length,
-              top_score: ranked.length > 0 ? Math.round(ranked[0].score * 1000) / 1000 : null,
-            });
-            return ranked;
-          };
-          const accountId = input.accountId ?? null;
-
-          // Shared tenant + ACL predicate — byte-identical shape across both legs
-          // (the vector leg drives from `embeddings e`, the lexical leg from
-          // `chunks c`, hence the two anchor aliases). E-1 pin filter and P0-1
-          // source-ACL filter join the same WHERE — authorization before scoring.
-          const versionFilter =
-            allowedVersions === null
-              ? sql``
-              : sql`and c.document_version_id in (${sql.join(
-                  allowedVersions.map((id) => sql`${id}::uuid`),
-                  sql`, `,
-                )})`;
-          const sourceAclFilter = buildSourceAclFilter({
-            orgId: input.orgId,
-            accountId: input.callerAccountId ?? accountId,
-            emails: input.callerEmails ?? [],
+      async (span) => {
+        const finish = (ranked: KnowledgeHit[]): KnowledgeHit[] => {
+          setSpanAttributes(span, {
+            hit_count: ranked.length,
+            top_score: ranked.length > 0 ? Math.round(ranked[0].score * 1000) / 1000 : null,
           });
-          const aclPredicate = (anchor: 'e' | 'c') => sql`
-        left join retrieval_acl acl
-          on acl.organization_id = d.organization_id
-          and acl.resource_type = 'document'
-          and acl.resource_id = d.id
-        where ${sql.raw(anchor)}.organization_id = ${input.orgId}::uuid
-          and d.state = 'ready'
-          and a.state = 'active'
-          and (a.scan_status in ('clean', 'skipped'))
-          and (a.expires_at is null or a.expires_at > now())
-          and (acl.visibility = 'organization' or (acl.visibility = 'private' and acl.scope_account_id = ${accountId}::uuid))
-          ${versionFilter}
-          ${sourceAclFilter}`;
+          return ranked;
+        };
+        const { vectorLegs: vectorRows, ftsLegs: ftsRows } = await this.legs.runRetrievalLegs({
+          orgId: input.orgId,
+          vectorLegs,
+          ftsLegs,
+          versionIds: allowedVersions,
+          accountId: input.accountId ?? null,
+          callerAccountId: input.callerAccountId ?? null,
+          callerEmails: input.callerEmails ?? [],
+        });
 
-          const vectorLegs: Array<Array<Record<string, unknown>>> = [];
-          for (let i = 0; i < Math.min(variants.length, MAX_VECTOR_VARIANTS); i++) {
-            const vector = embeddings[i];
-            const hasVectorSignal = !vector.every((v) => v === 0);
-            const vectorLiteral = this.toVectorLiteral(vector);
-            if (!hasVectorSignal) {
-              continue;
-            }
-            const rows = await tx.execute(sql`
-          select c.id as chunk_id, c.sequence, c.text, c.source_range,
-                 dv.id as document_version_id, d.id as document_id, d.title as title,
-                 1 - (e.embedding <=> ${vectorLiteral}::vector) as score
-          from embeddings e
-          join chunks c on c.id = e.chunk_id
-          join document_versions dv on dv.id = c.document_version_id
-          join documents d on d.id = dv.document_id
-          join artifacts a on a.id = d.source_artifact_id
-          ${aclPredicate('e')}
-          -- P0 (BUG-1): same vector space only. The model predicate joins the
-          -- scoring WHERE (authorization-before-scoring posture extends to
-          -- space-correctness: cross-model rows must never score).
-          and e.model = ${queryModel}
-          order by e.embedding <=> ${vectorLiteral}::vector
-          limit ${pool}
-        `);
-            vectorLegs.push(rows.rows as Array<Record<string, unknown>>);
-          }
-
-          const ftsLegs: Array<Array<Record<string, unknown>>> = [];
-          for (const variant of variants) {
-            const rows = await tx.execute(sql`
-          select c.id as chunk_id, c.sequence, c.text, c.source_range,
-                 dv.id as document_version_id, d.id as document_id, d.title as title,
-                 ts_rank_cd(c.fts, websearch_to_tsquery('english', ${variant})) as score
-          from chunks c
-          join document_versions dv on dv.id = c.document_version_id
-          join documents d on d.id = dv.document_id
-          join artifacts a on a.id = d.source_artifact_id
-          ${aclPredicate('c')}
-            and c.fts @@ websearch_to_tsquery('english', ${variant})
-          order by score desc
-          limit ${pool}
-        `);
-            ftsLegs.push(rows.rows as Array<Record<string, unknown>>);
-          }
-
-          // Reciprocal Rank Fusion over ALL ranked legs (dedupe by chunk).
-          const fused = new Map<string, { hit: KnowledgeHit; rrf: number }>();
-          const leg = (rows: Array<Record<string, unknown>>) =>
-            rows.map((row, i) => ({ row, rank: i + 1 }));
-          for (const rows of vectorLegs) {
-            for (const { row, rank } of leg(rows)) {
-              const hit = RetrievalService.rowToHit(row);
-              const existing = fused.get(hit.chunkId);
-              if (existing) {
-                existing.rrf += 1 / (RRF_K + rank);
-              } else {
-                fused.set(hit.chunkId, { hit, rrf: 1 / (RRF_K + rank) });
-              }
+        // Reciprocal Rank Fusion over ALL ranked legs (dedupe by chunk).
+        const fused = new Map<string, { hit: KnowledgeHit; rrf: number }>();
+        const leg = (rows: Array<Record<string, unknown>>) =>
+          rows.map((row, i) => ({ row, rank: i + 1 }));
+        for (const rows of vectorRows) {
+          for (const { row, rank } of leg(rows)) {
+            const hit = RetrievalService.rowToHit(row);
+            const existing = fused.get(hit.chunkId);
+            if (existing) {
+              existing.rrf += 1 / (RRF_K + rank);
+            } else {
+              fused.set(hit.chunkId, { hit, rrf: 1 / (RRF_K + rank) });
             }
           }
-          for (const rows of ftsLegs) {
-            for (const { row, rank } of leg(rows)) {
-              const contribution = 1 / (RRF_K + rank);
-              const existing = fused.get(String(row.chunk_id));
-              if (existing) {
-                existing.rrf += contribution;
-              } else {
-                fused.set(String(row.chunk_id), {
-                  hit: RetrievalService.rowToHit(row),
-                  rrf: contribution,
-                });
-              }
+        }
+        for (const rows of ftsRows) {
+          for (const { row, rank } of leg(rows)) {
+            const contribution = 1 / (RRF_K + rank);
+            const existing = fused.get(String(row.chunk_id));
+            if (existing) {
+              existing.rrf += contribution;
+            } else {
+              fused.set(String(row.chunk_id), {
+                hit: RetrievalService.rowToHit(row),
+                rrf: contribution,
+              });
             }
           }
-          if (fused.size === 0) {
-            return finish([]);
-          }
-          const candidates = [...fused.values()].sort((a, b) => b.rrf - a.rrf).map((f) => f.hit);
-          // Cross-encoder stage (default noop = identity slice). Bounded to limit.
-          return finish(await this.reranker.rerank(query, candidates, limit));
-        }),
+        }
+        if (fused.size === 0) {
+          return finish([]);
+        }
+        const candidates = [...fused.values()].sort((a, b) => b.rrf - a.rrf).map((f) => f.hit);
+        // Cross-encoder stage (default noop = identity slice). Bounded to limit.
+        return finish(await this.reranker.rerank(query, candidates, limit));
+      },
     );
     return hits;
   }
@@ -413,11 +370,10 @@ export class RetrievalService {
     if (input.scopes.length === 0) {
       return [];
     }
-    const scopePredicates = input.scopes.map((s) =>
-      s.scopeId
-        ? sql`(scope_type = ${s.scopeType} and scope_id = ${s.scopeId}::uuid)`
-        : sql`(scope_type = ${s.scopeType})`,
-    );
+    const scopes: MemoryScope[] = input.scopes.map((s) => ({
+      scopeType: s.scopeType,
+      scopeId: s.scopeId ?? null,
+    }));
     const trimmedQuery = input.query.trim().slice(0, 512);
     if (!trimmedQuery) {
       return this.listApprovedMemoriesForScopes(input.orgId, input.scopes, limit);
@@ -443,71 +399,44 @@ export class RetrievalService {
         scope_count: input.scopes.length,
         leg: 'memory',
       },
-      async (span) =>
-        this.db.withOrg(input.orgId, async (tx) => {
-          const finish = (items: MemoryItem[]): MemoryItem[] => {
-            setSpanAttributes(span, { hit_count: items.length });
-            return items;
-          };
-          const rows = await tx.execute(sql`
-        select id, scope_type, scope_id, content, source_ref, provenance, confidence, visibility,
-               expires_at, valid_from, invalid_at, supersedes, created_at, updated_at, embedding_model
-        from memory_items
-        where organization_id = ${input.orgId}::uuid
-          and deleted_at is null
-          and embedding is not null
-          and (embedding_model = ${queryModel} or embedding_model is null)
-          and (expires_at is null or expires_at > now())
-          and (${sql.join(scopePredicates, sql` or `)})
-        order by embedding <=> ${vectorLiteral}::vector
-        limit ${limit}
-      `);
-          const semantic = (rows.rows as Array<Record<string, unknown>>).map((r): MemoryItem => ({
-            id: String(r.id),
-            organizationId: input.orgId,
-            scopeType: String(r.scope_type),
-            scopeId: r.scope_id == null ? null : String(r.scope_id),
-            content: String(r.content),
-            sourceRef: r.source_ref ?? null,
-            provenance: r.provenance == null ? null : String(r.provenance),
-            confidence: r.confidence == null ? null : String(r.confidence),
-            embeddingModel: r.embedding_model == null ? null : String(r.embedding_model),
-            visibility: String(r.visibility),
-            expiresAt: r.expires_at == null ? null : String(r.expires_at),
-            deletedAt: null,
-            embedding: null,
-            validFrom: String(r.valid_from ?? r.created_at),
-            invalidAt: r.invalid_at == null ? null : String(r.invalid_at),
-            supersedes: r.supersedes == null ? null : String(r.supersedes),
-            createdAt: String(r.created_at),
-            updatedAt: String(r.updated_at),
-          }));
-          if (semantic.length < limit) {
-            // Top-up with recency items (covers pre-0038 rows without vectors).
-            // P0 (BUG-1): the top-up must not smuggle foreign-model rows back in
-            // through the back door. A row carrying a vector in ANOTHER space is
-            // neither rankable (wrong space) nor top-up-able (it HAS a vector —
-            // the top-up exists for rows that cannot rank at all). Skip exactly
-            // those; NULL-model legacy rows and unvectored rows still top up.
-            const have = new Set(semantic.map((m) => m.id));
-            for (const item of await this.listApprovedMemoriesForScopes(
-              input.orgId,
-              input.scopes,
-              limit,
-            )) {
-              if (semantic.length >= limit) break;
-              if (have.has(item.id)) continue;
-              if (
-                item.embedding !== null &&
-                item.embeddingModel !== null &&
-                item.embeddingModel !== queryModel
-              )
-                continue;
-              semantic.push(item);
-            }
+      async (span) => {
+        const finish = (items: MemoryItem[]): MemoryItem[] => {
+          setSpanAttributes(span, { hit_count: items.length });
+          return items;
+        };
+        const semantic = await this.memories.searchApprovedMemoriesVector({
+          orgId: input.orgId,
+          vectorLiteral,
+          queryModel,
+          scopes,
+          limit,
+        });
+        if (semantic.length < limit) {
+          // Top-up with recency items (covers pre-0038 rows without vectors).
+          // P0 (BUG-1): the top-up must not smuggle foreign-model rows back in
+          // through the back door. A row carrying a vector in ANOTHER space is
+          // neither rankable (wrong space) nor top-up-able (it HAS a vector —
+          // the top-up exists for rows that cannot rank at all). Skip exactly
+          // those; NULL-model legacy rows and unvectored rows still top up.
+          const have = new Set(semantic.map((m) => m.id));
+          for (const item of await this.listApprovedMemoriesForScopes(
+            input.orgId,
+            input.scopes,
+            limit,
+          )) {
+            if (semantic.length >= limit) break;
+            if (have.has(item.id)) continue;
+            if (
+              item.embedding !== null &&
+              item.embeddingModel !== null &&
+              item.embeddingModel !== queryModel
+            )
+              continue;
+            semantic.push(item);
           }
-          return finish(semantic);
-        }),
+        }
+        return finish(semantic);
+      },
     );
     return memories;
   }
@@ -520,26 +449,10 @@ export class RetrievalService {
     }>,
     limit: number,
   ): Promise<MemoryItem[]> {
-    const scopePredicates = scopes.map((s) =>
-      s.scopeId
-        ? and(eq(memoryItems.scopeType, s.scopeType), eq(memoryItems.scopeId, s.scopeId))
-        : eq(memoryItems.scopeType, s.scopeType),
-    );
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(memoryItems)
-        .where(
-          and(
-            eq(memoryItems.organizationId, orgId),
-            isNull(memoryItems.deletedAt),
-            or(...scopePredicates),
-            or(isNull(memoryItems.expiresAt), sql`expires_at > now()`),
-            or(isNull(memoryItems.invalidAt), sql`invalid_at > now()`),
-          ),
-        )
-        .orderBy(desc(memoryItems.updatedAt))
-        .limit(limit),
+    return this.memories.listApprovedMemoriesForScopes(
+      orgId,
+      scopes.map((s) => ({ scopeType: s.scopeType, scopeId: s.scopeId ?? null })),
+      limit,
     );
   }
 
@@ -556,25 +469,11 @@ export class RetrievalService {
   }): Promise<MemoryItem[]> {
     assertUuid(input.orgId, 'orgId');
     const limit = Math.min(Math.max(1, input.limit ?? 20), 20);
-    return this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select()
-        .from(memoryItems)
-        .where(
-          and(
-            eq(memoryItems.organizationId, input.orgId),
-            isNull(memoryItems.deletedAt),
-            or(
-              eq(memoryItems.scopeType, 'organization'),
-              input.conversationId ? eq(memoryItems.scopeId, input.conversationId) : sql`false`,
-            ),
-            or(isNull(memoryItems.expiresAt), sql`expires_at > now()`),
-            or(isNull(memoryItems.invalidAt), sql`invalid_at > now()`),
-          ),
-        )
-        .orderBy(desc(memoryItems.updatedAt))
-        .limit(limit),
-    );
+    return this.memories.listApprovedMemories({
+      orgId: input.orgId,
+      conversationId: input.conversationId,
+      limit,
+    });
   }
 
   /** ACL grant helper — documents default to organization visibility at ingest. */
@@ -589,18 +488,11 @@ export class RetrievalService {
     if (input.visibility === 'private' && !input.accountId) {
       throw ApiError.validation({ account_id: 'private visibility requires an account scope' });
     }
-    await this.db.withOrg(input.orgId, async (tx) => {
-      await tx
-        .insert(retrievalAcl)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          resourceType: 'document',
-          resourceId: input.documentId,
-          visibility: input.visibility,
-          scopeAccountId: input.visibility === 'private' ? input.accountId! : null,
-        })
-        .onConflictDoNothing();
+    await this.acl.grantDocumentAccess({
+      orgId: input.orgId,
+      documentId: input.documentId,
+      visibility: input.visibility,
+      scopeAccountId: input.visibility === 'private' ? (input.accountId as string) : null,
     });
   }
 

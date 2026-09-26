@@ -1,14 +1,22 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
-import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EventBus, EngineEvents } from '../../common/events/event-bus';
 import { QueueService } from '../../common/infra/queue.service';
 import { envelopeDecrypt, envelopeEncrypt, randomToken } from '../../common/infra/crypto/envelope';
-import { webhooks, webhookDeliveries, WebhookRow } from './schema';
+import type { WebhookDeliveryRow, WebhookRow } from './schema';
 import { checkWebhookUrl, recheckWebhookTarget } from './webhook-url.guard';
+import { WEBHOOK_DELIVERY_REPOSITORY, WEBHOOK_REPOSITORY } from './repositories/repository-tokens';
+import {
+  MAX_ATTEMPTS,
+  RETRY_DELAYS_MS,
+  type IWebhookDeliveryRepository,
+  type IWebhookRepository,
+  type WebhookUpdatePatch,
+} from './repositories/webhooks.repository';
+
+export { MAX_ATTEMPTS, RETRY_DELAYS_MS };
 
 /**
  * The webhook dispatch service (gap P-1): org-owned endpoints receive
@@ -39,15 +47,13 @@ export function webhookEventCatalog(): Array<{ type: string }> {
   return [...PUBLIC_EVENTS].sort().map((type) => ({ type }));
 }
 
-export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 6 * 3_600_000] as const;
-export const MAX_ATTEMPTS = 5;
-
 @Injectable()
 export class WebhooksService implements OnModuleInit {
   private static readonly logger = new Logger(WebhooksService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(WEBHOOK_REPOSITORY) private readonly webhooks: IWebhookRepository,
+    @Inject(WEBHOOK_DELIVERY_REPOSITORY) private readonly deliveryRepo: IWebhookDeliveryRepository,
     private readonly audit: AuditService,
     private readonly events: EventBus,
     private readonly queues: QueueService,
@@ -84,33 +90,27 @@ export class WebhooksService implements OnModuleInit {
     }
     const events = this.validateEvents(input.events);
     const secret = `whsec_${randomToken(24)}`;
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(webhooks)
-        .values({
-          orgId: input.orgId,
-          url: input.url,
-          events,
-          secretEnvelope: envelopeEncrypt(secret),
-          description: input.description?.slice(0, 256),
-          createdBy: null,
-        })
-        .returning(),
-    );
+    const inserted = await this.webhooks.createWebhook({
+      orgId: input.orgId,
+      url: input.url,
+      events,
+      secretEnvelope: envelopeEncrypt(secret),
+      description: input.description?.slice(0, 256),
+    });
     await this.audit.add({
       action: 'webhook.created',
       resourceType: 'webhook',
-      resourceId: inserted[0].id,
+      resourceId: inserted.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
       details: { events: events.join(','), url_host: new URL(input.url).host },
     });
-    return { webhook: this.redact(inserted[0]), secret }; // shown exactly once
+    return { webhook: this.redact(inserted), secret }; // shown exactly once
   }
 
   async list(orgId: string): Promise<Array<WebhookRow & { secretHint: string | null }>> {
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(webhooks).where(eq(webhooks.orgId, orgId)).orderBy(desc(webhooks.createdAt)));
+    const rows = await this.webhooks.listWebhooks(orgId);
     return rows.map((row) => ({ ...this.redact(row), secretHint: this.secretHint(row.secretEnvelope) }));
   }
 
@@ -126,7 +126,7 @@ export class WebhooksService implements OnModuleInit {
 
   async update(input: { orgId: string; webhookId: string; url?: string; events?: string[]; description?: string; status?: 'active' | 'disabled'; actorId: string }): Promise<WebhookRow> {
     const existing = await this.require(input.orgId, input.webhookId);
-    const patch: Partial<typeof webhooks.$inferInsert> = { updatedAt: new Date().toISOString() };
+    const patch: WebhookUpdatePatch = { updatedAt: new Date().toISOString() };
     if (input.url && input.url !== existing.url) {
       const urlCheck = await checkWebhookUrl(input.url);
       if (!urlCheck.ok) {
@@ -143,9 +143,7 @@ export class WebhooksService implements OnModuleInit {
     if (input.status) {
       patch.status = input.status;
     }
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(webhooks).set(patch).where(and(eq(webhooks.id, input.webhookId), eq(webhooks.orgId, input.orgId))).returning(),
-    );
+    const updated = await this.webhooks.updateWebhook(input.orgId, input.webhookId, patch);
     await this.audit.add({
       action: 'webhook.updated',
       resourceType: 'webhook',
@@ -155,12 +153,15 @@ export class WebhooksService implements OnModuleInit {
       tenantId: input.orgId,
       details: { status: input.status ?? existing.status },
     });
-    return this.redact(updated[0]);
+    // Mechanical: mirrors the original `redact(updated[0])` — require and
+    // the update are separate units, so a row deleted between them redacts
+    // to `{}` here at runtime. Known pre-existing race, recorded, not fixed.
+    return this.redact(updated);
   }
 
   async remove(input: { orgId: string; webhookId: string; actorId: string }): Promise<void> {
     await this.require(input.orgId, input.webhookId);
-    await this.db.withOrg(input.orgId, (tx) => tx.delete(webhooks).where(and(eq(webhooks.id, input.webhookId), eq(webhooks.orgId, input.orgId))));
+    await this.webhooks.deleteWebhook(input.orgId, input.webhookId);
     await this.audit.add({
       action: 'webhook.deleted',
       resourceType: 'webhook',
@@ -171,16 +172,13 @@ export class WebhooksService implements OnModuleInit {
     });
   }
 
-  async deliveries(orgId: string, webhookId: string, limit = 50, offset = 0): Promise<Array<typeof webhookDeliveries.$inferSelect>> {
+  async deliveries(orgId: string, webhookId: string, limit = 50, offset = 0): Promise<WebhookDeliveryRow[]> {
     await this.require(orgId, webhookId);
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(webhookDeliveries)
-        .where(and(eq(webhookDeliveries.orgId, orgId), eq(webhookDeliveries.webhookId, webhookId)))
-        .orderBy(desc(webhookDeliveries.createdAt))
-        .limit(Math.min(Math.max(limit, 1), 200))
-        .offset(Math.max(offset, 0)),
+    return this.deliveryRepo.listDeliveries(
+      orgId,
+      webhookId,
+      Math.min(Math.max(limit, 1), 200),
+      Math.max(offset, 0),
     );
   }
 
@@ -189,35 +187,14 @@ export class WebhooksService implements OnModuleInit {
    * lost — `pending` rows older than 5 minutes that were never picked up
    * (insert succeeded, enqueue failed/died), and `failed` rows whose
    * `nextAttemptAt` is past but which still have attempts left (the retry
-   * enqueue never landed). Claims with FOR UPDATE SKIP LOCKED so concurrent
+   * enqueue never landed). The repository claims atomically so concurrent
    * sweeps/workers never double-claim; the deterministic jobId makes even a
    * raced re-enqueue a no-op instead of a double delivery.
    */
   async sweepStrandedDeliveries(batchSize: number): Promise<number> {
-    const claimed = await this.db.withBypass((tx) =>
-      // Justification (withBypass): the sweep drains cross-org rows by id —
-      // the reconciliation is org-scoped per row by the delivery's own org_id.
-      tx.execute<{
-        id: string;
-        attempts: number;
-      }>(sql`
-        update webhook_deliveries
-        set updated_at = now()
-        where id in (
-          select id from webhook_deliveries
-          where (
-            (status = 'pending' and created_at < now() - interval '5 minutes')
-            or (status = 'failed' and next_attempt_at is not null and next_attempt_at <= now() and attempts < ${MAX_ATTEMPTS})
-          )
-          order by created_at
-          limit ${batchSize}
-          for update skip locked
-        )
-        returning id, attempts
-      `),
-    );
+    const claimed = await this.deliveryRepo.claimStrandedDeliveries(batchSize);
     let requeued = 0;
-    for (const row of claimed.rows) {
+    for (const row of claimed) {
       try {
         await this.enqueueDelivery(row.id, row.attempts);
         requeued += 1;
@@ -235,9 +212,7 @@ export class WebhooksService implements OnModuleInit {
   async rotateSecret(input: { orgId: string; webhookId: string; actorId: string }): Promise<{ secret: string }> {
     const existing = await this.require(input.orgId, input.webhookId);
     const secret = `whsec_${randomToken(24)}`;
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.update(webhooks).set({ secretEnvelope: envelopeEncrypt(secret), updatedAt: new Date().toISOString() }).where(eq(webhooks.id, existing.id)),
-    );
+    await this.webhooks.rotateSecret(input.orgId, existing.id, envelopeEncrypt(secret));
     await this.audit.add({
       action: 'webhook.secret_rotated',
       resourceType: 'webhook',
@@ -271,9 +246,7 @@ export class WebhooksService implements OnModuleInit {
    */
   async dispatch(orgId: string, eventType: string, payload: Record<string, unknown>, onlyWebhookId?: string, ignoreSubscription = false): Promise<{ deliveryId: string }> {
     let lastId = '';
-    const targets = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(webhooks).where(and(eq(webhooks.orgId, orgId), eq(webhooks.status, 'active'))),
-    );
+    const targets = await this.webhooks.listActiveWebhooks(orgId);
     for (const target of targets) {
       if (onlyWebhookId && target.id !== onlyWebhookId) {
         continue;
@@ -282,27 +255,19 @@ export class WebhooksService implements OnModuleInit {
       if (!subscribed) {
         continue;
       }
-      const inserted = await this.db.withOrg(orgId, (tx) =>
-        tx.insert(webhookDeliveries).values({
-          orgId,
-          webhookId: target.id,
-          eventType,
-          payload: { type: eventType, created_at: new Date().toISOString(), data: payload },
-          status: 'pending',
-        }).returning({ id: webhookDeliveries.id }),
-      );
-      lastId = inserted[0].id;
+      const deliveryId = await this.deliveryRepo.createDelivery({ orgId, webhookId: target.id, eventType, data: payload });
+      lastId = deliveryId;
       try {
-        await this.enqueueDelivery(inserted[0].id, 0);
+        await this.enqueueDelivery(deliveryId, 0);
       } catch (err) {
         // The row exists but no job was queued — park it for the sweep
         // instead of stranding it as `pending` forever (P5-W13).
-        WebhooksService.logger.warn(`webhook enqueue failed for delivery ${inserted[0].id}: ${(err as Error).message}`);
-        await this.db.withOrg(orgId, (tx) =>
-          tx
-            .update(webhookDeliveries)
-            .set({ status: 'failed', attempts: 0, lastError: `enqueue failed: ${(err as Error).message}`.slice(0, 512), nextAttemptAt: new Date(Date.now() + 60_000).toISOString(), updatedAt: new Date().toISOString() })
-            .where(eq(webhookDeliveries.id, inserted[0].id)),
+        WebhooksService.logger.warn(`webhook enqueue failed for delivery ${deliveryId}: ${(err as Error).message}`);
+        await this.deliveryRepo.parkEnqueueFailure(
+          orgId,
+          deliveryId,
+          `enqueue failed: ${(err as Error).message}`.slice(0, 512),
+          new Date(Date.now() + 60_000).toISOString(),
         );
       }
     }
@@ -322,19 +287,13 @@ export class WebhooksService implements OnModuleInit {
 
   /** One delivery attempt; reschedules itself via the backoff table. */
   async attemptDelivery(deliveryId: string): Promise<'delivered' | 'retry_scheduled' | 'dead' | 'gone'> {
-    const rows = await this.db.withBypass((tx) =>
-      // Justification (withBypass): the worker drains the cross-org queue —
-      // the delivery row is addressed by its unique id.
-      tx.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, deliveryId)).limit(1),
-    );
-    const delivery = rows[0];
+    const delivery = await this.deliveryRepo.getDeliveryUnchecked(deliveryId);
     if (!delivery || delivery.status === 'delivered' || delivery.status === 'dead') {
       return 'gone';
     }
-    const hookRows = await this.db.withBypass((tx) => tx.select().from(webhooks).where(eq(webhooks.id, delivery.webhookId)).limit(1));
-    const hook = hookRows[0];
+    const hook = await this.webhooks.getWebhookUnchecked(delivery.webhookId);
     if (!hook || hook.status !== 'active') {
-      await this.finishDelivery(delivery.orgId, delivery.id, { status: 'dead', lastError: 'webhook disabled or removed' });
+      await this.deliveryRepo.markDeliveryDead(delivery.orgId, delivery.id, 'webhook disabled or removed');
       return 'dead';
     }
 
@@ -343,7 +302,7 @@ export class WebhooksService implements OnModuleInit {
     // cannot smuggle a blocked target past the guard.
     const recheck = await recheckWebhookTarget(hook.url);
     if (!recheck.ok) {
-      await this.finishDelivery(delivery.orgId, delivery.id, { status: 'dead', lastError: `delivery-time target check failed: ${recheck.reason ?? 'blocked'}` });
+      await this.deliveryRepo.markDeliveryDead(delivery.orgId, delivery.id, `delivery-time target check failed: ${recheck.reason ?? 'blocked'}`);
       return 'dead';
     }
 
@@ -352,7 +311,7 @@ export class WebhooksService implements OnModuleInit {
       secret = envelopeDecrypt(hook.secretEnvelope);
     } catch (err) {
       // The secret can never be recovered — retrying is pointless.
-      await this.finishDelivery(delivery.orgId, delivery.id, { status: 'dead', lastError: `signing secret unreadable: ${(err as Error).message}`.slice(0, 512) });
+      await this.deliveryRepo.markDeliveryDead(delivery.orgId, delivery.id, `signing secret unreadable: ${(err as Error).message}`.slice(0, 512));
       return 'dead';
     }
 
@@ -375,7 +334,7 @@ export class WebhooksService implements OnModuleInit {
         redirect: 'error', // never follow redirects (SSRF re-check bypass)
       });
       if (response.ok) {
-        await this.finishDelivery(delivery.orgId, delivery.id, { status: 'delivered', responseStatus: response.status });
+        await this.deliveryRepo.markDeliveryDelivered(delivery.orgId, delivery.id, response.status);
         return 'delivered';
       }
       return await this.scheduleRetry(delivery.orgId, delivery.id, delivery.attempts, `HTTP ${response.status}`);
@@ -387,46 +346,23 @@ export class WebhooksService implements OnModuleInit {
   private async scheduleRetry(orgId: string, deliveryId: string, attemptsSoFar: number, error: string): Promise<'retry_scheduled' | 'dead'> {
     const attempts = attemptsSoFar + 1;
     if (attempts >= MAX_ATTEMPTS) {
-      await this.finishDelivery(orgId, deliveryId, { status: 'dead', lastError: error, attempts });
+      await this.deliveryRepo.markDeliveryDead(orgId, deliveryId, error, attempts);
       await this.events.emit(EngineEvents.WebhookDead, { orgId, deliveryId }).catch(() => undefined);
       return 'dead';
     }
     const delay = RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)];
     const nextAttemptAt = new Date(Date.now() + delay).toISOString();
-    await this.db.withOrg(orgId, (tx) =>
-      tx
-        .update(webhookDeliveries)
-        .set({ status: 'failed', attempts, lastError: error, nextAttemptAt, updatedAt: new Date().toISOString() })
-        .where(eq(webhookDeliveries.id, deliveryId)),
-    );
+    await this.deliveryRepo.markDeliveryRetryable(orgId, deliveryId, attempts, error, nextAttemptAt);
     await this.enqueueDelivery(deliveryId, attempts, delay);
     return 'retry_scheduled';
   }
 
-  private async finishDelivery(orgId: string, deliveryId: string, patch: { status: string; lastError?: string; responseStatus?: number; attempts?: number }): Promise<void> {
-    await this.db.withOrg(orgId, (tx) =>
-      tx
-        .update(webhookDeliveries)
-        .set({
-          status: patch.status,
-          ...(patch.lastError !== undefined ? { lastError: patch.lastError } : {}),
-          ...(patch.responseStatus !== undefined ? { responseStatus: patch.responseStatus } : {}),
-          ...(patch.attempts !== undefined ? { attempts: patch.attempts } : {}),
-          ...(patch.status === 'delivered' ? { deliveredAt: new Date().toISOString() } : {}),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(webhookDeliveries.id, deliveryId)),
-    );
-  }
-
   private async require(orgId: string, webhookId: string): Promise<WebhookRow> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(webhooks).where(and(eq(webhooks.id, webhookId), eq(webhooks.orgId, orgId))).limit(1),
-    );
-    if (!rows[0]) {
+    const row = await this.webhooks.getWebhook(orgId, webhookId);
+    if (!row) {
       throw ApiError.notFound('webhook');
     }
-    return rows[0];
+    return row;
   }
 
   private validateEvents(events: string[]): string[] {

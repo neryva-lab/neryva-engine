@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { KernelModule, AuthGuard, RateLimitGuard } from './common/kernel.module';
+import { MongoDbModule } from './common/infra/db/mongo/mongo.module';
 import { ModuleFlags } from './common/config/feature-flags';
 import { CorporateModule } from './modules/corporate/corporate.module';
 import { IdentityModule } from './modules/identity/identity.module';
@@ -39,6 +40,10 @@ import { SatellitesModule } from './modules/satellites/satellites.module';
  */
 const imports = [
   KernelModule,
+  // MongoDB lane (dual-persistence): global module; the service itself is
+  // inert when DB_PROVIDER=postgres (never connects). Registered here rather
+  // than in KernelModule because the kernel's provider list is a locked list.
+  MongoDbModule.register(),
   ...(ModuleFlags.corporate ? [CorporateModule] : []),
   ...(ModuleFlags.identity ? [IdentityModule] : []),
   ...(ModuleFlags.organizations ? [OrganizationsModule] : []),

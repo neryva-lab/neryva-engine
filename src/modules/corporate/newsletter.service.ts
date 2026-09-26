@@ -1,12 +1,11 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { Injectable, Logger } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { sha256Hex, randomToken } from '../../common/infra/crypto/envelope';
 import { env } from '../../common/config/env';
 import { EmailService } from './email/email.service';
-import { emailSuppressions, newsletterCampaignSends, newsletterCampaigns, newsletterSubs } from './public.schema';
+import { NEWSLETTER_REPOSITORY } from './repositories/repository-tokens';
+import type { INewsletterRepository, NewsletterCampaignRow } from './repositories/newsletter.repository';
 
 /**
  * Newsletter v2 (E-2 to production grade): the full subscriber lifecycle —
@@ -23,6 +22,11 @@ import { emailSuppressions, newsletterCampaignSends, newsletterCampaigns, newsle
  * per-send token (the emailed link) so campaign links are unique,
  * rotatable per campaign, and reveal nothing about the subscriber table.
  * Both paths land on the suppression list — the hard no-more-mail guarantee.
+ *
+ * Persistence-blind (P3): all storage goes through `INewsletterRepository`.
+ * Corporate tables are global (non-tenant). Campaign scheduling keeps its
+ * single-transaction boundary (campaign flip + send-row snapshot) in the
+ * repository.
  */
 const CAMPAIGN_BATCH = 50;
 
@@ -31,7 +35,7 @@ export class NewsletterService {
   private static readonly logger = new Logger(NewsletterService.name);
 
   constructor(
-    private readonly db: DbService,
+    @Inject(NEWSLETTER_REPOSITORY) private readonly newsletter: INewsletterRepository,
     private readonly audit: AuditService,
     private readonly email: EmailService,
   ) {}
@@ -42,35 +46,29 @@ export class NewsletterService {
     const email = rawEmail.toLowerCase();
     const confirmToken = randomToken(32);
     const unsubToken = randomToken(24);
-    const existing = await this.db.root.select().from(newsletterSubs).where(eq(newsletterSubs.email, email)).limit(1);
+    const existing = await this.newsletter.getSubscriberByEmail(email);
 
-    if (existing[0]?.status === 'confirmed') {
+    if (existing?.status === 'confirmed') {
       return; // idempotent: already subscribed
     }
 
-    if (existing[0]) {
-      await this.db.root
-        .update(newsletterSubs)
-        .set({
-          status: 'pending',
-          confirmTokenHash: sha256Hex(confirmToken),
-          unsubscribeTokenHash: sha256Hex(unsubToken),
-          source,
-          unsubscribedAt: null,
-        })
-        .where(eq(newsletterSubs.id, existing[0].id));
+    if (existing) {
+      await this.newsletter.refreshPendingSubscriber({
+        id: existing.id,
+        confirmTokenHash: sha256Hex(confirmToken),
+        unsubscribeTokenHash: sha256Hex(unsubToken),
+        source,
+      });
     } else {
-      const inserted = await this.db.root
-        .insert(newsletterSubs)
-        .values({ email, status: 'pending', confirmTokenHash: sha256Hex(confirmToken), unsubscribeTokenHash: sha256Hex(unsubToken), source })
-        .onConflictDoNothing({ target: newsletterSubs.email })
-        .returning({ id: newsletterSubs.id });
-      if (!inserted[0]) {
+      const inserted = await this.newsletter.insertPendingSubscriber({
+        email,
+        confirmTokenHash: sha256Hex(confirmToken),
+        unsubscribeTokenHash: sha256Hex(unsubToken),
+        source,
+      });
+      if (!inserted) {
         // Lost an insert race → treat as existing-pending; refresh the token.
-        await this.db.root
-          .update(newsletterSubs)
-          .set({ confirmTokenHash: sha256Hex(confirmToken) })
-          .where(and(eq(newsletterSubs.email, email), eq(newsletterSubs.status, 'pending')));
+        await this.newsletter.refreshConfirmToken(email, sha256Hex(confirmToken));
       }
     }
 
@@ -90,24 +88,17 @@ export class NewsletterService {
 
   /** Redeem the double-opt-in token (single-use, pending-only). */
   async confirm(token: string, ip: string | null = null): Promise<boolean> {
-    const rows = await this.db.root
-      .select()
-      .from(newsletterSubs)
-      .where(and(eq(newsletterSubs.confirmTokenHash, sha256Hex(token)), eq(newsletterSubs.status, 'pending')))
-      .limit(1);
-    if (!rows[0]) {
+    const row = await this.newsletter.findPendingByConfirmTokenHash(sha256Hex(token));
+    if (!row) {
       return false;
     }
-    await this.db.root
-      .update(newsletterSubs)
-      .set({ status: 'confirmed', confirmedAt: new Date().toISOString(), confirmedIp: ip, confirmTokenHash: null })
-      .where(eq(newsletterSubs.id, rows[0].id));
+    await this.newsletter.confirmSubscriber({ id: row.id, ip });
     await this.audit.add({
       action: 'corporate.newsletter_confirmed',
       resourceType: 'newsletter_sub',
-      resourceId: rows[0].id,
+      resourceId: row.id,
       actorType: 'system',
-      details: { email_domain: rows[0].email.split('@')[1] ?? '' },
+      details: { email_domain: row.email.split('@')[1] ?? '' },
     });
     return true;
   }
@@ -117,15 +108,11 @@ export class NewsletterService {
     if (token.length < 16 || token.length > 128) {
       return false;
     }
-    const rows = await this.db.root
-      .select()
-      .from(newsletterSubs)
-      .where(eq(newsletterSubs.unsubscribeTokenHash, sha256Hex(token)))
-      .limit(1);
-    if (!rows[0]) {
+    const row = await this.newsletter.findByUnsubscribeTokenHash(sha256Hex(token));
+    if (!row) {
       return false;
     }
-    await this.markUnsubscribed(rows[0].id, rows[0].email, 'subscriber token');
+    await this.markUnsubscribed(row.id, row.email, 'subscriber token');
     return true;
   }
 
@@ -134,29 +121,18 @@ export class NewsletterService {
     if (token.length < 16 || token.length > 128) {
       return false;
     }
-    const rows = await this.db.root
-      .select({ subscriberId: newsletterCampaignSends.subscriberId, email: newsletterCampaignSends.email })
-      .from(newsletterCampaignSends)
-      .where(eq(newsletterCampaignSends.unsubscribeToken, token))
-      .limit(1);
-    if (!rows[0]) {
+    const row = await this.newsletter.findSendByUnsubscribeToken(token);
+    if (!row) {
       return false;
     }
-    await this.markUnsubscribed(rows[0].subscriberId, rows[0].email, 'campaign link');
+    await this.markUnsubscribed(row.subscriberId, row.email, 'campaign link');
     return true;
   }
 
   private async markUnsubscribed(subscriberId: string, email: string, via: string): Promise<void> {
-    await this.db.root
-      .update(newsletterSubs)
-      .set({ status: 'unsubscribed', unsubscribedAt: new Date().toISOString() })
-      .where(eq(newsletterSubs.id, subscriberId));
     // Unsubscribes also land on the suppression list — the hard guarantee
-    // that no future campaign ever re-mails them.
-    await this.db.root
-      .insert(emailSuppressions)
-      .values({ email: email.toLowerCase(), reason: 'unsubscribe', detail: `one-click (${via})` })
-      .onConflictDoNothing({ target: emailSuppressions.email });
+    // that no future campaign ever re-mails them (one chokepoint, in the repo).
+    await this.newsletter.markUnsubscribed({ subscriberId, email, via });
     await this.audit.add({
       action: 'corporate.newsletter_unsubscribed',
       resourceType: 'newsletter_sub',
@@ -169,31 +145,11 @@ export class NewsletterService {
   // ── staff: list / filter / export / GDPR ───────────────────────────────────
 
   async listSubscribers(filter: { status?: string; q?: string; limit?: number; offset?: number }) {
-    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-    const offset = Math.max(filter.offset ?? 0, 0);
-    const like = filter.q ? `%${filter.q.replace(/[%_]/g, '')}%` : null;
-    const rows = await this.db.root.execute<Record<string, unknown>>(sql`
-      select id, email, status, source, confirmed_at, unsubscribed_at, created_at
-      from newsletter_subs
-      where (${filter.status ?? null}::varchar is null or status = ${filter.status ?? null})
-        and (${like}::varchar is null or email like ${like})
-      order by created_at desc
-      limit ${limit} offset ${offset}
-    `);
-    const total = await this.db.root.execute<{ count: number }>(sql`
-      select count(*)::int as count from newsletter_subs
-      where (${filter.status ?? null}::varchar is null or status = ${filter.status ?? null})
-        and (${like}::varchar is null or email like ${like})
-    `);
-    return { subscribers: rows.rows, total: total.rows[0]?.count ?? 0, limit, offset };
+    return this.newsletter.listSubscribers(filter);
   }
 
   async exportCsv(): Promise<string> {
-    const rows = await this.db.root
-      .select({ email: newsletterSubs.email, status: newsletterSubs.status, confirmedAt: newsletterSubs.confirmedAt })
-      .from(newsletterSubs)
-      .orderBy(desc(newsletterSubs.createdAt))
-      .limit(50_000);
+    const rows = await this.newsletter.exportSubscriberRows();
     const lines = ['email,status,confirmed_at'];
     for (const row of rows) {
       lines.push(`${row.email},${row.status},${row.confirmedAt ?? ''}`);
@@ -203,33 +159,30 @@ export class NewsletterService {
 
   /** GDPR: the subscriber's own record minus token material. */
   async subscriberData(email: string): Promise<unknown> {
-    const rows = await this.db.root.select().from(newsletterSubs).where(eq(newsletterSubs.email, email.toLowerCase())).limit(1);
-    if (!rows[0]) {
+    const row = await this.newsletter.getSubscriberByEmail(email.toLowerCase());
+    if (!row) {
       throw ApiError.notFound('subscriber');
     }
     return {
-      id: rows[0].id,
-      email: rows[0].email,
-      status: rows[0].status,
-      source: rows[0].source,
-      confirmed_at: rows[0].confirmedAt,
-      unsubscribed_at: rows[0].unsubscribedAt,
-      created_at: rows[0].createdAt,
+      id: row.id,
+      email: row.email,
+      status: row.status,
+      source: row.source,
+      confirmed_at: row.confirmedAt,
+      unsubscribed_at: row.unsubscribedAt,
+      created_at: row.createdAt,
     };
   }
 
   async deleteSubscriber(email: string, actorId: string): Promise<void> {
-    const deleted = await this.db.root
-      .delete(newsletterSubs)
-      .where(eq(newsletterSubs.email, email.toLowerCase()))
-      .returning({ id: newsletterSubs.id });
-    if (!deleted[0]) {
+    const deletedId = await this.newsletter.deleteSubscriberByEmail(email);
+    if (!deletedId) {
       throw ApiError.notFound('subscriber');
     }
     await this.audit.add({
       action: 'corporate.subscriber_deleted',
       resourceType: 'newsletter_sub',
-      resourceId: deleted[0].id,
+      resourceId: deletedId,
       actorType: 'account',
       actorId,
       details: { gdpr: true },
@@ -238,41 +191,41 @@ export class NewsletterService {
 
   // ── campaigns ──────────────────────────────────────────────────────────────
 
-  async createCampaign(input: { subject: string; preheader?: string; bodyMd: string; actorId: string }) {
+  async createCampaign(input: { subject: string; preheader?: string; bodyMd: string; actorId: string }): Promise<NewsletterCampaignRow> {
     if (input.subject.trim().length < 3) {
       throw ApiError.validation({ subject: '3..512 characters' });
     }
-    const inserted = await this.db.root
-      .insert(newsletterCampaigns)
-      .values({ subject: input.subject.slice(0, 512), preheader: input.preheader?.slice(0, 256), bodyMd: input.bodyMd, createdBy: null })
-      .returning();
+    const row = await this.newsletter.createCampaign({
+      subject: input.subject,
+      preheader: input.preheader,
+      bodyMd: input.bodyMd,
+    });
     await this.audit.add({
       action: 'corporate.campaign_created',
       resourceType: 'newsletter_campaign',
-      resourceId: inserted[0].id,
+      resourceId: row.id,
       actorType: 'account',
       actorId: input.actorId,
       details: { subject: input.subject.slice(0, 200) },
     });
-    return inserted[0];
+    return row;
   }
 
-  async updateCampaign(input: { campaignId: string; subject?: string; preheader?: string; bodyMd?: string; actorId: string }) {
+  async updateCampaign(input: { campaignId: string; subject?: string; preheader?: string; bodyMd?: string; actorId: string }): Promise<NewsletterCampaignRow> {
     const existing = await this.requireCampaign(input.campaignId);
     if (existing.status !== 'draft') {
       throw ApiError.conflict(`only draft campaigns can be edited (state: ${existing.status})`);
     }
-    const updated = await this.db.root
-      .update(newsletterCampaigns)
-      .set({
-        ...(input.subject !== undefined ? { subject: input.subject.slice(0, 512) } : {}),
-        ...(input.preheader !== undefined ? { preheader: input.preheader?.slice(0, 256) } : {}),
-        ...(input.bodyMd !== undefined ? { bodyMd: input.bodyMd } : {}),
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(newsletterCampaigns.id, input.campaignId))
-      .returning();
-    return updated[0];
+    const updated = await this.newsletter.updateCampaign({
+      campaignId: input.campaignId,
+      subject: input.subject,
+      preheader: input.preheader,
+      bodyMd: input.bodyMd,
+    });
+    if (!updated) {
+      throw ApiError.notFound('campaign');
+    }
+    return updated;
   }
 
   /**
@@ -290,26 +243,16 @@ export class NewsletterService {
       throw ApiError.validation({ scheduled_at: 'ISO-8601 required' });
     }
 
-    const recipients = await this.db.root.execute<{ id: string; email: string }>(sql`
-      select s.id, s.email from newsletter_subs s
-      where s.status = 'confirmed'
-        and not exists (select 1 from email_suppressions e where e.email = s.email and e.resolved_at is null)
-    `);
-    if (recipients.rows.length === 0) {
+    const recipients = await this.newsletter.confirmedRecipients();
+    if (recipients.length === 0) {
       throw ApiError.conflict('no recipients (confirmed, non-suppressed) — nothing to schedule');
     }
 
-    await this.db.root.transaction(async (tx) => {
-      await tx
-        .update(newsletterCampaigns)
-        .set({ status: 'scheduled', scheduledAt, recipientCount: recipients.rows.length, updatedAt: new Date().toISOString() })
-        .where(eq(newsletterCampaigns.id, input.campaignId));
-      for (const row of recipients.rows) {
-        await tx
-          .insert(newsletterCampaignSends)
-          .values({ campaignId: input.campaignId, subscriberId: row.id, email: row.email, unsubscribeToken: randomToken(24) })
-          .onConflictDoNothing();
-      }
+    await this.newsletter.scheduleCampaign({
+      campaignId: input.campaignId,
+      scheduledAt,
+      recipients,
+      makeToken: () => randomToken(24),
     });
     await this.audit.add({
       action: 'corporate.campaign_scheduled',
@@ -317,9 +260,9 @@ export class NewsletterService {
       resourceId: input.campaignId,
       actorType: 'account',
       actorId: input.actorId,
-      details: { recipients: String(recipients.rows.length), scheduled_at: scheduledAt },
+      details: { recipients: String(recipients.length), scheduled_at: scheduledAt },
     });
-    return { scheduled_at: scheduledAt, recipients: recipients.rows.length };
+    return { scheduled_at: scheduledAt, recipients: recipients.length };
   }
 
   async cancelCampaign(input: { campaignId: string; actorId: string }) {
@@ -327,10 +270,7 @@ export class NewsletterService {
     if (campaign.status !== 'scheduled' && campaign.status !== 'sending') {
       throw ApiError.conflict(`only scheduled/sending campaigns can be cancelled (state: ${campaign.status})`);
     }
-    await this.db.root
-      .update(newsletterCampaigns)
-      .set({ status: 'cancelled', updatedAt: new Date().toISOString() })
-      .where(eq(newsletterCampaigns.id, input.campaignId));
+    await this.newsletter.cancelCampaign(input.campaignId);
     await this.audit.add({
       action: 'corporate.campaign_cancelled',
       resourceType: 'newsletter_campaign',
@@ -341,16 +281,14 @@ export class NewsletterService {
     });
   }
 
-  async listCampaigns() {
-    return this.db.root.select().from(newsletterCampaigns).orderBy(desc(newsletterCampaigns.createdAt)).limit(200);
+  async listCampaigns(): Promise<NewsletterCampaignRow[]> {
+    return this.newsletter.listCampaigns();
   }
 
   async campaignDetail(campaignId: string) {
     const campaign = await this.requireCampaign(campaignId);
-    const counts = await this.db.root.execute<{ status: string; count: number }>(sql`
-      select status, count(*)::int as count from newsletter_campaign_sends where campaign_id = ${campaignId} group by status
-    `);
-    return { campaign, send_counts: counts.rows };
+    const sendCounts = await this.newsletter.campaignSendCounts(campaignId);
+    return { campaign, send_counts: sendCounts };
   }
 
   /**
@@ -359,33 +297,22 @@ export class NewsletterService {
    * worker re-enqueues itself while work exists.
    */
   async processCampaigns(): Promise<{ processed: number; remaining: number }> {
-    await this.db.root.execute(sql`
-      update newsletter_campaigns set status = 'sending', updated_at = now()
-      where status = 'scheduled' and scheduled_at <= now()
-    `);
-    const inflight = await this.db.root
-      .select({ id: newsletterCampaigns.id })
-      .from(newsletterCampaigns)
-      .where(eq(newsletterCampaigns.status, 'sending'));
+    await this.newsletter.promoteDueCampaigns();
+    const inflight = await this.newsletter.inflightCampaigns();
     let remaining = 0;
-    for (const campaign of inflight) {
-      remaining += await this.sendBatch(campaign.id);
+    for (const campaignId of inflight) {
+      remaining += await this.sendBatch(campaignId);
     }
     return { processed: inflight.length, remaining };
   }
 
   /** One throttled batch; returns the campaign's remaining queue size. */
   private async sendBatch(campaignId: string): Promise<number> {
-    const campaignRows = await this.db.root.select().from(newsletterCampaigns).where(eq(newsletterCampaigns.id, campaignId)).limit(1);
-    const campaign = campaignRows[0];
+    const campaign = await this.newsletter.getCampaign(campaignId);
     if (!campaign || campaign.status !== 'sending') {
       return 0;
     }
-    const pending = await this.db.root
-      .select()
-      .from(newsletterCampaignSends)
-      .where(and(eq(newsletterCampaignSends.campaignId, campaignId), eq(newsletterCampaignSends.status, 'queued')))
-      .limit(CAMPAIGN_BATCH);
+    const pending = await this.newsletter.queuedSends(campaignId, CAMPAIGN_BATCH);
 
     for (const send of pending) {
       const unsubUrl = this.publicUrl(`/public/newsletter/unsubscribe?token=${send.unsubscribeToken}`);
@@ -403,41 +330,26 @@ export class NewsletterService {
           metadata: { campaign_id: campaignId, subscriber_id: send.subscriberId },
           unsubscribeUrl: unsubUrl,
         });
-        await this.db.root
-          .update(newsletterCampaignSends)
-          .set({ status: 'sent', sentAt: new Date().toISOString() })
-          .where(eq(newsletterCampaignSends.id, send.id));
-        await this.db.root
-          .update(newsletterCampaigns)
-          .set({ sentCount: sql`${newsletterCampaigns.sentCount} + 1`, updatedAt: new Date().toISOString() })
-          .where(eq(newsletterCampaigns.id, campaignId));
+        await this.newsletter.markSendSent(send.id);
+        await this.newsletter.bumpCampaignCounters({ campaignId, sent: true });
       } catch (err) {
         const message = (err as Error).message.slice(0, 480);
         const skipped = message.includes('suppressed');
-        await this.db.root
-          .update(newsletterCampaignSends)
-          .set({ status: skipped ? 'skipped_suppressed' : 'failed', error: skipped ? null : message })
-          .where(eq(newsletterCampaignSends.id, send.id));
+        await this.newsletter.markSendFailed({
+          sendId: send.id,
+          skippedSuppressed: skipped,
+          error: skipped ? null : message,
+        });
         if (!skipped) {
-          await this.db.root
-            .update(newsletterCampaigns)
-            .set({ failedCount: sql`${newsletterCampaigns.failedCount} + 1`, updatedAt: new Date().toISOString() })
-            .where(eq(newsletterCampaigns.id, campaignId));
+          await this.newsletter.bumpCampaignCounters({ campaignId, failed: true });
         }
       }
     }
 
     // Remaining queue + completion flip.
-    const remainingRows = await this.db.root
-      .select({ count: sql<number>`count(*)::int` })
-      .from(newsletterCampaignSends)
-      .where(and(eq(newsletterCampaignSends.campaignId, campaignId), eq(newsletterCampaignSends.status, 'queued')));
-    const remaining = remainingRows[0]?.count ?? 0;
+    const remaining = await this.newsletter.remainingQueuedSends(campaignId);
     if (remaining === 0 && pending.length > 0) {
-      await this.db.root
-        .update(newsletterCampaigns)
-        .set({ status: 'sent', sentAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-        .where(eq(newsletterCampaigns.id, campaignId));
+      await this.newsletter.completeCampaign(campaignId);
       await this.audit.add({
         action: 'corporate.campaign_sent',
         resourceType: 'newsletter_campaign',
@@ -449,12 +361,12 @@ export class NewsletterService {
     return remaining;
   }
 
-  private async requireCampaign(campaignId: string) {
-    const rows = await this.db.root.select().from(newsletterCampaigns).where(eq(newsletterCampaigns.id, campaignId)).limit(1);
-    if (!rows[0]) {
+  private async requireCampaign(campaignId: string): Promise<NewsletterCampaignRow> {
+    const row = await this.newsletter.getCampaign(campaignId);
+    if (!row) {
       throw ApiError.notFound('campaign');
     }
-    return rows[0];
+    return row;
   }
 
   private publicUrl(path: string): string {

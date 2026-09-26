@@ -1,6 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { parseGatePolicy, evaluateGate, GateOutcome } from './gate-evaluator';
@@ -13,15 +11,16 @@ import { SettingsService } from './settings.service';
 import { INITIAL_ROLLOUT_STATE, Ladder, parseRolloutState, resolveLadder, RolloutState } from './rollout';
 import {
   DEPLOYMENT_TRANSITIONS,
-  deploymentEvents,
-  deployments,
   DeploymentRow,
   DeploymentStatus,
   pipelineStages,
-  pipelines,
   RolloutStrategy,
   ROLLOUT_STRATEGIES,
 } from './schema';
+import { type IDeploymentRunRepository, type DeploymentWithContext } from './repositories/deployment.repository';
+import { DEPLOYMENT_RUN_REPOSITORY } from './repositories/repository-tokens';
+import { type IDeploymentPipelineRepository } from './repositories/pipeline.repository';
+import { DEPLOYMENT_PIPELINE_REPOSITORY } from './repositories/repository-tokens';
 
 /**
  * Deployments (D-3/D-4): the run records and their explicit status machine
@@ -38,12 +37,14 @@ import {
  * The rollout ladder and its progress state are PERSISTED on the row — the
  * run is fully resumable from the database alone (a Redis flush can stall a
  * tick, never lose the run; the reconciler re-enqueues it).
+ *
+ * Persistence goes through the P3 repository ports (`IDeploymentRunRepository`,
+ * `IDeploymentPipelineRepository`) — the concrete implementations are selected
+ * by `DB_PROVIDER`. This service is provider-blind: quota, strategy/ladder
+ * resolution, transition validation, gate math, metrics, audit, and the
+ * multi-repo compositions stay here.
  */
-export interface DeploymentWithContext {
-  deployment: DeploymentRow;
-  stage: typeof pipelineStages.$inferSelect;
-  pipeline: typeof pipelines.$inferSelect;
-}
+export type { DeploymentWithContext };
 
 /** Richer gate evaluation for the workflow's wait-timeout policy. */
 export type StageGateEvaluation = GateOutcome & {
@@ -53,12 +54,11 @@ export type StageGateEvaluation = GateOutcome & {
   recorded_approvals: number;
 };
 
-const ACTIVE_STATUSES = ['pending', 'gated', 'rolling'] as const;
-
 @Injectable()
 export class DeploymentsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(DEPLOYMENT_RUN_REPOSITORY) private readonly runsRepo: IDeploymentRunRepository,
+    @Inject(DEPLOYMENT_PIPELINE_REPOSITORY) private readonly pipelinesRepo: IDeploymentPipelineRepository,
     private readonly audit: AuditService,
     private readonly quota: QuotaService,
     private readonly entitlements: EntitlementsService,
@@ -73,64 +73,36 @@ export class DeploymentsService {
   ): Promise<DeploymentRow[]> {
     // Environment NAME filter (the console's env pills render names): resolve
     // to the id here so callers never need a two-step lookup.
-    if (filter.environment && !filter.environmentId) {
+    let environmentId = filter.environmentId;
+    if (filter.environment && !environmentId) {
       const envs = await this.environmentsService.list(orgId);
       const env = envs.find((e) => e.name === filter.environment);
       if (!env) {
         return [];
       }
-      filter = { ...filter, environmentId: env.id };
+      environmentId = env.id;
     }
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(deployments)
-        .where(
-          and(
-            eq(deployments.orgId, orgId),
-            filter.pipelineId ? eq(deployments.pipelineId, filter.pipelineId) : undefined,
-            filter.environmentId ? eq(deployments.environmentId, filter.environmentId) : undefined,
-            filter.status ? eq(deployments.status, filter.status) : undefined,
-          ),
-        )
-        .orderBy(desc(deployments.createdAt))
-        .limit(Math.min(filter.limit ?? 50, 200)),
-    );
+    return this.runsRepo.list(orgId, {
+      ...(filter.pipelineId ? { pipelineId: filter.pipelineId } : {}),
+      ...(environmentId ? { environmentId } : {}),
+      ...(filter.status ? { status: filter.status } : {}),
+      ...(filter.limit !== undefined ? { limit: Math.min(filter.limit, 200) } : {}),
+    });
   }
 
   async get(orgId: string, deploymentId: string): Promise<DeploymentWithContext> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ deployment: deployments })
-        .from(deployments)
-        .where(and(eq(deployments.id, deploymentId), eq(deployments.orgId, orgId)))
-        .limit(1),
-    );
-    const deployment = rows[0]?.deployment;
-    if (!deployment) {
-      throw ApiError.notFound('deployment');
-    }
-    const stageRows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(pipelineStages).where(eq(pipelineStages.id, deployment.stageId)).limit(1),
-    );
-    const pipelineRows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(pipelines).where(eq(pipelines.id, deployment.pipelineId)).limit(1),
-    );
-    if (!stageRows[0] || !pipelineRows[0]) {
-      throw ApiError.internal();
-    }
-    return { deployment, stage: stageRows[0], pipeline: pipelineRows[0] };
+    return this.runsRepo.get(orgId, deploymentId);
   }
 
-  async events(orgId: string, deploymentId: string, limit = 100): Promise<Array<typeof deploymentEvents.$inferSelect>> {
-    return this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(deploymentEvents)
-        .where(and(eq(deploymentEvents.orgId, orgId), eq(deploymentEvents.deploymentId, deploymentId)))
-        .orderBy(desc(deploymentEvents.createdAt))
-        .limit(Math.min(limit, 500)),
-    );
+  async events(orgId: string, deploymentId: string, limit = 100): Promise<Array<{ id: string; kind: string; payload: Record<string, unknown>; actor: string | null; createdAt: string }>> {
+    const rows = await this.runsRepo.listEvents(orgId, deploymentId, Math.min(limit, 500));
+    return rows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      payload: (row.payload ?? {}) as Record<string, unknown>,
+      actor: row.actor,
+      createdAt: row.createdAt,
+    }));
   }
 
   /** Org-wide activity feed (dashboard): the event log mapped to categories. */
@@ -138,19 +110,10 @@ export class DeploymentsService {
     orgId: string,
     filter: { limit?: number; kinds?: string[] } = {},
   ): Promise<Array<{ id: string; deployment_id: string; kind: string; category: string; payload: Record<string, unknown>; actor: string | null; created_at: string }>> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(deploymentEvents)
-        .where(
-          and(
-            eq(deploymentEvents.orgId, orgId),
-            filter.kinds && filter.kinds.length > 0 ? inArray(deploymentEvents.kind, filter.kinds.slice(0, 20)) : undefined,
-          ),
-        )
-        .orderBy(desc(deploymentEvents.createdAt))
-        .limit(Math.min(filter.limit ?? 40, 200)),
-    );
+    const rows = await this.runsRepo.listActivityRaw(orgId, {
+      ...(filter.limit !== undefined ? { limit: Math.min(filter.limit, 200) } : {}),
+      ...(filter.kinds && filter.kinds.length > 0 ? { kinds: filter.kinds.slice(0, 20) } : {}),
+    });
     return rows.map((row) => ({
       id: row.id,
       deployment_id: row.deploymentId,
@@ -176,7 +139,7 @@ export class DeploymentsService {
     /** Audit actor kind: L1 callers are accounts, L2 keys are api_key, services are service. */
     actorKind?: 'account' | 'api_key' | 'service';
   }): Promise<DeploymentRow> {
-    const { pipeline, stages } = await this.readPipeline(input.orgId, input.pipelineId);
+    const { pipeline, stages } = await this.pipelinesRepo.readForTrigger(input.orgId, input.pipelineId);
     if (pipeline.status === 'paused') {
       throw ApiError.conflict('pipeline is paused — resume it before triggering runs');
     }
@@ -201,19 +164,8 @@ export class DeploymentsService {
 
     // One active run per (pipeline, stage) — concurrent runs of the same
     // stage would race the rollout state.
-    const activeRows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(deployments)
-        .where(
-          and(
-            eq(deployments.orgId, input.orgId),
-            eq(deployments.stageId, stage.id),
-            sql`${deployments.status} in ('pending', 'gated', 'rolling')`,
-          ),
-        ),
-    );
-    if ((activeRows[0]?.count ?? 0) > 0) {
+    const stageActive = await this.runsRepo.countActiveRuns(input.orgId, { stageId: stage.id });
+    if (stageActive > 0) {
       throw ApiError.conflict('an active deployment already runs on this stage');
     }
 
@@ -223,14 +175,9 @@ export class DeploymentsService {
     if (env.status === 'maintenance') {
       throw ApiError.conflict(`environment "${env.name}" is in maintenance — triggers are blocked`);
     }
-    const envActive = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(deployments)
-        .where(and(eq(deployments.orgId, input.orgId), eq(deployments.environmentId, env.id), sql`${deployments.status} in ('pending', 'gated', 'rolling')`)),
-    );
-    if ((envActive[0]?.count ?? 0) >= Math.max(1, env.concurrency)) {
-      throw ApiError.conflict(`environment "${env.name}" already has ${envActive[0]?.count} active run(s) — concurrency is ${env.concurrency}`);
+    const envActive = await this.runsRepo.countActiveRuns(input.orgId, { environmentId: env.id });
+    if (envActive >= Math.max(1, env.concurrency)) {
+      throw ApiError.conflict(`environment "${env.name}" already has ${envActive} active run(s) — concurrency is ${env.concurrency}`);
     }
 
     // Strategy resolution: explicit > org settings default; the plan's
@@ -253,28 +200,21 @@ export class DeploymentsService {
       orgDefaultCanaryWeight: settings.defaultCanaryWeight,
     });
 
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(deployments)
-        .values({
-          orgId: input.orgId,
-          pipelineId: pipeline.id,
-          stageId: stage.id,
-          environmentId: stage.environmentId,
-          agentVersion,
-          strategy,
-          status: 'pending',
-          ladder: ladder as unknown as Record<string, unknown>[],
-          rolloutState: INITIAL_ROLLOUT_STATE as unknown as Record<string, unknown>,
-          gitCommit: input.git?.commit?.trim().slice(0, 64) || null,
-          gitBranch: input.git?.branch?.trim().slice(0, 256) || null,
-          gitMessage: input.git?.message?.trim().slice(0, 512) || null,
-          snapshot: (input.snapshot ?? {}) as Record<string, unknown>,
-          triggeredBy: input.actorLabel,
-        })
-        .returning(),
-    );
-    const deployment = inserted[0];
+    const deployment = await this.runsRepo.createDeployment({
+      orgId: input.orgId,
+      pipelineId: pipeline.id,
+      stageId: stage.id,
+      environmentId: stage.environmentId,
+      agentVersion,
+      strategy,
+      ladder,
+      rolloutState: INITIAL_ROLLOUT_STATE,
+      gitCommit: input.git?.commit?.trim().slice(0, 64) || null,
+      gitBranch: input.git?.branch?.trim().slice(0, 256) || null,
+      gitMessage: input.git?.message?.trim().slice(0, 512) || null,
+      snapshot: input.snapshot ?? {},
+      triggeredBy: input.actorLabel,
+    });
     await this.appendEvent(deployment.orgId, deployment.id, 'deployment.triggered', {
       pipeline: pipeline.name,
       stage_position: stage.position,
@@ -316,20 +256,13 @@ export class DeploymentsService {
     }
     const now = new Date().toISOString();
     const terminal = input.target === 'live' || input.target === 'rolled_back' || input.target === 'failed';
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(deployments)
-        .set({
-          status: input.target,
-          updatedAt: now,
-          ...(input.target === 'rolling' ? { startedAt: deployment.startedAt ?? now } : {}),
-          ...(terminal ? { completedAt: now } : {}),
-          ...(input.lastError !== undefined ? { lastError: input.lastError } : {}),
-        })
-        .where(and(eq(deployments.id, input.deploymentId), eq(deployments.orgId, input.orgId)))
-        .returning(),
-    );
-    if (!updated[0]) {
+    const updated = await this.runsRepo.updateDeployment(input.orgId, input.deploymentId, {
+      status: input.target,
+      ...(input.target === 'rolling' ? { startedAt: deployment.startedAt ?? now } : {}),
+      ...(terminal ? { completedAt: now } : {}),
+      ...(input.lastError !== undefined ? { lastError: input.lastError } : {}),
+    });
+    if (!updated) {
       throw ApiError.notFound('deployment');
     }
     deploymentTransitions.inc({ from: deployment.status, to: input.target });
@@ -350,7 +283,7 @@ export class DeploymentsService {
       productTag: 'deployment',
       details: { from: deployment.status, to: input.target },
     });
-    return updated[0];
+    return updated;
   }
 
   /** Manual gate approval (recorded once per actor — counted distinctly). */
@@ -359,14 +292,8 @@ export class DeploymentsService {
     if (deployment.status !== 'gated') {
       throw ApiError.conflict(`gate approvals apply to gated deployments (state: ${deployment.status})`);
     }
-    const existing = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ actor: deploymentEvents.actor })
-        .from(deploymentEvents)
-        .where(and(eq(deploymentEvents.deploymentId, input.deploymentId), eq(deploymentEvents.kind, 'gate.approved'))),
-    );
-    if (!existing.some((row) => row.actor === input.actorLabel)) {
-      await this.appendEvent(input.orgId, input.deploymentId, 'gate.approved', {}, input.actorLabel);
+    const appended = await this.runsRepo.tryAppendGateApproval(input.orgId, input.deploymentId, input.actorLabel);
+    if (appended) {
       await this.audit.add({
         action: 'deployment.gate_approved',
         resourceType: 'deployment',
@@ -413,12 +340,9 @@ export class DeploymentsService {
   /** Rollout metrics feed (canary observation, console/runtime writers). */
   async reportMetrics(input: { orgId: string; deploymentId: string; metrics: Record<string, number | string | boolean> }): Promise<void> {
     await this.get(input.orgId, input.deploymentId);
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(deployments)
-        .set({ metrics: input.metrics as Record<string, unknown>, updatedAt: new Date().toISOString() })
-        .where(and(eq(deployments.id, input.deploymentId), eq(deployments.orgId, input.orgId))),
-    );
+    await this.runsRepo.updateDeployment(input.orgId, input.deploymentId, {
+      metrics: input.metrics as Record<string, unknown>,
+    });
     await this.appendEvent(input.orgId, input.deploymentId, 'metrics.reported', { metrics: input.metrics }, 'system:metrics-feed');
   }
 
@@ -432,13 +356,8 @@ export class DeploymentsService {
   async evaluateStageGate(orgId: string, deploymentId: string): Promise<StageGateEvaluation> {
     const { deployment, stage } = await this.get(orgId, deploymentId);
     const policy = parseGatePolicy(stage.gatePolicy);
-    const approvalRows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ actor: deploymentEvents.actor })
-        .from(deploymentEvents)
-        .where(and(eq(deploymentEvents.deploymentId, deploymentId), eq(deploymentEvents.kind, 'gate.approved'))),
-    );
-    const approvals = new Set(approvalRows.map((r) => r.actor)).size;
+    const actors = await this.runsRepo.gateApprovalActors(orgId, deploymentId);
+    const approvals = new Set(actors).size;
 
     // Environment protection rule: approval_mode=manual floors the approval
     // requirement at 1 no matter what the stage policy says (the org's
@@ -468,23 +387,15 @@ export class DeploymentsService {
 
   /** Canary weight bookkeeping during rolling. */
   async setCanaryPercent(orgId: string, deploymentId: string, percent: number): Promise<void> {
-    await this.db.withOrg(orgId, (tx) =>
-      tx
-        .update(deployments)
-        .set({ canaryPercent: percent, updatedAt: new Date().toISOString() })
-        .where(and(eq(deployments.id, deploymentId), eq(deployments.orgId, orgId))),
-    );
+    await this.runsRepo.updateDeployment(orgId, deploymentId, { canaryPercent: percent });
     await this.appendEvent(orgId, deploymentId, 'canary.weight', { percent }, 'system:deployment-worker');
   }
 
   /** Persist rollout bookkeeping (the worker's only mutable memory). */
   async setRolloutState(orgId: string, deploymentId: string, state: RolloutState): Promise<void> {
-    await this.db.withOrg(orgId, (tx) =>
-      tx
-        .update(deployments)
-        .set({ rolloutState: state as unknown as Record<string, unknown>, updatedAt: new Date().toISOString() })
-        .where(and(eq(deployments.id, deploymentId), eq(deployments.orgId, orgId))),
-    );
+    await this.runsRepo.updateDeployment(orgId, deploymentId, {
+      rolloutState: state as unknown as Record<string, unknown>,
+    });
   }
 
   rolloutStateOf(deployment: DeploymentRow): RolloutState {
@@ -648,27 +559,12 @@ export class DeploymentsService {
     payload: Record<string, unknown>,
     actor: string,
   ): Promise<void> {
-    await this.db.withOrg(orgId, (tx) => tx.insert(deploymentEvents).values({ orgId, deploymentId, kind, payload, actor }));
+    await this.runsRepo.appendEvent(orgId, deploymentId, kind, payload, actor);
   }
 
   /** Runs whose stored state says a tick is overdue (reconciler input). */
   async staleActiveRuns(olderThanMs: number): Promise<DeploymentRow[]> {
-    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-    return this.db.withBypass((tx) =>
-      tx
-        .select()
-        .from(deployments)
-        .where(
-          and(
-            inArray(deployments.status, [...ACTIVE_STATUSES]),
-            // lastTickAt is the liveness signal every wait path stamps; rows
-            // that never ticked (pre-0017, or just triggered) fall back to
-            // updated_at. Soak/approval/manual waits stay fresh by design.
-            sql`(coalesce((${deployments.rolloutState} ->> 'lastTickAt')::timestamptz, ${deployments.updatedAt})) < ${cutoff}`,
-          ),
-        )
-        .limit(100),
-    );
+    return this.runsRepo.staleActiveRuns(olderThanMs);
   }
 
   /**
@@ -716,7 +612,7 @@ export class DeploymentsService {
       if (!run) {
         continue;
       }
-      const next = await this.nextStage(input.orgId, pipeline.id, stage.position);
+      const next = await this.pipelinesRepo.nextStage(input.orgId, pipeline.id, stage.position);
       if (!next) {
         throw ApiError.conflict(`stage ${stage.position} ("${stage.name ?? stage.id}") is live with no further stage to promote into`);
       }
@@ -734,34 +630,9 @@ export class DeploymentsService {
     throw ApiError.conflict('no live deployment on any stage — trigger a run first');
   }
 
-  private async readPipeline(orgId: string, pipelineId: string) {
-    const pipelineRows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(pipelines)
-        .where(and(eq(pipelines.id, pipelineId), eq(pipelines.orgId, orgId), sql`${pipelines.status} <> 'archived'`))
-        .limit(1),
-    );
-    if (!pipelineRows[0]) {
-      throw ApiError.notFound('pipeline');
-    }
-    const stages = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(pipelineStages).where(eq(pipelineStages.pipelineId, pipelineId)).orderBy(pipelineStages.position),
-    );
-    return { pipeline: pipelineRows[0], stages };
-  }
-
   /** The stage immediately after `afterPosition` (chaining input); null at the end. */
   async nextStage(orgId: string, pipelineId: string, afterPosition: number): Promise<typeof pipelineStages.$inferSelect | null> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(pipelineStages)
-        .where(and(eq(pipelineStages.pipelineId, pipelineId), sql`${pipelineStages.position} > ${afterPosition}`))
-        .orderBy(pipelineStages.position)
-        .limit(1),
-    );
-    return rows[0] ?? null;
+    return this.pipelinesRepo.nextStage(orgId, pipelineId, afterPosition);
   }
 
   /** Plan gate: `limits.canary === false` downgrades slicing strategies. */

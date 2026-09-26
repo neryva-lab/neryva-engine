@@ -76,7 +76,6 @@ export class MongoPurgeStepRepository implements IPurgeStepRepository {
   }): Promise<void> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.scopeId, 'scopeId');
-    const db = this.mongo.root;
     await this.mongo.withOrg(input.orgId, async (ctx: MongoTxContext) => {
       const tenantId = requireOrg(ctx);
       const sessionOpt = { session: ctx.session };
@@ -109,7 +108,6 @@ export class MongoPurgeStepRepository implements IPurgeStepRepository {
   }): Promise<void> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.scopeId, 'scopeId');
-    const db = this.mongo.root;
     await this.mongo.withOrg(input.orgId, async (ctx: MongoTxContext) => {
       await recordMongoOutboxEvent(ctx, this.mongo, {
         aggregateType: input.scopeType,
@@ -234,6 +232,19 @@ export class MongoPurgeStepRepository implements IPurgeStepRepository {
         },
         { session: ctx.session, upsert: true },
       );
+    });
+  }
+
+  async findTombstone(resourceType: string, resourceId: string): Promise<{ reason: string } | null> {
+    assertUuid(resourceId, 'resourceId');
+    const db = this.mongo.root;
+    return this.mongo.withBypass(async (ctx: MongoTxContext) => {
+      const tombstones = new PlatformCollection<TombstoneMongoDoc>(db.collection<TombstoneMongoDoc>('tombstones'));
+      const doc = await tombstones.findOne(
+        { resource_type: resourceType, resource_id: uuidToBinary(resourceId) },
+        { session: ctx.session, projection: { reason: 1 } },
+      );
+      return doc ? { reason: doc.reason } : null;
     });
   }
 

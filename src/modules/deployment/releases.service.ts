@@ -1,7 +1,7 @@
-import { and, desc, eq, gte, inArray } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
-import { deploymentEvents, deployments, environments, pipelines } from './schema';
+import { Inject, Injectable } from '@nestjs/common';
+import { type DeploymentRow } from './schema';
+import { type IDeploymentRunRepository } from './repositories/deployment.repository';
+import { DEPLOYMENT_RUN_REPOSITORY } from './repositories/repository-tokens';
 
 /**
  * The releases timeline (the console Releases view): completed/rolling runs
@@ -9,6 +9,10 @@ import { deploymentEvents, deployments, environments, pipelines } from './schema
  * — lead time, rollout time, canary duration, rollback state — all derived
  * from the deployment rows + their event logs. No new tables: a release IS
  * a deployment viewed through the delivery lens.
+ *
+ * Persistence goes through `IDeploymentRunRepository` (P3) — the concrete
+ * implementation is selected by `DB_PROVIDER`. This service is
+ * provider-blind: the card projection and metric derivations stay here.
  */
 export interface ReleaseCard {
   id: string;
@@ -45,30 +49,19 @@ const DEGRADED_ERROR_RATE = 0.05;
 
 @Injectable()
 export class ReleasesService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    @Inject(DEPLOYMENT_RUN_REPOSITORY) private readonly runsRepo: IDeploymentRunRepository,
+  ) {}
 
   async list(orgId: string, filter: { status?: string; limit?: number } = {}): Promise<{ summary: ReleasesSummary; releases: ReleaseCard[] }> {
     const since30d = new Date(Date.now() - 30 * DAY_MS).toISOString();
     const dayStart = new Date();
     dayStart.setUTCHours(0, 0, 0, 0);
 
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          deployment: deployments,
-          pipelineName: pipelines.name,
-          environmentName: environments.name,
-        })
-        .from(deployments)
-        .innerJoin(pipelines, eq(pipelines.id, deployments.pipelineId))
-        .innerJoin(environments, eq(environments.id, deployments.environmentId))
-        .where(and(eq(deployments.orgId, orgId), gte(deployments.createdAt, since30d)))
-        .orderBy(desc(deployments.createdAt))
-        .limit(200),
-    );
+    const rows = await this.runsRepo.listRecentWithContext(orgId, since30d, 200);
 
     // Canary duration per deployment: first canary.weight → status.live/rolled_back.
-    const canaryBoundaries = await this.canaryDurations(orgId, rows.map((r) => r.deployment.id));
+    const canaryBoundaries = await this.runsRepo.canaryBoundaries(orgId, rows.map((r) => r.deployment.id));
 
     const releases: ReleaseCard[] = [];
     let leadTimes: number[] = [];
@@ -107,7 +100,7 @@ export class ReleasesService {
   }
 
   private toCard(
-    d: typeof deployments.$inferSelect,
+    d: DeploymentRow,
     pipelineName: string,
     environmentName: string,
     canaryDurationSeconds: number | null,
@@ -153,59 +146,5 @@ export class ReleasesService {
         auto_rollback: d.status === 'rolled_back' && d.lastError !== null && !d.lastError.includes('manual'),
       },
     };
-  }
-
-  /** First-weight → terminal boundary per deployment, from the event log. */
-  private async canaryDurations(orgId: string, deploymentIds: string[]): Promise<Map<string, number>> {
-    const out = new Map<string, number>();
-    if (deploymentIds.length === 0) {
-      return out;
-    }
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          deploymentId: deploymentEvents.deploymentId,
-          kind: deploymentEvents.kind,
-          createdAt: deploymentEvents.createdAt,
-        })
-        .from(deploymentEvents)
-        .where(
-          and(
-            eq(deploymentEvents.orgId, orgId),
-            eq(deploymentEvents.kind, 'canary.weight'),
-            inArray(deploymentEvents.deploymentId, deploymentIds.slice(0, 200)),
-          ),
-        )
-        .orderBy(deploymentEvents.createdAt),
-    );
-    const firstWeight = new Map<string, string>();
-    for (const row of rows) {
-      if (!firstWeight.has(row.deploymentId)) {
-        firstWeight.set(row.deploymentId, row.createdAt);
-      }
-    }
-    const terminalRows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ deploymentId: deploymentEvents.deploymentId, createdAt: deploymentEvents.createdAt })
-        .from(deploymentEvents)
-        .where(
-          and(
-            eq(deploymentEvents.orgId, orgId),
-            eq(deploymentEvents.kind, 'status.live'),
-            inArray(deploymentEvents.deploymentId, deploymentIds.slice(0, 200)),
-          ),
-        ),
-    );
-    const terminal = new Map(terminalRows.map((r) => [r.deploymentId, r.createdAt]));
-    for (const [deploymentId, started] of firstWeight) {
-      const ended = terminal.get(deploymentId);
-      if (ended) {
-        const seconds = Math.round((Date.parse(ended) - Date.parse(started)) / 1000);
-        if (Number.isFinite(seconds) && seconds >= 0) {
-          out.set(deploymentId, seconds);
-        }
-      }
-    }
-    return out;
   }
 }

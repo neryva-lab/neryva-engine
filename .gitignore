@@ -64,3 +64,4 @@ var/keys
 dev_scripts/bin
 # cutover CLI resume state (never commit)
 .cutover-state.json
+*.rdb

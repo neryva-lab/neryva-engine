@@ -1,10 +1,10 @@
-import { eq } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { normalizeLadder } from './rollout';
-import { deploymentSettings, ROLLOUT_STRATEGIES, RolloutStrategy, SettingsRow } from './schema';
+import { ROLLOUT_STRATEGIES, RolloutStrategy, SettingsRow } from './schema';
+import { type IDeploymentSettingsRepository } from './repositories/settings.repository';
+import { DEPLOYMENT_SETTINGS_REPOSITORY } from './repositories/repository-tokens';
 
 /**
  * Org-level deployment settings (the settings page): default strategy,
@@ -12,6 +12,10 @@ import { deploymentSettings, ROLLOUT_STRATEGIES, RolloutStrategy, SettingsRow } 
  * lazily materialized — a fresh org reads pure defaults without a row.
  * Ladder input is normalized through rollout.ts so a malformed ladder can
  * never be stored (the trigger-time resolver trusts stored shape).
+ *
+ * Persistence goes through `IDeploymentSettingsRepository` (P3) — the
+ * concrete implementation is selected by `DB_PROVIDER`. This service is
+ * provider-blind.
  */
 export interface EffectiveSettings {
   defaultStrategy: RolloutStrategy;
@@ -23,16 +27,13 @@ export interface EffectiveSettings {
 @Injectable()
 export class SettingsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(DEPLOYMENT_SETTINGS_REPOSITORY) private readonly settingsRepo: IDeploymentSettingsRepository,
     private readonly audit: AuditService,
   ) {}
 
   /** Effective settings: stored row over built-in defaults (never null fields). */
   async get(orgId: string): Promise<EffectiveSettings> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx.select().from(deploymentSettings).where(eq(deploymentSettings.orgId, orgId)).limit(1),
-    );
-    const row: SettingsRow | undefined = rows[0];
+    const row: SettingsRow | null = await this.settingsRepo.getRow(orgId);
     if (!row) {
       return { defaultStrategy: 'canary', defaultLadder: [], autoRollback: true, defaultCanaryWeight: 10 };
     }
@@ -67,30 +68,15 @@ export class SettingsService {
         : undefined;
 
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(deploymentSettings)
-        .values({
-          orgId: input.orgId,
-          ...(strategy !== undefined ? { defaultStrategy: strategy } : {}),
-          ...(ladder !== undefined ? { defaultLadder: ladder } : {}),
-          ...(input.autoRollback !== undefined ? { autoRollback: input.autoRollback ? 1 : 0 } : {}),
-          ...(canaryWeight !== undefined ? { defaultCanaryWeight: canaryWeight } : {}),
-          updatedBy: input.actorId,
-          updatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: deploymentSettings.orgId,
-          set: {
-            ...(strategy !== undefined ? { defaultStrategy: strategy } : {}),
-            ...(ladder !== undefined ? { defaultLadder: ladder } : {}),
-            ...(input.autoRollback !== undefined ? { autoRollback: input.autoRollback ? 1 : 0 } : {}),
-            ...(canaryWeight !== undefined ? { defaultCanaryWeight: canaryWeight } : {}),
-            updatedBy: input.actorId,
-            updatedAt: now,
-          },
-        }),
-    );
+    await this.settingsRepo.upsert({
+      orgId: input.orgId,
+      ...(strategy !== undefined ? { defaultStrategy: strategy } : {}),
+      ...(ladder !== undefined ? { defaultLadder: ladder } : {}),
+      ...(input.autoRollback !== undefined ? { autoRollback: input.autoRollback } : {}),
+      ...(canaryWeight !== undefined ? { defaultCanaryWeight: canaryWeight } : {}),
+      updatedBy: input.actorId,
+      now,
+    });
     await this.audit.add({
       action: 'deployment.settings_updated',
       resourceType: 'deployment_settings',

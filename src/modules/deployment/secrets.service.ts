@@ -1,10 +1,11 @@
-import { and, eq, isNotNull, lte, or, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { envelopeDecrypt, envelopeEncrypt } from '../../common/infra/crypto/envelope';
-import { environments, secrets } from './schema';
+import { type IDeploymentSecretRepository, type SecretMetadata } from './repositories/secret.repository';
+import { DEPLOYMENT_SECRET_REPOSITORY } from './repositories/repository-tokens';
+import { type IDeploymentEnvironmentRepository } from './repositories/environment.repository';
+import { DEPLOYMENT_ENVIRONMENT_REPOSITORY } from './repositories/repository-tokens';
 
 /**
  * The per-environment secrets vault (D-5): values are sealed with the
@@ -23,6 +24,12 @@ import { environments, secrets } from './schema';
  * Rotation governance: expires_at + rotation_interval_days drive the daily
  * expiring scan; `version` counts overwrites (audit records THAT a
  * rotation happened, never WHAT the value was).
+ *
+ * Persistence goes through the P3 repository ports (P3) — the concrete
+ * implementations are selected by `DB_PROVIDER`. This service is
+ * provider-blind: envelope encryption/decryption, key derivation
+ * (`derivePreview`), expiry/cadence validation, and the
+ * plaintext-never-to-console guarantee all stay here.
  */
 const KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
 const DAY_MS = 86_400_000;
@@ -30,82 +37,24 @@ const DAY_MS = 86_400_000;
 @Injectable()
 export class SecretsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(DEPLOYMENT_SECRET_REPOSITORY) private readonly secretsRepo: IDeploymentSecretRepository,
+    @Inject(DEPLOYMENT_ENVIRONMENT_REPOSITORY) private readonly environmentsRepo: IDeploymentEnvironmentRepository,
     private readonly audit: AuditService,
   ) {}
 
   /** Metadata only — never ciphertext, never plaintext. */
-  async list(orgId: string, environmentId?: string): Promise<
-    Array<{
-      id: string;
-      environment_id: string;
-      key: string;
-      preview: string | null;
-      kms_ref: string | null;
-      version: number;
-      expires_at: string | null;
-      rotation_interval_days: number | null;
-      rotated_at: string | null;
-      last_used_at: string | null;
-      created_at: string;
-    }>
-  > {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          id: secrets.id,
-          environmentId: secrets.environmentId,
-          key: secrets.key,
-          preview: secrets.preview,
-          kmsRef: secrets.kmsRef,
-          version: secrets.version,
-          expiresAt: secrets.expiresAt,
-          rotationIntervalDays: secrets.rotationIntervalDays,
-          rotatedAt: secrets.rotatedAt,
-          lastUsedAt: secrets.lastUsedAt,
-          createdAt: secrets.createdAt,
-        })
-        .from(secrets)
-        .where(environmentId ? and(eq(secrets.orgId, orgId), eq(secrets.environmentId, environmentId)) : eq(secrets.orgId, orgId))
-        .orderBy(secrets.key),
-    );
-    return rows.map((row) => ({
-      id: row.id,
-      environment_id: row.environmentId,
-      key: row.key,
-      preview: row.preview,
-      kms_ref: row.kmsRef,
-      version: row.version,
-      expires_at: row.expiresAt,
-      rotation_interval_days: row.rotationIntervalDays,
-      rotated_at: row.rotatedAt,
-      last_used_at: row.lastUsedAt,
-      created_at: row.createdAt,
-    }));
+  async list(orgId: string, environmentId?: string): Promise<SecretMetadata[]> {
+    return this.secretsRepo.listMetadata(orgId, environmentId);
   }
 
   /** Vault totals for the secrets page header. */
   async stats(orgId: string): Promise<{ total: number; rotated_30d: number; expiring_soon: number; last_audited: string | null }> {
-    const monthAgo = new Date(Date.now() - 30 * DAY_MS).toISOString();
-    const soonCutoff = new Date(Date.now() + 14 * DAY_MS).toISOString();
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({
-          total: sql<number>`count(*)::int`,
-          rotated30d: sql<number>`(count(*) filter (where ${secrets.rotatedAt} >= ${monthAgo}))::int`,
-          expiringSoon: sql<number>`(count(*) filter (where ${secrets.expiresAt} is not null and ${secrets.expiresAt} <= ${soonCutoff}))::int`,
-        })
-        .from(secrets)
-        .where(eq(secrets.orgId, orgId)),
-    );
-    const auditRows = await this.db.withBypass((tx) =>
-      tx.execute(sql`select max(created_at)::text as last_at from audit_events where tenant_id = ${orgId} and action like 'deployment.secret%'`),
-    );
-    const lastAudited = (auditRows.rows?.[0] as { last_at?: string } | undefined)?.last_at ?? null;
+    const counts = await this.secretsRepo.stats(orgId);
+    const lastAudited = await this.secretsRepo.lastSecretAuditAt(orgId);
     return {
-      total: rows[0]?.total ?? 0,
-      rotated_30d: rows[0]?.rotated30d ?? 0,
-      expiring_soon: rows[0]?.expiringSoon ?? 0,
+      total: counts.total,
+      rotated_30d: counts.rotated_30d,
+      expiring_soon: counts.expiring_soon,
       last_audited: lastAudited,
     };
   }
@@ -132,35 +81,17 @@ export class SecretsService {
     const cadence = this.validateCadence(input.rotationIntervalDays);
     const ciphertext = envelopeEncrypt(input.value);
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(secrets)
-        .values({
-          orgId: input.orgId,
-          environmentId: input.environmentId,
-          key,
-          valueCiphertext: ciphertext,
-          kmsRef: input.kmsRef ?? null,
-          preview: derivePreview(input.value),
-          expiresAt: expiry,
-          rotationIntervalDays: cadence,
-          version: 1,
-          rotatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: [secrets.environmentId, secrets.key],
-          set: {
-            valueCiphertext: ciphertext,
-            kmsRef: input.kmsRef ?? null,
-            preview: derivePreview(input.value),
-            expiresAt: expiry,
-            rotationIntervalDays: cadence,
-            version: sql`${secrets.version} + 1`,
-            rotatedAt: now,
-            updatedAt: now,
-          },
-        }),
-    );
+    await this.secretsRepo.upsertSecret({
+      orgId: input.orgId,
+      environmentId: input.environmentId,
+      key,
+      valueCiphertext: ciphertext,
+      kmsRef: input.kmsRef ?? null,
+      preview: derivePreview(input.value),
+      expiresAt: expiry,
+      rotationIntervalDays: cadence,
+      now,
+    });
     await this.audit.add({
       action: 'deployment.secret_set',
       resourceType: 'deployment_secret',
@@ -175,14 +106,7 @@ export class SecretsService {
 
   /** Rotate = replace the sealed value (audited, value never recorded). */
   async rotate(input: { orgId: string; secretId: string; value: string; actorId: string }): Promise<void> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ id: secrets.id, environmentId: secrets.environmentId, key: secrets.key })
-        .from(secrets)
-        .where(and(eq(secrets.id, input.secretId), eq(secrets.orgId, input.orgId)))
-        .limit(1),
-    );
-    const existing = rows[0];
+    const existing = await this.secretsRepo.findById(input.orgId, input.secretId);
     if (!existing) {
       throw ApiError.notFound('secret');
     }
@@ -191,12 +115,13 @@ export class SecretsService {
     }
     const ciphertext = envelopeEncrypt(input.value);
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(secrets)
-        .set({ valueCiphertext: ciphertext, preview: derivePreview(input.value), version: sql`${secrets.version} + 1`, rotatedAt: now, updatedAt: now })
-        .where(and(eq(secrets.id, input.secretId), eq(secrets.orgId, input.orgId))),
-    );
+    await this.secretsRepo.rotateSecret({
+      orgId: input.orgId,
+      secretId: input.secretId,
+      valueCiphertext: ciphertext,
+      preview: derivePreview(input.value),
+      now,
+    });
     await this.audit.add({
       action: 'deployment.secret_rotated',
       resourceType: 'deployment_secret',
@@ -210,19 +135,11 @@ export class SecretsService {
   }
 
   async remove(input: { orgId: string; secretId: string; actorId: string }): Promise<void> {
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ id: secrets.id })
-        .from(secrets)
-        .where(and(eq(secrets.id, input.secretId), eq(secrets.orgId, input.orgId)))
-        .limit(1),
-    );
-    if (!rows[0]) {
+    const existing = await this.secretsRepo.findById(input.orgId, input.secretId);
+    if (!existing) {
       throw ApiError.notFound('secret');
     }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.delete(secrets).where(and(eq(secrets.id, input.secretId), eq(secrets.orgId, input.orgId))),
-    );
+    await this.secretsRepo.deleteSecret(input.orgId, input.secretId);
     await this.audit.add({
       action: 'deployment.secret_removed',
       resourceType: 'deployment_secret',
@@ -241,12 +158,7 @@ export class SecretsService {
    */
   async resolveForEnvironment(input: { orgId: string; environmentId: string; actorId: string }): Promise<Record<string, string>> {
     await this.assertEnvironment(input.orgId, input.environmentId);
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ key: secrets.key, valueCiphertext: secrets.valueCiphertext })
-        .from(secrets)
-        .where(and(eq(secrets.orgId, input.orgId), eq(secrets.environmentId, input.environmentId))),
-    );
+    const rows = await this.secretsRepo.fetchCiphertexts(input.orgId, input.environmentId);
     const out: Record<string, string> = {};
     for (const row of rows) {
       // A secret that no longer decrypts (e.g. envelope key custody rotated)
@@ -255,12 +167,7 @@ export class SecretsService {
       out[row.key] = envelopeDecrypt(row.valueCiphertext);
     }
     const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(secrets)
-        .set({ lastUsedAt: now })
-        .where(and(eq(secrets.orgId, input.orgId), eq(secrets.environmentId, input.environmentId))),
-    );
+    await this.secretsRepo.touchLastUsed(input.orgId, input.environmentId, now);
     await this.audit.add({
       action: 'deployment.secret_resolved',
       resourceType: 'deployment_secret',
@@ -276,39 +183,17 @@ export class SecretsService {
 
   /** The daily expiring scan (worker): soon-expiring + cadence-overdue secrets. */
   async scanExpiring(withinDays: number): Promise<Array<{ orgId: string; environmentId: string; key: string; expiresAt: string | null; overdueByDays: number }>> {
-    const soonCutoff = new Date(Date.now() + withinDays * DAY_MS).toISOString();
-    const overdueCutoff = new Date(Date.now() - DAY_MS).toISOString();
-    return this.db.withBypass((tx) =>
-      tx
-        .select({
-          orgId: secrets.orgId,
-          environmentId: secrets.environmentId,
-          key: secrets.key,
-          expiresAt: secrets.expiresAt,
-          rotatedAt: secrets.rotatedAt,
-          intervalDays: secrets.rotationIntervalDays,
-        })
-        .from(secrets)
-        .where(
-          or(
-            and(isNotNull(secrets.expiresAt), lte(secrets.expiresAt, soonCutoff)),
-            // Cadence overdue: rotated_at + interval already in the past.
-            sql`${secrets.rotationIntervalDays} is not null and (${secrets.rotatedAt} + (${secrets.rotationIntervalDays} || ' days')::interval) < ${overdueCutoff}`,
-          ),
-        )
-        .limit(500),
-    ).then((rows) =>
-      rows.map((row) => ({
-        orgId: row.orgId,
-        environmentId: row.environmentId,
-        key: row.key,
-        expiresAt: row.expiresAt,
-        overdueByDays:
-          row.intervalDays && row.rotatedAt
-            ? Math.max(0, Math.round((Date.now() - Date.parse(row.rotatedAt) - row.intervalDays * DAY_MS) / DAY_MS))
-            : 0,
-      })),
-    );
+    const rows = await this.secretsRepo.scanExpiring(withinDays);
+    return rows.map((row) => ({
+      orgId: row.orgId,
+      environmentId: row.environmentId,
+      key: row.key,
+      expiresAt: row.expiresAt,
+      overdueByDays:
+        row.intervalDays && row.rotatedAt
+          ? Math.max(0, Math.round((Date.now() - Date.parse(row.rotatedAt) - row.intervalDays * DAY_MS) / DAY_MS))
+          : 0,
+    }));
   }
 
   private validateExpiry(value: string | null | undefined): string | null {
@@ -333,16 +218,9 @@ export class SecretsService {
   }
 
   private async assertEnvironment(orgId: string, environmentId: string): Promise<void> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ id: environments.id })
-        .from(environments)
-        .where(and(eq(environments.id, environmentId), eq(environments.orgId, orgId)))
-        .limit(1),
-    );
-    if (!rows[0]) {
-      throw ApiError.notFound('environment in this organization');
-    }
+    // Throws `not_found` ('environment in this organization') when missing —
+    // the exact error the previous inline query produced.
+    await this.environmentsRepo.getInOrg(orgId, environmentId);
   }
 }
 

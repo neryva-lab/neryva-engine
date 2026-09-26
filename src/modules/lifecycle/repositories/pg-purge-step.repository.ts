@@ -174,4 +174,15 @@ export class PgPurgeStepRepository implements IPurgeStepRepository {
         .onConflictDoNothing();
     });
   }
+
+  async findTombstone(resourceType: string, resourceId: string): Promise<{ reason: string } | null> {
+    const rows = await this.db.withBypass((tx) =>
+      tx
+        .select({ reason: tombstones.reason })
+        .from(tombstones)
+        .where(and(eq(tombstones.resourceType, resourceType), eq(tombstones.resourceId, resourceId)))
+        .limit(1),
+    );
+    return rows[0] ?? null;
+  }
 }

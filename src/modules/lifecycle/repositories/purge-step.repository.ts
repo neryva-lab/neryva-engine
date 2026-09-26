@@ -78,4 +78,11 @@ export interface IPurgeStepRepository {
     scopeId: string;
     reason: string;
   }): Promise<void>;
+
+  /**
+   * Tombstone lookup for the typed-410 guard (`assertNotTombstoned`).
+   * Platform-plane (withBypass): the caller checks a resource id that may
+   * belong to any tenant. Returns the tombstone's reason, or null.
+   */
+  findTombstone(resourceType: string, resourceId: string): Promise<{ reason: string } | null>;
 }

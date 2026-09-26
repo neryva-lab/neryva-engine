@@ -18,6 +18,7 @@ import { ReleasesService } from './releases.service';
 import { RuntimeDeploymentsController } from './runtime-deployments.controller';
 import { SecretsService } from './secrets.service';
 import { SettingsService } from './settings.service';
+import { DeploymentRepositoriesModule } from './repositories/deployment-repositories.module';
 
 /** The product registers its real summary provider over the console's stub. */
 @Injectable()
@@ -47,7 +48,7 @@ export class DeploymentBoot implements OnModuleInit {
  *                            serving runtime's config + secrets resolve)
  */
 @Module({
-  imports: [ConsoleModule, BillingModule, OrganizationsModule, NotificationsModule],
+  imports: [ConsoleModule, BillingModule, OrganizationsModule, NotificationsModule, DeploymentRepositoriesModule],
   controllers: [DeploymentController, RuntimeDeploymentsController, InternalDeploymentsController],
   providers: [
     PipelinesService,

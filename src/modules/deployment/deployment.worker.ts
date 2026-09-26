@@ -1,17 +1,17 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { and, eq, lt } from 'drizzle-orm';
+import { Inject } from '@nestjs/common';
 import type { Job } from 'bullmq';
 import { Worker } from 'bullmq';
 import { env } from '../../common/config/env';
 import { QueueService, bullQueueName } from '../../common/infra/queue.service';
-import { DbService } from '../../common/infra/db/db.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EntitlementsService } from '../organizations/entitlements.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DeploymentWorkflow, RunJobData } from './deployment.workflow';
 import { DeploymentsService } from './deployments.service';
 import { SecretsService } from './secrets.service';
-import { deploymentEvents, deployments } from './schema';
+import { DEPLOYMENT_RUN_REPOSITORY } from './repositories/repository-tokens';
+import { type IDeploymentRunRepository } from './repositories/deployment.repository';
 
 /**
  * The deployment namespace worker (partitioning Tier-1): the SINGLE BullMQ
@@ -40,7 +40,7 @@ export class DeploymentWorker implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly queues: QueueService,
-    private readonly db: DbService,
+    @Inject(DEPLOYMENT_RUN_REPOSITORY) private readonly runsRepo: IDeploymentRunRepository,
     private readonly audit: AuditService,
     private readonly workflow: DeploymentWorkflow,
     private readonly deploymentsService: DeploymentsService,
@@ -108,26 +108,17 @@ export class DeploymentWorker implements OnModuleInit, OnModuleDestroy {
 
   /** Enforce plan retention_days on the event log (run rows stay forever). */
   private async retention(): Promise<number> {
-    const orgRows = await this.db.withBypass((tx) =>
-      tx
-        .selectDistinct({ orgId: deployments.orgId })
-        .from(deployments),
-    );
+    const orgIds = await this.runsRepo.distinctOrgIds();
     let purged = 0;
-    for (const { orgId } of orgRows) {
+    for (const orgId of orgIds) {
       const rows = await this.entitlements.listForOrg(orgId);
       const row = rows.find((r) => r.product === 'deployment');
       const limits = (row?.limits ?? {}) as Record<string, unknown>;
       const days = typeof limits.retention_days === 'number' && limits.retention_days > 0 ? (limits.retention_days as number) : DEFAULT_RETENTION_DAYS;
       const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-      const deleted = await this.db.withBypass((tx) =>
-        tx
-          .delete(deploymentEvents)
-          .where(and(eq(deploymentEvents.orgId, orgId), lt(deploymentEvents.createdAt, cutoff)))
-          .returning({ id: deploymentEvents.id }),
-      );
-      if (deleted.length > 0) {
-        purged += deleted.length;
+      const deleted = await this.runsRepo.purgeEventsBefore(orgId, cutoff);
+      if (deleted > 0) {
+        purged += deleted;
         await this.audit.add({
           action: 'deployment.events_purged',
           resourceType: 'deployment',
@@ -136,12 +127,12 @@ export class DeploymentWorker implements OnModuleInit, OnModuleDestroy {
           actorId: 'system:deployment-worker',
           tenantId: orgId,
           productTag: 'deployment',
-          details: { purged: deleted.length, retention_days: days },
+          details: { purged: deleted, retention_days: days },
         });
       }
     }
     if (purged > 0) {
-      DeploymentWorker.logger.log(`retention: purged ${purged} event row(s) across ${orgRows.length} org(s)`);
+      DeploymentWorker.logger.log(`retention: purged ${purged} event row(s) across ${orgIds.length} org(s)`);
     }
     return purged;
   }

@@ -1,10 +1,14 @@
-import { and, desc, eq, ne, sql } from 'drizzle-orm';
-import { Injectable } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError } from '../../common/http/api-error';
 import { EntitlementsService } from '../organizations/entitlements.service';
-import { deployments, environments, pipelineStages } from './schema';
+import { environments } from './schema';
+import { type IDeploymentEnvironmentRepository } from './repositories/environment.repository';
+import { DEPLOYMENT_ENVIRONMENT_REPOSITORY } from './repositories/repository-tokens';
+import { type IDeploymentPipelineRepository } from './repositories/pipeline.repository';
+import { DEPLOYMENT_PIPELINE_REPOSITORY } from './repositories/repository-tokens';
+import { type IDeploymentRunRepository } from './repositories/deployment.repository';
+import { DEPLOYMENT_RUN_REPOSITORY } from './repositories/repository-tokens';
 
 /**
  * Environments (D-1/D-5): dev/staging/prod/custom containers with pinned
@@ -20,35 +24,29 @@ import { deployments, environments, pipelineStages } from './schema';
  *
  * Plan limits (max_environments) ride the entitlement row — the trial plan's
  * "2 environments" is enforced HERE at creation, not by trust.
+ *
+ * Persistence goes through the P3 repository ports (P3) — the concrete
+ * implementations are selected by `DB_PROVIDER`. This service is
+ * provider-blind.
  */
 const NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
 @Injectable()
 export class EnvironmentsService {
   constructor(
-    private readonly db: DbService,
+    @Inject(DEPLOYMENT_ENVIRONMENT_REPOSITORY) private readonly environmentsRepo: IDeploymentEnvironmentRepository,
+    @Inject(DEPLOYMENT_PIPELINE_REPOSITORY) private readonly pipelinesRepo: IDeploymentPipelineRepository,
+    @Inject(DEPLOYMENT_RUN_REPOSITORY) private readonly runsRepo: IDeploymentRunRepository,
     private readonly audit: AuditService,
     private readonly entitlements: EntitlementsService,
   ) {}
 
   async list(orgId: string): Promise<Array<typeof environments.$inferSelect>> {
-    return this.db.withOrg(orgId, (tx) =>
-      tx.select().from(environments).where(eq(environments.orgId, orgId)).orderBy(environments.createdAt),
-    );
+    return this.environmentsRepo.list(orgId);
   }
 
   async get(orgId: string, environmentId: string): Promise<typeof environments.$inferSelect> {
-    const rows = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select()
-        .from(environments)
-        .where(and(eq(environments.id, environmentId), eq(environments.orgId, orgId)))
-        .limit(1),
-    );
-    if (!rows[0]) {
-      throw ApiError.notFound('environment');
-    }
-    return rows[0];
+    return this.environmentsRepo.get(orgId, environmentId);
   }
 
   async create(input: {
@@ -76,48 +74,36 @@ export class EnvironmentsService {
     // Plan ceiling: limits.max_environments (null/absent = unlimited).
     const max = await this.planLimit(input.orgId, 'max_environments');
     if (max !== null) {
-      const countRows = await this.db.withOrg(input.orgId, (tx) =>
-        tx.select({ count: sql<number>`count(*)::int` }).from(environments).where(eq(environments.orgId, input.orgId)),
-      );
-      if ((countRows[0]?.count ?? 0) >= max) {
+      const count = await this.environmentsRepo.count(input.orgId);
+      if (count >= max) {
         throw ApiError.conflict(`plan limit reached: ${max} environment(s) — upgrade to add more`, { limit: max });
       }
     }
 
-    const inserted = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(environments)
-        .values({
-          orgId: input.orgId,
-          projectId: input.projectId ?? null,
-          name,
-          tier,
-          region: input.region?.trim().slice(0, 64) ?? null,
-          description: input.description?.trim().slice(0, 512) ?? null,
-          guardrailProfile: input.guardrailProfile ?? null,
-          quotaRef: input.quotaRef ?? null,
-          approvalMode,
-          autoPromote: input.autoPromote === false ? 0 : 1,
-          concurrency,
-          createdBy: null,
-        })
-        .onConflictDoNothing({ target: [environments.orgId, environments.name] })
-        .returning(),
-    );
-    if (!inserted[0]) {
-      throw ApiError.conflict(`environment "${name}" already exists`);
-    }
+    const created = await this.environmentsRepo.create({
+      orgId: input.orgId,
+      name,
+      tier,
+      region: input.region?.trim().slice(0, 64) ?? null,
+      description: input.description?.trim().slice(0, 512) ?? null,
+      projectId: input.projectId ?? null,
+      guardrailProfile: input.guardrailProfile ?? null,
+      quotaRef: input.quotaRef ?? null,
+      approvalMode,
+      autoPromote: input.autoPromote !== false,
+      concurrency,
+    });
     await this.audit.add({
       action: 'deployment.environment_created',
       resourceType: 'deployment_environment',
-      resourceId: inserted[0].id,
+      resourceId: created.id,
       actorType: 'account',
       actorId: input.actorId,
       tenantId: input.orgId,
       productTag: 'deployment',
       details: { name, tier, approval_mode: approvalMode, concurrency },
     });
-    return inserted[0];
+    return created;
   }
 
   async update(input: {
@@ -137,26 +123,18 @@ export class EnvironmentsService {
     const approvalMode = input.approvalMode === undefined ? undefined : input.approvalMode === 'manual' ? 'manual' : 'auto';
     const status = input.status === undefined ? undefined : input.status === 'maintenance' ? 'maintenance' : 'active';
     const concurrency = input.concurrency === undefined ? undefined : Math.min(Math.max(Math.floor(input.concurrency), 1), 10);
-    const updated = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(environments)
-        .set({
-          ...(input.pinnedAgentVersion !== undefined ? { pinnedAgentVersion: input.pinnedAgentVersion } : {}),
-          ...(input.guardrailProfile !== undefined ? { guardrailProfile: input.guardrailProfile } : {}),
-          ...(input.region !== undefined ? { region: input.region } : {}),
-          ...(input.description !== undefined ? { description: input.description } : {}),
-          ...(approvalMode !== undefined ? { approvalMode } : {}),
-          ...(input.autoPromote !== undefined ? { autoPromote: input.autoPromote ? 1 : 0 } : {}),
-          ...(concurrency !== undefined ? { concurrency } : {}),
-          ...(status !== undefined ? { status } : {}),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(eq(environments.id, input.environmentId), eq(environments.orgId, input.orgId)))
-        .returning(),
-    );
-    if (!updated[0]) {
-      throw ApiError.notFound('environment');
-    }
+    const updated = await this.environmentsRepo.update({
+      orgId: input.orgId,
+      environmentId: input.environmentId,
+      ...(input.pinnedAgentVersion !== undefined ? { pinnedAgentVersion: input.pinnedAgentVersion } : {}),
+      ...(input.guardrailProfile !== undefined ? { guardrailProfile: input.guardrailProfile } : {}),
+      ...(input.region !== undefined ? { region: input.region } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(approvalMode !== undefined ? { approvalMode } : {}),
+      ...(input.autoPromote !== undefined ? { autoPromote: input.autoPromote } : {}),
+      ...(concurrency !== undefined ? { concurrency } : {}),
+      ...(status !== undefined ? { status } : {}),
+    });
     await this.audit.add({
       action: 'deployment.environment_updated',
       resourceType: 'deployment_environment',
@@ -175,7 +153,7 @@ export class EnvironmentsService {
         ...(input.region !== undefined ? { region: input.region ?? '' } : {}),
       },
     });
-    return updated[0];
+    return updated;
   }
 
   /**
@@ -185,39 +163,19 @@ export class EnvironmentsService {
    */
   async remove(input: { orgId: string; environmentId: string; actorId: string }): Promise<void> {
     const env = await this.get(input.orgId, input.environmentId);
-    const stageRows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(pipelineStages)
-        .where(and(eq(pipelineStages.orgId, input.orgId), eq(pipelineStages.environmentId, input.environmentId))),
-    );
-    if ((stageRows[0]?.count ?? 0) > 0) {
-      throw ApiError.conflict(`environment "${env.name}" is bound to ${stageRows[0]?.count} pipeline stage(s) — remove those first`);
+    const stageCount = await this.pipelinesRepo.countStagesForEnvironment(input.orgId, input.environmentId);
+    if (stageCount > 0) {
+      throw ApiError.conflict(`environment "${env.name}" is bound to ${stageCount} pipeline stage(s) — remove those first`);
     }
-    const activeRows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(deployments)
-        .where(
-          and(
-            eq(deployments.orgId, input.orgId),
-            eq(deployments.environmentId, input.environmentId),
-            sql`${deployments.status} in ('pending', 'gated', 'rolling')`,
-          ),
-        ),
-    );
-    if ((activeRows[0]?.count ?? 0) > 0) {
-      throw ApiError.conflict(`environment "${env.name}" has ${activeRows[0]?.count} active run(s) — wait or cancel them`);
+    const activeCount = await this.runsRepo.countActiveRuns(input.orgId, { environmentId: input.environmentId });
+    if (activeCount > 0) {
+      throw ApiError.conflict(`environment "${env.name}" has ${activeCount} active run(s) — wait or cancel them`);
     }
-    const totalRows = await this.db.withOrg(input.orgId, (tx) =>
-      tx.select({ count: sql<number>`count(*)::int` }).from(environments).where(eq(environments.orgId, input.orgId)),
-    );
-    if ((totalRows[0]?.count ?? 0) <= 1) {
+    const total = await this.environmentsRepo.count(input.orgId);
+    if (total <= 1) {
       throw ApiError.conflict('the last environment cannot be deleted — a pipeline stage needs a promotion target');
     }
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx.delete(environments).where(and(eq(environments.id, input.environmentId), eq(environments.orgId, input.orgId))),
-    );
+    await this.environmentsRepo.remove({ orgId: input.orgId, environmentId: input.environmentId });
     await this.audit.add({
       action: 'deployment.environment_removed',
       resourceType: 'deployment_environment',
@@ -234,13 +192,7 @@ export class EnvironmentsService {
 
   /** A run went live: the environment now serves this version. */
   async markLive(input: { orgId: string; environmentId: string; deploymentId: string; version: string }): Promise<void> {
-    const now = new Date().toISOString();
-    await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .update(environments)
-        .set({ liveDeploymentId: input.deploymentId, liveVersion: input.version, pinnedAgentVersion: input.version, lastDeployedAt: now, updatedAt: now })
-        .where(and(eq(environments.id, input.environmentId), eq(environments.orgId, input.orgId))),
-    );
+    await this.environmentsRepo.markLive(input);
   }
 
   /**
@@ -249,29 +201,13 @@ export class EnvironmentsService {
    * serving state when nothing else ever went live. Returns the restored row.
    */
   async restorePreviousLive(orgId: string, environmentId: string, excludeDeploymentId: string): Promise<typeof environments.$inferSelect | null> {
-    const previous = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .select({ id: deployments.id, version: deployments.agentVersion })
-        .from(deployments)
-        .where(and(eq(deployments.orgId, orgId), eq(deployments.environmentId, environmentId), eq(deployments.status, 'live'), ne(deployments.id, excludeDeploymentId)))
-        .orderBy(desc(deployments.completedAt))
-        .limit(1),
-    );
-    const now = new Date().toISOString();
-    const restored = previous[0];
-    const updated = await this.db.withOrg(orgId, (tx) =>
-      tx
-        .update(environments)
-        .set({
-          liveDeploymentId: restored?.id ?? null,
-          liveVersion: restored?.version ?? null,
-          pinnedAgentVersion: restored?.version ?? null,
-          updatedAt: now,
-        })
-        .where(and(eq(environments.id, environmentId), eq(environments.orgId, orgId)))
-        .returning(),
-    );
-    return updated[0] ?? null;
+    const previous = await this.runsRepo.findPreviousLive(orgId, environmentId, excludeDeploymentId);
+    return this.environmentsRepo.setLiveState({
+      orgId,
+      environmentId,
+      deploymentId: previous?.id ?? null,
+      version: previous?.version ?? null,
+    });
   }
 
   async planLimit(orgId: string, key: string): Promise<number | null> {

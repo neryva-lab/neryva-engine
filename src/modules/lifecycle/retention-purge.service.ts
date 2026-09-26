@@ -1,18 +1,20 @@
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { DbService } from '../../common/infra/db/db.service';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { StorageService } from '../../common/infra/storage/storage.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { ApiError, ERROR_CODES } from '../../common/http/api-error';
-import { uuidv7 } from '../../common/ids/uuidv7';
-import { recordOutboxEvent } from '../../common/infra/outbox/outbox.service';
-import { conversations, messages } from '../conversations/schema';
-import { artifacts } from '../knowledge/schema';
-import { memoryItems } from '../knowledge/schema';
 import { env } from '../../common/config/env';
-import { legacyTenants } from '../../common/infra/db/legacy-schema';
-import { legalHolds, purgeTasks, PurgeTask, retentionPolicies, tombstones } from './lifecycle.schema';
+import { PurgeTask } from './lifecycle.schema';
 import { assertUuid } from './assert';
+import {
+  PURGE_STEPS,
+  type IPurgeTaskRepository,
+  type PurgeStep,
+} from './repositories/purge-task.repository';
+import { PURGE_TASK_REPOSITORY } from './repositories/repository-tokens';
+import { type IPurgeStepRepository } from './repositories/purge-step.repository';
+import { PURGE_STEP_REPOSITORY } from './repositories/repository-tokens';
+import { type IRetentionPolicyRepository } from './repositories/retention-policy.repository';
+import { RETENTION_POLICY_REPOSITORY } from './repositories/repository-tokens';
 
 /**
  * Retention + purge — Phase 9.3/9.4/9.6/9.8 (ledger). Deletion is a WORKFLOW,
@@ -26,9 +28,15 @@ import { assertUuid } from './assert';
  * the persisted step. An active legal hold BLOCKS the purge (state=blocked)
  * while unrelated retention work continues. After `tombstone`, stale IDs are
  * rejected with typed 410s (Tombstones.assertNotTombstoned).
+ *
+ * Persistence goes through the P3 repository ports (`IPurgeTaskRepository`,
+ * `IPurgeStepRepository`, `IRetentionPolicyRepository`) — the concrete
+ * implementation is selected by `DB_PROVIDER` in
+ * `LifecycleRepositoriesModule`. This service is provider-blind: no drizzle,
+ * no mongo driver, no provider conditionals.
  */
-export const PURGE_STEPS = ['authorize', 'check_holds', 'mark_unavailable', 'emit_derived_deletion', 'purge_objects', 'purge_content', 'tombstone', 'done'] as const;
-export type PurgeStep = (typeof PURGE_STEPS)[number];
+export { PURGE_STEPS };
+export type { PurgeStep };
 
 /** Retention sweep cadence: hourly. Sweep only creates purge tasks; the purge
  * worker's tick advances them, so a sweep is cheap and idempotent. */
@@ -42,7 +50,9 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   private ticking = false;
 
   constructor(
-    private readonly db: DbService,
+    @Inject(PURGE_TASK_REPOSITORY) private readonly purgeTasks: IPurgeTaskRepository,
+    @Inject(PURGE_STEP_REPOSITORY) private readonly purgeSteps: IPurgeStepRepository,
+    @Inject(RETENTION_POLICY_REPOSITORY) private readonly retentionPolicies: IRetentionPolicyRepository,
     private readonly storage: StorageService,
     private readonly audit: AuditService,
   ) {}
@@ -54,23 +64,12 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     if (!Number.isInteger(input.keepDays) || input.keepDays < 1) {
       throw ApiError.validation({ keep_days: 'must be a positive integer' });
     }
-    await this.db.withOrg(input.orgId, async (tx) => {
-      // True upsert — a changed keep_days must take effect, not be silently
-      // swallowed by a DO NOTHING.
-      await tx
-        .insert(retentionPolicies)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          resourceType: input.resourceType,
-          retentionClass: input.retentionClass,
-          keepUntilRule: { keep_days: input.keepDays },
-          createdBy: input.actor,
-        })
-        .onConflictDoUpdate({
-          target: [retentionPolicies.organizationId, retentionPolicies.resourceType, retentionPolicies.retentionClass],
-          set: { keepUntilRule: { keep_days: input.keepDays } },
-        });
+    await this.retentionPolicies.upsertPolicy({
+      orgId: input.orgId,
+      resourceType: input.resourceType,
+      retentionClass: input.retentionClass,
+      keepDays: input.keepDays,
+      actor: input.actor,
     });
     await this.audit.add({
       action: 'retention.policy_upserted',
@@ -86,25 +85,7 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   /** Sweep: create purge tasks for artifacts past their keep_until window. */
   async sweepRetention(input: { orgId: string }): Promise<number> {
     assertUuid(input.orgId, 'orgId');
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const created = await tx.execute(sql`
-        insert into purge_tasks (id, organization_id, scope_type, scope_id, reason)
-        select gen_random_uuid(), a.organization_id, 'artifact', a.id, 'retention_expiry'
-        from artifacts a
-        join retention_policies p on p.organization_id = a.organization_id
-          and p.resource_type = 'artifact' and p.retention_class = a.retention_class
-        where a.organization_id = ${input.orgId}::uuid
-          and a.state = 'active'
-          and a.created_at < now() - ((p.keep_until_rule->>'keep_days')::int * interval '1 day')
-          and not exists (
-            select 1 from purge_tasks pt
-            where pt.organization_id = a.organization_id and pt.scope_id = a.id
-              and pt.state in ('pending','in_progress','blocked','done')
-          )
-        returning id
-      `);
-      return created.rows.length;
-    });
+    return this.retentionPolicies.sweepArtifactRetention(input.orgId);
   }
 
   /**
@@ -116,25 +97,7 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
    */
   async sweepConversationRetention(input: { orgId: string }): Promise<number> {
     assertUuid(input.orgId, 'orgId');
-    return this.db.withOrg(input.orgId, async (tx) => {
-      const created = await tx.execute(sql`
-        insert into purge_tasks (id, organization_id, scope_type, scope_id, reason)
-        select gen_random_uuid(), c.organization_id, 'conversation', c.id, 'retention_expiry'
-        from conversations c
-        join tenants t on t.id = c.organization_id::text
-        where c.organization_id = ${input.orgId}::uuid
-          and t.retention_days is not null
-          and c.status <> 'deleted'
-          and c.created_at < now() - (t.retention_days * interval '1 day')
-          and not exists (
-            select 1 from purge_tasks pt
-            where pt.organization_id = c.organization_id and pt.scope_id = c.id
-              and pt.state in ('pending','in_progress','blocked','done')
-          )
-        returning id
-      `);
-      return created.rows.length;
-    });
+    return this.retentionPolicies.sweepConversationRetention(input.orgId);
   }
 
   /**
@@ -145,14 +108,14 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
    */
   async sweepAllRetention(): Promise<void> {
     try {
-      const rows = await this.db.withBypass((tx) => tx.select({ id: legacyTenants.id }).from(legacyTenants));
+      const tenantIds = await this.retentionPolicies.listTenantIds();
       let created = 0;
-      for (const row of rows) {
+      for (const orgId of tenantIds) {
         try {
-          created += await this.sweepRetention({ orgId: row.id });
-          created += await this.sweepConversationRetention({ orgId: row.id });
+          created += await this.sweepRetention({ orgId });
+          created += await this.sweepConversationRetention({ orgId });
         } catch (err) {
-          RetentionPurgeService.logger.warn(`retention sweep failed for org ${row.id}: ${(err as Error).message}`);
+          RetentionPurgeService.logger.warn(`retention sweep failed for org ${orgId}: ${(err as Error).message}`);
         }
       }
       if (created > 0) {
@@ -169,28 +132,22 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   async enqueuePurge(input: { orgId: string; scopeType: string; scopeId: string; reason: string; actor: string }): Promise<PurgeTask> {
     assertUuid(input.orgId, 'orgId');
     assertUuid(input.scopeId, 'scopeId');
-    const rows = await this.db.withOrg(input.orgId, (tx) =>
-      tx
-        .insert(purgeTasks)
-        .values({
-          id: uuidv7(),
-          organizationId: input.orgId,
-          scopeType: input.scopeType,
-          scopeId: input.scopeId,
-          reason: input.reason,
-        })
-        .returning(),
-    );
+    const task = await this.purgeTasks.enqueuePurge({
+      orgId: input.orgId,
+      scopeType: input.scopeType,
+      scopeId: input.scopeId,
+      reason: input.reason,
+    });
     await this.audit.add({
       action: 'purge.enqueued',
       resourceType: 'purge_task',
-      resourceId: rows[0].id,
+      resourceId: task.id,
       actorType: 'account',
       actorId: input.actor,
       tenantId: input.orgId,
       details: { scope_type: input.scopeType, scope_id: input.scopeId, reason: input.reason },
     });
-    return rows[0];
+    return task;
   }
 
   /** One worker tick: advance one purge task by one step. */
@@ -198,45 +155,18 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      const task = await this.claimOne();
+      const task = await this.purgeTasks.claimOne();
       if (!task) return;
       try {
         await this.advance(task);
       } finally {
-        await this.db.withBypass(async (tx) => {
-          await tx.update(purgeTasks).set({ lockedAt: null }).where(eq(purgeTasks.id, task.id));
-        });
+        await this.purgeTasks.unlock(task.id);
       }
     } catch (err) {
       RetentionPurgeService.logger.warn(`purge tick failed: ${(err as Error).message}`);
     } finally {
       this.ticking = false;
     }
-  }
-
-  private async claimOne(): Promise<PurgeTask | null> {
-    const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
-    return this.db.withBypass(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(purgeTasks)
-        .where(
-          and(
-            inArray(purgeTasks.state, ['pending', 'in_progress']),
-            or(isNull(purgeTasks.lockedAt), lte(purgeTasks.lockedAt, staleBefore)),
-          ),
-        )
-        .orderBy(asc(purgeTasks.createdAt))
-        .limit(1)
-        .for('update', { skipLocked: true });
-      if (rows.length === 0) return null;
-      const updated = await tx
-        .update(purgeTasks)
-        .set({ state: 'in_progress', lockedAt: new Date().toISOString() })
-        .where(eq(purgeTasks.id, rows[0].id))
-        .returning();
-      return updated[0];
-    });
   }
 
   private async advance(task: PurgeTask): Promise<void> {
@@ -268,35 +198,15 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (err) {
       if ((err as Error).message === 'blocked_by_legal_hold') {
-        await this.db.withBypass(async (tx) => {
-          await tx
-            .update(purgeTasks)
-            .set({ state: 'blocked', step: 'check_holds', lastError: 'blocked_by_legal_hold', lockedAt: null })
-            .where(eq(purgeTasks.id, task.id));
-        });
+        await this.purgeTasks.markBlocked(task.id);
         return;
       }
-      await this.db.withBypass(async (tx) => {
-        await tx
-          .update(purgeTasks)
-          .set({ state: 'failed', lastError: (err as Error).message.slice(0, 4000), lockedAt: null })
-          .where(eq(purgeTasks.id, task.id));
-      });
+      await this.purgeTasks.markFailed(task.id, (err as Error).message);
     }
   }
 
   private async toStep(task: PurgeTask, step: PurgeStep, evidence?: Record<string, unknown>): Promise<void> {
-    await this.db.withBypass(async (tx) => {
-      await tx
-        .update(purgeTasks)
-        .set({
-          step,
-          state: step === 'done' ? 'done' : 'in_progress',
-          finishedAt: step === 'done' ? new Date().toISOString() : null,
-          ...(evidence ? { evidence: { ...(task.evidence as Record<string, unknown> ?? {}), ...evidence } } : {}),
-        })
-        .where(eq(purgeTasks.id, task.id));
-    });
+    await this.purgeTasks.advanceStep(task, step, evidence);
   }
 
   private async stepAuthorize(task: PurgeTask): Promise<void> {
@@ -307,25 +217,8 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async stepCheckHolds(task: PurgeTask): Promise<void> {
-    const holds = await this.db.withOrg(task.organizationId, (tx) =>
-      tx
-        .select()
-        .from(legalHolds)
-        .where(
-          and(
-            eq(legalHolds.organizationId, task.organizationId),
-            eq(legalHolds.status, 'active'),
-            // An expired hold no longer blocks — the purge gate is the ACTIVE window.
-            or(isNull(legalHolds.expiresAt), sql`${legalHolds.expiresAt} > now()`),
-            or(
-              eq(legalHolds.scopeType, 'organization'),
-              and(eq(legalHolds.scopeType, task.scopeType), eq(legalHolds.scopeId, task.scopeId)),
-            ),
-          ),
-        )
-        .limit(1),
-    );
-    if (holds.length > 0) {
+    const blocked = await this.purgeSteps.findBlockingHold(task.organizationId, task.scopeType, task.scopeId);
+    if (blocked) {
       throw new Error('blocked_by_legal_hold');
     }
     await this.toStep(task, 'mark_unavailable');
@@ -334,28 +227,24 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   private async stepMarkUnavailable(task: PurgeTask): Promise<void> {
     // Product surface unavailable BEFORE anything is destroyed. Artifacts use
     // the DDL-sanctioned 'retiring' state (chk_artifacts_state).
-    await this.db.withOrg(task.organizationId, async (tx) => {
-      if (task.scopeType === 'conversation') {
-        await tx.update(conversations).set({ status: 'deleted', updatedAt: new Date().toISOString() }).where(eq(conversations.id, task.scopeId));
-      } else {
-        await tx.update(artifacts).set({ state: 'retiring', updatedAt: new Date().toISOString() }).where(eq(artifacts.id, task.scopeId));
-      }
+    await this.purgeSteps.markUnavailable({
+      orgId: task.organizationId,
+      scopeType: task.scopeType as 'conversation' | 'artifact',
+      scopeId: task.scopeId,
     });
     await this.toStep(task, 'emit_derived_deletion');
   }
 
   private async stepEmitDerivedDeletion(task: PurgeTask): Promise<void> {
     // Derived stores (chunks/embeddings/caches) delete via outbox — same
-    // durable-delivery guarantee as every other fact.
-    await this.db.withOrg(task.organizationId, async (tx) => {
-      await recordOutboxEvent(tx, {
-        aggregateType: task.scopeType,
-        aggregateId: task.scopeId,
-        organizationId: task.organizationId,
-        eventType: task.scopeType === 'conversation' ? 'conversation.purged' : 'artifact.purged',
-        partitionKey: task.scopeId,
-        payload: { scope_type: task.scopeType, scope_id: task.scopeId, reason: task.reason },
-      });
+    // durable-delivery guarantee as every other fact (invariant 7: the outbox
+    // write happens in the same unit of work as the fact it announces, owned
+    // by the repository implementation).
+    await this.purgeSteps.emitDerivedDeletion({
+      orgId: task.organizationId,
+      scopeType: task.scopeType,
+      scopeId: task.scopeId,
+      reason: task.reason,
     });
     await this.toStep(task, 'purge_objects');
   }
@@ -363,43 +252,15 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   private static readonly OBJECT_BATCH = 100;
 
   private async stepPurgeObjects(task: PurgeTask): Promise<void> {
-    const rows = await this.db.withOrg(task.organizationId, async (tx) => {
-      if (task.scopeType === 'artifact') {
-        return tx
-          .select({ id: artifacts.id, objectKey: artifacts.objectKey })
-          .from(artifacts)
-          .where(and(eq(artifacts.id, task.scopeId), eq(artifacts.organizationId, task.organizationId), inArray(artifacts.state, ['active', 'retiring'])))
-          .limit(RetentionPurgeService.OBJECT_BATCH);
-      }
-      // Conversation scope: ONLY artifacts bound to THIS conversation via its
-      // runs (run_events / checkpoints / tool outcomes). The former query
-      // selected every org-wide TRANSCRIPT artifact — a cross-conversation
-      // destructive bug.
-      return tx
-        .select({ id: artifacts.id, objectKey: artifacts.objectKey })
-        .from(artifacts)
-        .where(
-          and(
-            eq(artifacts.organizationId, task.organizationId),
-            inArray(artifacts.state, ['active', 'retiring']),
-            sql`${artifacts.id} in (
-              select re.artifact_id from run_events re join runs r on r.id = re.run_id where r.conversation_id = ${task.scopeId}::uuid
-              union
-              select c.artifact_id from checkpoints c join runs r on r.id = c.run_id where r.conversation_id = ${task.scopeId}::uuid
-              union
-              select te.result_artifact_id from tool_effects te join runs r on r.id = te.run_id where r.conversation_id = ${task.scopeId}::uuid
-            )`,
-          ),
-        )
-        .limit(RetentionPurgeService.OBJECT_BATCH);
+    const rows = await this.purgeSteps.listPurgeableObjects({
+      orgId: task.organizationId,
+      scopeType: task.scopeType as 'conversation' | 'artifact',
+      scopeId: task.scopeId,
+      limit: RetentionPurgeService.OBJECT_BATCH,
     });
-    const deleted: string[] = [];
     for (const row of rows) {
       await this.storage.deleteObject(row.objectKey);
-      deleted.push(row.id);
-      await this.db.withBypass(async (tx) => {
-        await tx.update(artifacts).set({ state: 'purged', updatedAt: new Date().toISOString() }).where(eq(artifacts.id, row.id));
-      });
+      await this.purgeSteps.markObjectPurged(row.id);
     }
     if (rows.length === RetentionPurgeService.OBJECT_BATCH) {
       // Batch drained — leave the step at purge_objects; the next tick
@@ -407,37 +268,25 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
       // longer match the state filter).
       return;
     }
-    await this.toStep(task, 'purge_content', { objects_purged: deleted.length });
+    await this.toStep(task, 'purge_content', { objects_purged: rows.length });
   }
 
   private async stepPurgeContent(task: PurgeTask): Promise<void> {
     if (task.scopeType === 'conversation') {
       // Relational content per policy: messages purged (transcript data),
       // runs kept as redacted skeletons for billing/audit explainability.
-      await this.db.withOrg(task.organizationId, async (tx) => {
-        await tx.delete(messages).where(and(eq(messages.conversationId, task.scopeId), eq(messages.organizationId, task.organizationId)));
-        await tx
-          .update(memoryItems)
-          .set({ deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-          .where(and(eq(memoryItems.scopeId, task.scopeId), eq(memoryItems.scopeType, 'conversation')));
-      });
+      await this.purgeSteps.purgeConversationContent(task.organizationId, task.scopeId);
     }
     // artifact scope: no relational content beyond the artifact row itself.
     await this.toStep(task, 'tombstone');
   }
 
   private async stepTombstone(task: PurgeTask): Promise<void> {
-    await this.db.withBypass(async (tx) => {
-      await tx
-        .insert(tombstones)
-        .values({
-          id: uuidv7(),
-          organizationId: task.organizationId,
-          resourceType: task.scopeType,
-          resourceId: task.scopeId,
-          reason: task.reason,
-        })
-        .onConflictDoNothing();
+    await this.purgeSteps.writeTombstone({
+      orgId: task.organizationId,
+      scopeType: task.scopeType,
+      scopeId: task.scopeId,
+      reason: task.reason,
     });
     await this.toStep(task, 'done', { purged_at: new Date().toISOString() });
     await this.audit.add({
@@ -454,8 +303,7 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
   async getPurgeTask(orgId: string, taskId: string): Promise<PurgeTask | null> {
     assertUuid(orgId, 'orgId');
     assertUuid(taskId, 'taskId');
-    const rows = await this.db.withOrg(orgId, (tx) => tx.select().from(purgeTasks).where(eq(purgeTasks.id, taskId)).limit(1));
-    return rows[0] ?? null;
+    return this.purgeTasks.getPurgeTask(orgId, taskId);
   }
 
   // ── Tombstones (9.8) ────────────────────────────────────────────────────
@@ -465,11 +313,9 @@ export class RetentionPurgeService implements OnModuleInit, OnModuleDestroy {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resourceId)) {
       return; // non-uuid ids can never be tombstoned
     }
-    const rows = await this.db.withBypass((tx) =>
-      tx.select().from(tombstones).where(and(eq(tombstones.resourceType, resourceType), eq(tombstones.resourceId, resourceId))).limit(1),
-    );
-    if (rows.length > 0) {
-      throw new ApiError(410, ERROR_CODES.RESOURCE_PURGED, 'resource has been purged', { resource_id: resourceId, reason: rows[0].reason });
+    const tombstone = await this.purgeSteps.findTombstone(resourceType, resourceId);
+    if (tombstone) {
+      throw new ApiError(410, ERROR_CODES.RESOURCE_PURGED, 'resource has been purged', { resource_id: resourceId, reason: tombstone.reason });
     }
   }
 

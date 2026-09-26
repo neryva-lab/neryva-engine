@@ -100,19 +100,28 @@ if [[ "$PROD_LIST" == *",${TARGET_DB},"* && -z "$FORCE" ]]; then
   exit 1
 fi
 
-# Warn (but allow) when the dump dir name suggests a different source DB.
-DUMP_BASENAME="$(basename "$DUMP_DIR")"
-if [[ "$DUMP_BASENAME" == mongo-*-* ]]; then
-  SOURCE_DB="$(printf '%s' "$DUMP_BASENAME" | sed -E 's#^mongo-(.+)-[0-9]{8}T[0-9]{6}Z$#\1#')"
-  if [[ "$SOURCE_DB" != "$DUMP_BASENAME" && "$SOURCE_DB" != "$TARGET_DB" ]]; then
-    echo "warning: dump dir suggests source database '${SOURCE_DB}' but target is '${TARGET_DB}'" >&2
-  fi
+# --- source database --------------------------------------------------------
+# mongodump --out writes <DUMP_DIR>/<sourcedb>/*.bson. mongorestore restores
+# into the database names from the DUMP DIRECTORY STRUCTURE — the database
+# in the URI is IGNORED for directory restores. Restoring without an
+# explicit namespace remap would silently write back into the SOURCE
+# database (potentially production). Derive the source DB from the dump
+# structure and remap with --nsFrom/--nsTo when it differs from the target.
+mapfile -t DB_DIRS < <(find "$DUMP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+if [[ "${#DB_DIRS[@]}" -ne 1 ]]; then
+  echo "error: expected exactly one database directory under ${DUMP_DIR}, found ${#DB_DIRS[@]}" >&2
+  exit 1
+fi
+DUMP_SOURCE_DB="${DB_DIRS[0]}"
+if [[ "$DUMP_SOURCE_DB" != "$TARGET_DB" ]]; then
+  echo "warning: dump holds database '${DUMP_SOURCE_DB}' but target is '${TARGET_DB}'" >&2
+  echo "         namespaces will be remapped ${DUMP_SOURCE_DB}.* -> ${TARGET_DB}.*" >&2
 fi
 
 # --- confirmation -----------------------------------------------------------
 if [[ -z "$ASSUME_YES" ]]; then
   echo "About to restore:"
-  echo "  dump dir: ${DUMP_DIR}"
+  echo "  dump dir: ${DUMP_DIR}  (source db: ${DUMP_SOURCE_DB})"
   echo "  target:   ${TARGET_DB}"
   echo ""
   echo "This will OVERWRITE data in '${TARGET_DB}' (--drop is used)."
@@ -125,6 +134,12 @@ else
   echo "==> --yes given: restoring ${DUMP_DIR} into '${TARGET_DB}'"
 fi
 
-mongorestore --uri="$MONGO_URL" --drop "$DUMP_DIR"
+if [[ "$DUMP_SOURCE_DB" == "$TARGET_DB" ]]; then
+  mongorestore --uri="$MONGO_URL" --drop "$DUMP_DIR"
+else
+  mongorestore --uri="$MONGO_URL" --drop \
+    --nsFrom="${DUMP_SOURCE_DB}.*" --nsTo="${TARGET_DB}.*" \
+    "$DUMP_DIR"
+fi
 
 echo "==> restore complete into '${TARGET_DB}'"

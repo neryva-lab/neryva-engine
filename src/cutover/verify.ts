@@ -49,7 +49,7 @@ async function* streamPgRows(
   let offset = 0;
   for (;;) {
     const rows = await pg.execute(
-      `SELECT * FROM ${mapping.pgQuoted} ORDER BY ${mapping.pkColumn} LIMIT $1 OFFSET $2`,
+      `SELECT * FROM ${mapping.pgQuoted} ORDER BY "${mapping.pkColumn.replace(/"/g, '""')}" LIMIT $1 OFFSET $2`,
       [batchSize, offset],
     );
     if (rows.length === 0) break;

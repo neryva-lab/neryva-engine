@@ -168,8 +168,11 @@ export function mongoDocToPgRow(
         row[key] = fromBinaryUuid(value, key);
         break;
       case 'timestamp':
-        // drizzle `mode: 'string'` columns expect ISO strings.
-        row[key] = value === null || value === undefined ? null : String(value);
+        // Normalize to ISO-8601: the mongo side may hold ISO strings (written
+        // by pgRowToMongoDoc) or BSON Dates (written by the app lane).
+        // String(BSON Date) is NOT ISO ("Sat Sep 27 ..."), so normalize
+        // explicitly — drizzle `mode: 'string'` columns expect ISO strings.
+        row[key] = toIsoString(value);
         break;
       case 'numeric':
         row[key] = value === null || value === undefined ? null : String(value);

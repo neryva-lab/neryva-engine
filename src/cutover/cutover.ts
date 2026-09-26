@@ -104,7 +104,7 @@ async function copyPgToMongo(
 
   for (;;) {
     const rows = await pg.execute(
-      `SELECT * FROM ${mapping.pgQuoted} ORDER BY ${mapping.pkColumn} LIMIT $1 OFFSET $2`,
+      `SELECT * FROM ${mapping.pgQuoted} ORDER BY "${mapping.pkColumn.replace(/"/g, '""')}" LIMIT $1 OFFSET $2`,
       [batchSize, offset],
     );
     if (rows.length === 0) break;
@@ -166,15 +166,19 @@ async function copyMongoToPg(
     const placeholders: string[] = [];
     for (const row of mapped) {
       const ph = columns.map((c) => {
-        values.push(row[c]);
+        // Sparse docs may lack a key present in the first row's shape;
+        // pg rejects undefined bind parameters, so normalize to null.
+        const v = row[c];
+        values.push(v === undefined ? null : v);
         return `$${values.length}`;
       });
       placeholders.push(`(${ph.join(', ')})`);
     }
     const colsQuoted = columns.map((c) => `"${c.replace(/"/g, '""')}"`).join(', ');
+    const pkQuoted = `"${mapping.pkColumn.replace(/"/g, '""')}"`;
     const res = await pg.query(
       `INSERT INTO ${mapping.pgQuoted} (${colsQuoted}) VALUES ${placeholders.join(', ')} ` +
-        `ON CONFLICT (${mapping.pkColumn}) DO NOTHING`,
+        `ON CONFLICT (${pkQuoted}) DO NOTHING`,
       values,
     );
     const inserted = res.rowCount ?? 0;
